@@ -126,14 +126,13 @@ class _ChatScreenState extends State<ChatScreen> {
     if (_isUploading) return;
 
     try {
-      final result = await FilePicker.pickFiles(
+      final files = await FilePicker.pickFiles(
         type: FileType.any,
-        allowMultiple: false,
       );
 
-      if (result == null || result.files.single.path == null) return;
+      if (files.isEmpty || files.first.path == null) return;
 
-      final pickedFile = result.files.single;
+      final pickedFile = files.first;
       final file = File(pickedFile.path!);
       final fileName = pickedFile.name;
       final fileSize = _formatFileSize(pickedFile.size);
