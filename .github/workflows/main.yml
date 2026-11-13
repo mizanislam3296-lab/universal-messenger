@@ -45,8 +45,6 @@ jobs:
                       shutil.copy2(src, "lib_clean/screens/verify_email_screen.dart")
                   elif "home" in norm:
                       shutil.copy2(src, "lib_clean/screens/home_screen.dart")
-          print("Found in lib_clean:", os.listdir("lib_clean"))
-          print("Found in screens:", os.listdir("lib_clean/screens"))
           for req in ["lib_clean/main.dart", "lib_clean/screens/auth_screen.dart", "lib_clean/screens/verify_email_screen.dart", "lib_clean/screens/home_screen.dart"]:
               if not os.path.exists(req):
                   raise SystemExit("MISSING FILE: " + req)
@@ -62,7 +60,9 @@ jobs:
           '
           mv lib_clean lib
 
-      - name: Configure Firebase & Universal Android Support
+      - name: Configure Firebase, Release Signing & Android Support
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
         run: |
           mkdir -p android/app
           if [ -f "google-services.json" ]; then
@@ -73,8 +73,23 @@ jobs:
             exit 1
           fi
 
+          if [ -n "$KEYSTORE_BASE64" ]; then
+            echo "$KEYSTORE_BASE64" | base64 -d > android/app/release.jks
+          else
+            keytool -genkey -v -keystore android/app/release.jks -keyalg RSA -keysize 2048 -validity 10000 -alias messenger_key -storepass "Messenger@2026" -keypass "Messenger@2026" -dname "CN=Universal Messenger, OU=Mobile, O=Universal, L=Dhaka, S=Dhaka, C=BD"
+          fi
+
           python3 -c '
-          import os
+          import os, shutil
+
+          for lang in ["kotlin", "java"]:
+              base = f"android/app/src/main/{lang}"
+              if os.path.exists(base):
+                  shutil.rmtree(base)
+          target_dir = "android/app/src/main/kotlin/com/universal/messenger"
+          os.makedirs(target_dir, exist_ok=True)
+          with open(f"{target_dir}/MainActivity.kt", "w") as f:
+              f.write("package com.universal.messenger\n\nimport io.flutter.embedding.android.FlutterActivity\n\nclass MainActivity : FlutterActivity()\n")
 
           if os.path.exists("android/settings.gradle.kts"):
               with open("android/settings.gradle.kts", "r") as f:
@@ -101,6 +116,17 @@ jobs:
               with open("android/app/build.gradle.kts", "r") as f:
                   content = f.read()
               content = content.replace("com.universal.universal_messenger", "com.universal.messenger")
+              signing_block = """    signingConfigs {
+                  create("release") {
+                      storeFile = file("release.jks")
+                      storePassword = "Messenger@2026"
+                      keyAlias = "messenger_key"
+                      keyPassword = "Messenger@2026"
+                  }
+              }
+              buildTypes {"""
+              content = content.replace("    buildTypes {", signing_block, 1)
+              content = content.replace("signingConfigs.getByName(\"debug\")", "signingConfigs.getByName(\"release\")")
               lines = content.splitlines()
               out = []
               for l in lines:
@@ -117,6 +143,17 @@ jobs:
               with open("android/app/build.gradle", "r") as f:
                   content = f.read()
               content = content.replace("com.universal.universal_messenger", "com.universal.messenger")
+              signing_block = """    signingConfigs {
+                  release {
+                      storeFile file("release.jks")
+                      storePassword "Messenger@2026"
+                      keyAlias "messenger_key"
+                      keyPassword "Messenger@2026"
+                  }
+              }
+              buildTypes {"""
+              content = content.replace("    buildTypes {", signing_block, 1)
+              content = content.replace("signingConfigs.debug", "signingConfigs.release")
               lines = content.splitlines()
               out = []
               for l in lines:
