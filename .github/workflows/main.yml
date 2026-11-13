@@ -24,9 +24,26 @@ jobs:
         with:
           channel: 'stable'
 
-      - name: Generate Android Platform Files
+      - name: Generate Android Platform Files Safely
         run: |
+          cp -r lib lib_backup
           flutter create . --platforms=android --org com.universal --project-name universal_messenger
+          rm -rf lib test
+          python3 -c '
+          import os, shutil
+          os.makedirs("lib", exist_ok=True)
+          for root, dirs, files in os.walk("lib_backup"):
+              rel_dir = os.path.relpath(root, "lib_backup")
+              clean_rel = "/".join(p.strip() for p in rel_dir.split("/")) if rel_dir != "." else ""
+              target_dir = os.path.join("lib", clean_rel) if clean_rel else "lib"
+              os.makedirs(target_dir, exist_ok=True)
+              for f in files:
+                  clean_f = f.strip()
+                  if not clean_f.endswith(".dart"):
+                      clean_f += ".dart"
+                  shutil.copy2(os.path.join(root, f), os.path.join(target_dir, clean_f))
+          '
+          rm -rf lib_backup
 
       - name: Configure Firebase & Universal Android Support
         run: |
@@ -42,7 +59,6 @@ jobs:
           python3 -c '
           import os
 
-          # 1. Patch settings.gradle.kts or settings.gradle
           if os.path.exists("android/settings.gradle.kts"):
               with open("android/settings.gradle.kts", "r") as f:
                   lines = f.read().splitlines()
@@ -64,7 +80,6 @@ jobs:
               with open("android/settings.gradle", "w") as f:
                   f.write("\n".join(out) + "\n")
 
-          # 2. Patch app/build.gradle.kts or app/build.gradle
           if os.path.exists("android/app/build.gradle.kts"):
               with open("android/app/build.gradle.kts", "r") as f:
                   content = f.read()
@@ -98,7 +113,6 @@ jobs:
               with open("android/app/build.gradle", "w") as f:
                   f.write("\n".join(out) + "\n")
 
-          # 3. Ensure INTERNET permission in AndroidManifest.xml
           manifest_path = "android/app/src/main/AndroidManifest.xml"
           if os.path.exists(manifest_path):
               with open(manifest_path, "r") as f:
