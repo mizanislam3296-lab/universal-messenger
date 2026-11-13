@@ -135,7 +135,7 @@ class _ChatScreenState extends State<ChatScreen> {
       final pickedFile = files.first;
       final file = File(pickedFile.path!);
       final fileName = pickedFile.name;
-      final fileSize = _formatFileSize(pickedFile.size);
+      final fileSize = _formatFileSize(await file.length());
       final fileType = _detectFileType(fileName);
 
       setState(() {
