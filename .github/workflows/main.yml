@@ -32,7 +32,7 @@ jobs:
           python3 -c '
           import os, shutil
           os.makedirs("lib_clean/screens", exist_ok=True)
-          for root, dirs, files in os.walk("."):
+          for root, dirs, files in os.walk(".", topdown=False):
               if ".git" in root or "lib_clean" in root:
                   continue
               for f in files:
@@ -48,7 +48,19 @@ jobs:
                       shutil.copy2(src, "lib_clean/screens/verify_email_screen.dart")
                   elif "home" in norm:
                       shutil.copy2(src, "lib_clean/screens/home_screen.dart")
-          for req in ["lib_clean/main.dart", "lib_clean/screens/auth_screen.dart", "lib_clean/screens/verify_email_screen.dart", "lib_clean/screens/home_screen.dart"]:
+                  elif "search" in norm:
+                      shutil.copy2(src, "lib_clean/screens/search_user_screen.dart")
+                  elif "chat" in norm:
+                      shutil.copy2(src, "lib_clean/screens/chat_screen.dart")
+          req_files = [
+              "lib_clean/main.dart",
+              "lib_clean/screens/auth_screen.dart",
+              "lib_clean/screens/verify_email_screen.dart",
+              "lib_clean/screens/home_screen.dart",
+              "lib_clean/screens/search_user_screen.dart",
+              "lib_clean/screens/chat_screen.dart",
+          ]
+          for req in req_files:
               if not os.path.exists(req):
                   raise SystemExit("MISSING FILE: " + req)
           '
@@ -191,4 +203,4 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           cp build/app/outputs/flutter-apk/app-release.apk Universal-Messenger.apk
-          gh release create "v1.0.${{ github.run_number }}" Universal-Messenger.apk --title "Universal Messenger v1.0.${{ github.run_number }}" --notes "Direct APK download (No ZIP)"
+          gh release create "v2.0.${{ github.run_number }}" Universal-Messenger.apk --title "Universal Messenger v2.0.${{ github.run_number }}" --notes "Phase 2: User Search & Real-time Messaging"
