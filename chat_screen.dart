@@ -1,6 +1,10 @@
+import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:dio/dio.dart';
+import 'package:file_picker/file_picker.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 class ChatScreen extends StatefulWidget {
   final String receiverId;
@@ -19,10 +23,17 @@ class ChatScreen extends StatefulWidget {
 }
 
 class _ChatScreenState extends State<ChatScreen> {
+  static const String _cloudName = 'tcdkckrl';
+  static const String _uploadPreset = 'ml_default';
+
   final _messageController = TextEditingController();
   final _scrollController = ScrollController();
   late final String _chatId;
   late final User _currentUser;
+
+  bool _isUploading = false;
+  double _uploadProgress = 0.0;
+  String _uploadingFileName = '';
 
   @override
   void initState() {
@@ -39,27 +50,42 @@ class _ChatScreenState extends State<ChatScreen> {
     super.dispose();
   }
 
-  Future<void> _sendMessage() async {
-    final text = _messageController.text.trim();
-    if (text.isEmpty) return;
+  String _formatFileSize(int bytes) {
+    if (bytes < 1024) return '$bytes B';
+    if (bytes < 1024 * 1024) return '${(bytes / 1024).toStringAsFixed(1)} KB';
+    if (bytes < 1024 * 1024 * 1024) {
+      return '${(bytes / (1024 * 1024)).toStringAsFixed(2)} MB';
+    }
+    return '${(bytes / (1024 * 1024 * 1024)).toStringAsFixed(2)} GB';
+  }
 
-    _messageController.clear();
+  String _detectFileType(String fileName) {
+    final lower = fileName.toLowerCase();
+    if (lower.endsWith('.jpg') ||
+        lower.endsWith('.jpeg') ||
+        lower.endsWith('.png') ||
+        lower.endsWith('.gif') ||
+        lower.endsWith('.webp')) {
+      return 'image';
+    }
+    if (lower.endsWith('.mp4') ||
+        lower.endsWith('.mkv') ||
+        lower.endsWith('.mov') ||
+        lower.endsWith('.avi')) {
+      return 'video';
+    }
+    if (lower.endsWith('.pdf')) {
+      return 'pdf';
+    }
+    return 'file';
+  }
+
+  Future<void> _updateChatSummary(String lastMessageText) async {
     final now = FieldValue.serverTimestamp();
-
-    final chatRef = FirebaseFirestore.instance.collection('chats').doc(_chatId);
-
-    await chatRef.collection('messages').add({
-      'senderId': _currentUser.uid,
-      'receiverId': widget.receiverId,
-      'text': text,
-      'type': 'text',
-      'timestamp': now,
-    });
-
-    await chatRef.set({
+    await FirebaseFirestore.instance.collection('chats').doc(_chatId).set({
       'chatId': _chatId,
       'participants': [_currentUser.uid, widget.receiverId],
-      'lastMessage': text,
+      'lastMessage': lastMessageText,
       'lastMessageTime': now,
       'users': {
         _currentUser.uid: {
@@ -74,6 +100,129 @@ class _ChatScreenState extends State<ChatScreen> {
     }, SetOptions(merge: true));
   }
 
+  Future<void> _sendMessage() async {
+    final text = _messageController.text.trim();
+    if (text.isEmpty) return;
+
+    _messageController.clear();
+    final now = FieldValue.serverTimestamp();
+
+    await FirebaseFirestore.instance
+        .collection('chats')
+        .doc(_chatId)
+        .collection('messages')
+        .add({
+      'senderId': _currentUser.uid,
+      'receiverId': widget.receiverId,
+      'text': text,
+      'type': 'text',
+      'timestamp': now,
+    });
+
+    await _updateChatSummary(text);
+  }
+
+  Future<void> _pickAndSendFile() async {
+    if (_isUploading) return;
+
+    try {
+      final result = await FilePicker.platform.pickFiles(
+        type: FileType.any,
+        allowMultiple: false,
+      );
+
+      if (result == null || result.files.single.path == null) return;
+
+      final pickedFile = result.files.single;
+      final file = File(pickedFile.path!);
+      final fileName = pickedFile.name;
+      final fileSize = _formatFileSize(pickedFile.size);
+      final fileType = _detectFileType(fileName);
+
+      setState(() {
+        _isUploading = true;
+        _uploadProgress = 0.0;
+        _uploadingFileName = fileName;
+      });
+
+      final formData = FormData.fromMap({
+        'file': await MultipartFile.fromFile(file.path, filename: fileName),
+        'upload_preset': _uploadPreset,
+        'folder': 'universal_messenger/$_chatId',
+      });
+
+      final response = await Dio().post(
+        'https://api.cloudinary.com/v1_1/$_cloudName/auto/upload',
+        data: formData,
+        onSendProgress: (sent, total) {
+          if (total > 0 && mounted) {
+            setState(() {
+              _uploadProgress = sent / total;
+            });
+          }
+        },
+      );
+
+      final downloadUrl = response.data['secure_url']?.toString() ?? '';
+      if (downloadUrl.isEmpty) {
+        throw Exception('সার্ভার থেকে ফাইল লিংক পাওয়া যায়নি।');
+      }
+
+      await FirebaseFirestore.instance
+          .collection('chats')
+          .doc(_chatId)
+          .collection('messages')
+          .add({
+        'senderId': _currentUser.uid,
+        'receiverId': widget.receiverId,
+        'text': fileName,
+        'type': fileType,
+        'fileUrl': downloadUrl,
+        'fileName': fileName,
+        'fileSize': fileSize,
+        'timestamp': FieldValue.serverTimestamp(),
+      });
+
+      await _updateChatSummary('📎 $fileName');
+    } on DioException catch (e) {
+      if (!mounted) return;
+      final serverMsg = e.response?.data?.toString() ?? e.message ?? 'নেটওয়ার্ক ত্রুটি';
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('আপলোড ব্যর্থ: $serverMsg'),
+          backgroundColor: Colors.red.shade700,
+        ),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('ফাইল পাঠাতে সমস্যা হয়েছে: $e'),
+          backgroundColor: Colors.red.shade700,
+        ),
+      );
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isUploading = false;
+          _uploadProgress = 0.0;
+          _uploadingFileName = '';
+        });
+      }
+    }
+  }
+
+  Future<void> _openFileUrl(String url) async {
+    final uri = Uri.tryParse(url);
+    if (uri == null) return;
+    final launched = await launchUrl(uri, mode: LaunchMode.externalApplication);
+    if (!launched && mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('ফাইলটি ওপেন করা যায়নি।')),
+      );
+    }
+  }
+
   String _formatTime(Timestamp? timestamp) {
     if (timestamp == null) return '...';
     final dt = timestamp.toDate();
@@ -81,6 +230,117 @@ class _ChatScreenState extends State<ChatScreen> {
     final min = dt.minute.toString().padLeft(2, '0');
     final period = dt.hour >= 12 ? 'PM' : 'AM';
     return '$hour:$min $period';
+  }
+
+  Widget _buildMessageContent(Map<String, dynamic> data) {
+    final type = (data['type'] ?? 'text').toString();
+    final text = (data['text'] ?? '').toString();
+    final fileUrl = (data['fileUrl'] ?? '').toString();
+    final fileName = (data['fileName'] ?? text).toString();
+    final fileSize = (data['fileSize'] ?? '').toString();
+
+    if (type == 'text' || fileUrl.isEmpty) {
+      return Text(
+        text,
+        style: const TextStyle(fontSize: 15, color: Colors.black87),
+      );
+    }
+
+    if (type == 'image') {
+      return GestureDetector(
+        onTap: () => _openFileUrl(fileUrl),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            ClipRRect(
+              borderRadius: BorderRadius.circular(10),
+              child: Image.network(
+                fileUrl,
+                width: 220,
+                height: 220,
+                fit: BoxFit.cover,
+                loadingBuilder: (context, child, progress) {
+                  if (progress == null) return child;
+                  return Container(
+                    width: 220,
+                    height: 160,
+                    color: Colors.grey.shade200,
+                    child: const Center(child: CircularProgressIndicator()),
+                  );
+                },
+                errorBuilder: (_, __, ___) => const Padding(
+                  padding: EdgeInsets.all(12),
+                  child: Icon(Icons.broken_image, size: 40),
+                ),
+              ),
+            ),
+            if (fileSize.isNotEmpty) ...[
+              const SizedBox(height: 4),
+              Text(
+                fileSize,
+                style: TextStyle(fontSize: 11, color: Colors.grey.shade700),
+              ),
+            ],
+          ],
+        ),
+      );
+    }
+
+    IconData iconData = Icons.insert_drive_file;
+    Color iconColor = const Color(0xFF008069);
+    if (type == 'pdf') {
+      iconData = Icons.picture_as_pdf;
+      iconColor = Colors.red.shade700;
+    } else if (type == 'video') {
+      iconData = Icons.video_file;
+      iconColor = Colors.deepPurple;
+    }
+
+    return InkWell(
+      onTap: () => _openFileUrl(fileUrl),
+      borderRadius: BorderRadius.circular(10),
+      child: Container(
+        padding: const EdgeInsets.all(10),
+        decoration: BoxDecoration(
+          color: Colors.black.withOpacity(0.05),
+          borderRadius: BorderRadius.circular(10),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            CircleAvatar(
+              backgroundColor: iconColor.withOpacity(0.15),
+              child: Icon(iconData, color: iconColor),
+            ),
+            const SizedBox(width: 10),
+            Flexible(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    fileName,
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      fontWeight: FontWeight.w600,
+                      fontSize: 14,
+                      color: Colors.black87,
+                    ),
+                  ),
+                  const SizedBox(height: 2),
+                  Text(
+                    '${fileSize.isNotEmpty ? '$fileSize • ' : ''}ট্যাপ করে খুলুন',
+                    style: TextStyle(fontSize: 11, color: Colors.grey.shade700),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(width: 6),
+            Icon(Icons.download_rounded, size: 20, color: iconColor),
+          ],
+        ),
+      ),
+    );
   }
 
   @override
@@ -125,6 +385,46 @@ class _ChatScreenState extends State<ChatScreen> {
       ),
       body: Column(
         children: [
+          if (_isUploading)
+            Container(
+              color: Colors.teal.shade50,
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      Expanded(
+                        child: Text(
+                          'আপলোড হচ্ছে: $_uploadingFileName',
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                            fontSize: 12,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                      ),
+                      Text(
+                        '${(_uploadProgress * 100).toStringAsFixed(0)}%',
+                        style: const TextStyle(
+                          fontSize: 12,
+                          fontWeight: FontWeight.bold,
+                          color: Color(0xFF008069),
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 6),
+                  LinearProgressIndicator(
+                    value: _uploadProgress > 0 ? _uploadProgress : null,
+                    backgroundColor: Colors.teal.shade100,
+                    color: const Color(0xFF008069),
+                  ),
+                ],
+              ),
+            ),
           Expanded(
             child: StreamBuilder<QuerySnapshot>(
               stream: FirebaseFirestore.instance
@@ -158,16 +458,15 @@ class _ChatScreenState extends State<ChatScreen> {
                   itemBuilder: (context, index) {
                     final data = messages[index].data() as Map<String, dynamic>;
                     final isMe = data['senderId'] == _currentUser.uid;
-                    final text = (data['text'] ?? '').toString();
                     final time = _formatTime(data['timestamp'] as Timestamp?);
 
                     return Align(
                       alignment: isMe ? Alignment.centerRight : Alignment.centerLeft,
                       child: Container(
                         margin: const EdgeInsets.symmetric(vertical: 4),
-                        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 9),
+                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
                         constraints: BoxConstraints(
-                          maxWidth: MediaQuery.of(context).size.width * 0.75,
+                          maxWidth: MediaQuery.of(context).size.width * 0.78,
                         ),
                         decoration: BoxDecoration(
                           color: isMe ? const Color(0xFFD9FDD3) : Colors.white,
@@ -188,11 +487,8 @@ class _ChatScreenState extends State<ChatScreen> {
                         child: Column(
                           crossAxisAlignment: CrossAxisAlignment.end,
                           children: [
-                            Text(
-                              text,
-                              style: const TextStyle(fontSize: 15, color: Colors.black87),
-                            ),
-                            const SizedBox(height: 3),
+                            _buildMessageContent(data),
+                            const SizedBox(height: 4),
                             Text(
                               time,
                               style: TextStyle(fontSize: 10, color: Colors.grey.shade600),
@@ -212,6 +508,11 @@ class _ChatScreenState extends State<ChatScreen> {
               color: Colors.grey.shade100,
               child: Row(
                 children: [
+                  IconButton(
+                    icon: const Icon(Icons.attach_file, color: Color(0xFF008069)),
+                    tooltip: 'ফাইল, ভিডিও বা PDF পাঠান',
+                    onPressed: _isUploading ? null : _pickAndSendFile,
+                  ),
                   Expanded(
                     child: TextField(
                       controller: _messageController,
