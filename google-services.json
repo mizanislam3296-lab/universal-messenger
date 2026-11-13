@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "406470321259",
+    "project_id": "nassage-7684a",
+    "storage_bucket": "nassage-7684a.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:406470321259:android:ba63107b19106e139d3d2e",
+        "android_client_info": {
+          "package_name": "com.universal.messenger"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyDZACHaqJmRbliAiODhxLekMwP5vwqNLTw"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
