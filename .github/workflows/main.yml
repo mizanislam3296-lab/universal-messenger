@@ -24,23 +24,32 @@ jobs:
         with:
           channel: 'stable'
 
-      - name: Merge & Prepare Dart Files Safely
+      - name: Auto-Fix & Organize Dart Files
         run: |
           python3 -c '
           import os, shutil
-          os.makedirs("lib_backup", exist_ok=True)
-          for entry in os.listdir("."):
-              if os.path.isdir(entry) and entry.strip() == "lib":
-                  for root, dirs, files in os.walk(entry):
-                      rel_dir = os.path.relpath(root, entry)
-                      clean_rel = "/".join(p.strip() for p in rel_dir.split("/")) if rel_dir != "." else ""
-                      target_dir = os.path.join("lib_backup", clean_rel) if clean_rel else "lib_backup"
-                      os.makedirs(target_dir, exist_ok=True)
-                      for f in files:
-                          clean_f = f.strip()
-                          if not clean_f.endswith(".dart"):
-                              clean_f += ".dart"
-                          shutil.copy2(os.path.join(root, f), os.path.join(target_dir, clean_f))
+          os.makedirs("lib_clean/screens", exist_ok=True)
+          for root, dirs, files in os.walk("."):
+              if ".git" in root or "lib_clean" in root:
+                  continue
+              for f in files:
+                  norm = f.replace(" ", "").lower()
+                  if norm.endswith(".yml") or norm.endswith(".yaml") or norm.endswith(".json") or norm.endswith(".md"):
+                      continue
+                  src = os.path.join(root, f)
+                  if "main" in norm and ("dart" in norm or root.strip().endswith("lib")):
+                      shutil.copy2(src, "lib_clean/main.dart")
+                  elif "auth" in norm:
+                      shutil.copy2(src, "lib_clean/screens/auth_screen.dart")
+                  elif "verify" in norm:
+                      shutil.copy2(src, "lib_clean/screens/verify_email_screen.dart")
+                  elif "home" in norm:
+                      shutil.copy2(src, "lib_clean/screens/home_screen.dart")
+          print("Found in lib_clean:", os.listdir("lib_clean"))
+          print("Found in screens:", os.listdir("lib_clean/screens"))
+          for req in ["lib_clean/main.dart", "lib_clean/screens/auth_screen.dart", "lib_clean/screens/verify_email_screen.dart", "lib_clean/screens/home_screen.dart"]:
+              if not os.path.exists(req):
+                  raise SystemExit("MISSING FILE: " + req)
           '
           flutter create . --platforms=android --org com.universal --project-name universal_messenger
           python3 -c '
@@ -51,7 +60,7 @@ jobs:
           if os.path.exists("test"):
               shutil.rmtree("test")
           '
-          mv lib_backup lib
+          mv lib_clean lib
 
       - name: Configure Firebase & Universal Android Support
         run: |
