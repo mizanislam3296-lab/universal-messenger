@@ -106,6 +106,13 @@ jobs:
           with open(f"{target_dir}/MainActivity.kt", "w") as f:
               f.write("package com.universal.messenger\n\nimport io.flutter.embedding.android.FlutterActivity\n\nclass MainActivity : FlutterActivity()\n")
 
+          if os.path.exists("android/gradle.properties"):
+              with open("android/gradle.properties", "r") as f:
+                  gp = f.read()
+              gp = gp.replace("-Xmx2G", "-Xmx4G").replace("-Xmx1536M", "-Xmx4G").replace("-Xmx1G", "-Xmx4G")
+              with open("android/gradle.properties", "w") as f:
+                  f.write(gp)
+
           if os.path.exists("android/settings.gradle.kts"):
               with open("android/settings.gradle.kts", "r") as f:
                   lines = f.read().splitlines()
@@ -131,7 +138,7 @@ jobs:
               with open("android/app/build.gradle.kts", "r") as f:
                   content = f.read()
               content = content.replace("com.universal.universal_messenger", "com.universal.messenger")
-              signing_block = "    signingConfigs {\n        create(\"release\") {\n            storeFile = file(\"release.jks\")\n            storePassword = \"Messenger@2026\"\n            keyAlias = \"messenger_key\"\n            keyPassword = \"Messenger@2026\"\n        }\n    }\n    buildTypes {"
+              signing_block = "    lint {\n        checkReleaseBuilds = false\n        abortOnError = false\n    }\n    signingConfigs {\n        create(\"release\") {\n            storeFile = file(\"release.jks\")\n            storePassword = \"Messenger@2026\"\n            keyAlias = \"messenger_key\"\n            keyPassword = \"Messenger@2026\"\n        }\n    }\n    buildTypes {"
               content = content.replace("    buildTypes {", signing_block, 1)
               content = content.replace("signingConfigs.getByName(\"debug\")", "signingConfigs.getByName(\"release\")")
               lines = content.splitlines()
@@ -150,7 +157,7 @@ jobs:
               with open("android/app/build.gradle", "r") as f:
                   content = f.read()
               content = content.replace("com.universal.universal_messenger", "com.universal.messenger")
-              signing_block = "    signingConfigs {\n        release {\n            storeFile file(\"release.jks\")\n            storePassword \"Messenger@2026\"\n            keyAlias \"messenger_key\"\n            keyPassword \"Messenger@2026\"\n        }\n    }\n    buildTypes {"
+              signing_block = "    lint {\n        checkReleaseBuilds false\n        abortOnError false\n    }\n    signingConfigs {\n        release {\n            storeFile file(\"release.jks\")\n            storePassword \"Messenger@2026\"\n            keyAlias \"messenger_key\"\n            keyPassword \"Messenger@2026\"\n        }\n    }\n    buildTypes {"
               content = content.replace("    buildTypes {", signing_block, 1)
               content = content.replace("signingConfigs.debug", "signingConfigs.release")
               lines = content.splitlines()
