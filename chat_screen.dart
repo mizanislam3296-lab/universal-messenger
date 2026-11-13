@@ -126,7 +126,7 @@ class _ChatScreenState extends State<ChatScreen> {
     if (_isUploading) return;
 
     try {
-      final result = await FilePicker.platform.pickFiles(
+      final result = await FilePicker.pickFiles(
         type: FileType.any,
         allowMultiple: false,
       );
