@@ -188,12 +188,23 @@ jobs:
                   m = f.read()
               if "android.permission.INTERNET" not in m:
                   m = m.replace("<application", "<uses-permission android:name=\"android.permission.INTERNET\"/>\n    <application", 1)
-                  with open(manifest_path, "w") as f:
-                      f.write(m)
+              if "<queries>" not in m:
+                  queries_block = """    <queries>
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <data android:scheme="https" />
+        </intent>
+    </queries>
+    <application"""
+                  m = m.replace("<application", queries_block, 1)
+              with open(manifest_path, "w") as f:
+                  f.write(m)
           '
 
-      - name: Get Dependencies
-        run: flutter pub get
+      - name: Install File Sharing Packages & Dependencies
+        run: |
+          flutter pub add dio file_picker url_launcher
+          flutter pub get
 
       - name: Build Release APK
         run: flutter build apk --release
@@ -203,4 +214,4 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           cp build/app/outputs/flutter-apk/app-release.apk Universal-Messenger.apk
-          gh release create "v2.0.${{ github.run_number }}" Universal-Messenger.apk --title "Universal Messenger v2.0.${{ github.run_number }}" --notes "Phase 2: User Search & Real-time Messaging"
+          gh release create "v3.0.${{ github.run_number }}" Universal-Messenger.apk --title "Universal Messenger v3.0.${{ github.run_number }}" --notes "Phase 3A: Free Cloud File, PDF & Video Sharing"
