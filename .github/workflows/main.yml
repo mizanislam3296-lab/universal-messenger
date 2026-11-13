@@ -131,15 +131,7 @@ jobs:
               with open("android/app/build.gradle.kts", "r") as f:
                   content = f.read()
               content = content.replace("com.universal.universal_messenger", "com.universal.messenger")
-              signing_block = """    signingConfigs {
-                  create("release") {
-                      storeFile = file("release.jks")
-                      storePassword = "Messenger@2026"
-                      keyAlias = "messenger_key"
-                      keyPassword = "Messenger@2026"
-                  }
-              }
-              buildTypes {"""
+              signing_block = "    signingConfigs {\n        create(\"release\") {\n            storeFile = file(\"release.jks\")\n            storePassword = \"Messenger@2026\"\n            keyAlias = \"messenger_key\"\n            keyPassword = \"Messenger@2026\"\n        }\n    }\n    buildTypes {"
               content = content.replace("    buildTypes {", signing_block, 1)
               content = content.replace("signingConfigs.getByName(\"debug\")", "signingConfigs.getByName(\"release\")")
               lines = content.splitlines()
@@ -158,15 +150,7 @@ jobs:
               with open("android/app/build.gradle", "r") as f:
                   content = f.read()
               content = content.replace("com.universal.universal_messenger", "com.universal.messenger")
-              signing_block = """    signingConfigs {
-                  release {
-                      storeFile file("release.jks")
-                      storePassword "Messenger@2026"
-                      keyAlias "messenger_key"
-                      keyPassword "Messenger@2026"
-                  }
-              }
-              buildTypes {"""
+              signing_block = "    signingConfigs {\n        release {\n            storeFile file(\"release.jks\")\n            storePassword \"Messenger@2026\"\n            keyAlias \"messenger_key\"\n            keyPassword \"Messenger@2026\"\n        }\n    }\n    buildTypes {"
               content = content.replace("    buildTypes {", signing_block, 1)
               content = content.replace("signingConfigs.debug", "signingConfigs.release")
               lines = content.splitlines()
@@ -189,13 +173,7 @@ jobs:
               if "android.permission.INTERNET" not in m:
                   m = m.replace("<application", "<uses-permission android:name=\"android.permission.INTERNET\"/>\n    <application", 1)
               if "<queries>" not in m:
-                  queries_block = """    <queries>
-        <intent>
-            <action android:name="android.intent.action.VIEW" />
-            <data android:scheme="https" />
-        </intent>
-    </queries>
-    <application"""
+                  queries_block = "    <queries>\n        <intent>\n            <action android:name=\"android.intent.action.VIEW\" />\n            <data android:scheme=\"https\" />\n        </intent>\n    </queries>\n    <application"
                   m = m.replace("<application", queries_block, 1)
               with open(manifest_path, "w") as f:
                   f.write(m)
