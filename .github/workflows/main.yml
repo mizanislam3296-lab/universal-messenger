@@ -209,6 +209,26 @@ jobs:
         run: |
           flutter pub add dio file_picker url_launcher zego_uikit_prebuilt_call
           flutter pub get
+          python3 -c '
+          import os, glob
+          pub_cache = os.path.expanduser("~/.pub-cache/hosted/pub.dev")
+          for pattern in ["*/android/build.gradle", "*/android/build.gradle.kts"]:
+              for path in glob.glob(os.path.join(pub_cache, pattern)):
+                  with open(path, "r", encoding="utf-8", errors="ignore") as f:
+                      lines = f.read().splitlines()
+                  lib_idx = -1
+                  kot_idx = -1
+                  for i, l in enumerate(lines):
+                      if "com.android.library" in l and ("apply" in l or "id" in l):
+                          lib_idx = i
+                      if ("kotlin-android" in l or "org.jetbrains.kotlin.android" in l) and ("apply" in l or "id" in l):
+                          kot_idx = i
+                  if lib_idx != -1 and kot_idx != -1 and kot_idx < lib_idx:
+                      lines[kot_idx], lines[lib_idx] = lines[lib_idx], lines[kot_idx]
+                      with open(path, "w", encoding="utf-8") as f:
+                          f.write("\n".join(lines) + "\n")
+                      print("Fixed plugin order in:", path)
+          '
 
       - name: Build Release APK
         run: flutter build apk --release
