@@ -164,67 +164,84 @@ jobs:
           flutter pub get
 
           cat << 'PYEOF' > fix_plugins.py
-          import os, re
+          import json, os, re, urllib.parse
 
-          cache = os.environ.get("PUB_CACHE") or os.path.expanduser("~/.pub-cache")
-          for root, _, files in os.walk(cache):
-              for fname in files:
-                  if fname not in ("build.gradle", "build.gradle.kts"):
-                      continue
-                  path = os.path.join(root, fname)
-                  if any(skip in path for skip in ("/example/", "/firebase_", "/cloud_firestore", "/flutter/")):
-                      continue
-                  with open(path, encoding="utf-8", errors="ignore") as f:
-                      text = f.read().lstrip("\ufeff").replace("\r\n", "\n")
-                  if not any(k in text for k in ("com.android.library", "LibraryExtension", "android {", "android{")):
-                      continue
+          roots = {os.environ.get("PUB_CACHE") or os.path.expanduser("~/.pub-cache")}
+          if os.path.exists(".dart_tool/package_config.json"):
+              with open(".dart_tool/package_config.json", encoding="utf-8") as f:
+                  cfg = json.load(f)
+              for pkg in cfg.get("packages", []):
+                  uri = pkg.get("rootUri", "")
+                  p = urllib.parse.unquote(urllib.parse.urlparse(uri).path) if uri.startswith("file://") else os.path.realpath(os.path.join(".dart_tool", uri))
+                  if os.path.exists(p):
+                      roots.add(p)
 
-                  orig = text
-                  is_kts = fname.endswith(".kts")
-                  has_kt = ("kotlin-android" in text) or ("org.jetbrains.kotlin.android" in text)
+          seen = set()
+          for base in roots:
+              if not os.path.exists(base):
+                  continue
+              for root, _, files in os.walk(base):
+                  for fname in files:
+                      if fname not in ("build.gradle", "build.gradle.kts"):
+                          continue
+                      path = os.path.realpath(os.path.join(root, fname))
+                      if path in seen or not path.endswith(("/android/build.gradle", "/android/build.gradle.kts")):
+                          continue
+                      if any(skip in path for skip in ("/example/", "/firebase_", "/cloud_firestore", "/flutter/packages/", "/flutter_tools/")):
+                          continue
+                      seen.add(path)
 
-                  bs = ""
-                  m_bs = re.search(r'(?m)^\s*buildscript\s*\{', text)
-                  if m_bs:
-                      s = m_bs.start()
-                      i = text.find("{", s)
-                      d = 0
-                      for k in range(i, len(text)):
-                          d += (1 if text[k] == "{" else (-1 if text[k] == "}" else 0))
-                          if d == 0:
-                              bs = text[s:k+1] + "\n\n"
-                              text = text[:s] + text[k+1:]
-                              break
+                      with open(path, encoding="utf-8", errors="ignore") as f:
+                          text = f.read().lstrip("\ufeff").replace("\r\n", "\n")
 
-                  text = re.sub(r'(?m)^[ \t]*apply\b.*com\.android\.library.*\n?', '', text)
-                  text = re.sub(r'(?m)^[ \t]*apply\b.*kotlin-android.*\n?', '', text)
+                      orig = text
+                      is_kts = fname.endswith(".kts")
+                      has_kt = ("kotlin-android" in text) or ("kotlin.android" in text) or ('kotlin("android")' in text) or ("kotlin('android')" in text)
 
-                  m_pl = re.search(r'(?m)^\s*plugins\s*\{', text)
-                  if m_pl:
-                      s = m_pl.start()
-                      i = text.find("{", s)
-                      d = 0
-                      for k in range(i, len(text)):
-                          d += (1 if text[k] == "{" else (-1 if text[k] == "}" else 0))
-                          if d == 0:
-                              inner = [ln.strip() for ln in text[i+1:k].splitlines() if ln.strip() and "com.android.library" not in ln and "kotlin-android" not in ln and "kotlin.android" not in ln]
-                              head = ['id("com.android.library")' if is_kts else 'id "com.android.library"']
-                              if has_kt:
-                                  head.append('id("org.jetbrains.kotlin.android")' if is_kts else 'id "kotlin-android"')
-                              pl = "plugins {\n    " + "\n    ".join(head + inner) + "\n}\n\n"
-                              text = bs + pl + (text[:s] + text[k+1:]).lstrip("\n")
-                              break
-                  elif is_kts:
-                      head = ['id("com.android.library")'] + (['id("org.jetbrains.kotlin.android")'] if has_kt else [])
-                      text = bs + "plugins {\n    " + "\n    ".join(head) + "\n}\n\n" + text.lstrip("\n")
-                  else:
-                      inj = 'apply plugin: "com.android.library"\n' + ('apply plugin: "kotlin-android"\n' if has_kt else '')
-                      text = bs + inj + "\n" + text.lstrip("\n")
+                      bs = ""
+                      m_bs = re.search(r'(?m)^\s*buildscript\s*\{', text)
+                      if m_bs:
+                          s = m_bs.start()
+                          i = text.find("{", s)
+                          d = 0
+                          for k in range(i, len(text)):
+                              d += (1 if text[k] == "{" else (-1 if text[k] == "}" else 0))
+                              if d == 0:
+                                  bs = text[s:k+1] + "\n\n"
+                                  text = text[:s] + text[k+1:]
+                                  break
 
-                  if text != orig:
-                      with open(path, "w", encoding="utf-8") as f:
-                          f.write(text)
-                      print("PATCHED:", path)
+                      text = re.sub(r'(?m)^[ \t]*(?:project\.)?apply\b.*(?:com\.android\.library|kotlin-android|kotlin\.android).*\n?', '', text)
+                      text = re.sub(r'\bflutter\.(?:compileSdkVersion|compileSdk)\b', '35', text)
+                      text = re.sub(r'\bflutter\.(?:minSdkVersion|minSdk)\b', '23', text)
+                      text = re.sub(r'\bflutter\.(?:targetSdkVersion|targetSdk)\b', '35', text)
+
+                      m_pl = re.search(r'(?m)^\s*plugins\s*\{', text)
+                      if m_pl:
+                          s = m_pl.start()
+                          i = text.find("{", s)
+                          d = 0
+                          for k in range(i, len(text)):
+                              d += (1 if text[k] == "{" else (-1 if text[k] == "}" else 0))
+                              if d == 0:
+                                  inner = [ln.strip() for ln in text[i+1:k].splitlines() if ln.strip() and not any(x in ln for x in ("com.android.library", "kotlin-android", "kotlin.android", 'kotlin("android")', "kotlin('android')"))]
+                                  head = ['id("com.android.library")' if is_kts else 'id "com.android.library"']
+                                  if has_kt:
+                                      head.append('id("org.jetbrains.kotlin.android")' if is_kts else 'id "kotlin-android"')
+                                  pl = "plugins {\n    " + "\n    ".join(head + inner) + "\n}\n\n"
+                                  text = bs + pl + (text[:s] + text[k+1:]).lstrip("\n")
+                                  break
+                      elif is_kts:
+                          head = ['id("com.android.library")'] + (['id("org.jetbrains.kotlin.android")'] if has_kt else [])
+                          text = bs + "plugins {\n    " + "\n    ".join(head) + "\n}\n\n" + text.lstrip("\n")
+                      else:
+                          inj = 'apply plugin: "com.android.library"\n' + ('apply plugin: "kotlin-android"\n' if has_kt else '')
+                          text = bs + inj + "\n" + text.lstrip("\n")
+
+                      if text != orig:
+                          with open(path, "w", encoding="utf-8") as f:
+                              f.write(text)
+                          print("PATCHED:", path)
           PYEOF
           python3 fix_plugins.py && rm -f fix_plugins.py
 
