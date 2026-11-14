@@ -121,26 +121,26 @@ jobs:
           if os.path.exists("android/build.gradle.kts"):
               with open("android/build.gradle.kts", "r") as f:
                   rb = f.read()
-              ns_fix = """
-subprojects {
-    plugins.withId("com.android.library") {
-        val androidExt = extensions.findByName("android")
-        if (androidExt != null) {
-            try {
-                val getNs = androidExt.javaClass.getMethod("getNamespace")
-                val curNs = getNs.invoke(androidExt) as? String
-                if (curNs.isNullOrEmpty()) {
-                    val setNs = androidExt.javaClass.getMethod("setNamespace", String::class.java)
-                    val safeName = "com.universal.plugin." + project.name.replace("-", "_").replace(".", "_")
-                    setNs.invoke(androidExt, safeName)
-                }
-            } catch (_: Exception) {}
-        }
-    }
-}
-"""
+              ns_fix = (
+                  "\nsubprojects {\n"
+                  "    plugins.withId(\"com.android.library\") {\n"
+                  "        val androidExt = extensions.findByName(\"android\")\n"
+                  "        if (androidExt != null) {\n"
+                  "            try {\n"
+                  "                val getNs = androidExt.javaClass.getMethod(\"getNamespace\")\n"
+                  "                val curNs = getNs.invoke(androidExt) as? String\n"
+                  "                if (curNs.isNullOrEmpty()) {\n"
+                  "                    val setNs = androidExt.javaClass.getMethod(\"setNamespace\", String::class.java)\n"
+                  "                    val safeName = \"com.universal.plugin.\" + project.name.replace(\"-\", \"_\").replace(\".\", \"_\")\n"
+                  "                    setNs.invoke(androidExt, safeName)\n"
+                  "                }\n"
+                  "            } catch (_: Exception) {}\n"
+                  "        }\n"
+                  "    }\n"
+                  "}\n"
+              )
               with open("android/build.gradle.kts", "w") as f:
-                  f.write(rb + "\n" + ns_fix)
+                  f.write(rb + ns_fix)
 
           if os.path.exists("android/settings.gradle.kts"):
               with open("android/settings.gradle.kts", "r") as f:
@@ -254,8 +254,9 @@ subprojects {
 
                       if "plugins {" in text and "com.android.library" in text:
                           text = re.sub(r"^\s*apply\s+plugin\s*:\s*[\x27\"]com\.android\.library[\x27\"]\s*\n?", "", text, flags=re.M)
-                          if not re.search(r"plugins\s*\{[^}]*com\.android\.library", text, flags=re.S):
-                              text = re.sub(r"(plugins\s*\{\s*\n)", r"\1    id \"com.android.library\"\n", text, count=1)
+                          text = re.sub(r"^\s*id\s*\(?\s*[\x27\"]com\.android\.library[\x27\"]\s*\)?\s*\n?", "", text, flags=re.M)
+                          lib_line = "    id(\"com.android.library\")\n" if path.endswith(".kts") else "    id \"com.android.library\"\n"
+                          text = re.sub(r"(plugins\s*\{\s*\n)", r"\1" + lib_line, text, count=1)
                       elif "android {" in text:
                           has_kotlin = "kotlin-android" in text or "org.jetbrains.kotlin.android" in text
                           text = re.sub(r"^\s*apply\s+plugin\s*:\s*[\x27\"]com\.android\.library[\x27\"]\s*\n?", "", text, flags=re.M)
