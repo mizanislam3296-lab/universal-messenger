@@ -269,30 +269,49 @@ jobs:
           flutter pub get
 
           cat << 'PYEOF' > fix_plugins.py
-          import os, glob, re
+          import os, re
 
           caches = set()
           if os.environ.get("PUB_CACHE"):
               caches.add(os.environ["PUB_CACHE"])
           caches.add(os.path.expanduser("~/.pub-cache"))
           caches.add("/home/runner/.pub-cache")
+          caches.add("/root/.pub-cache")
 
+          keywords = (
+              "com.android.library",
+              "LibraryExtension",
+              "android {",
+              "android{",
+              "compileSdk",
+              "minSdk",
+              "kotlin-android",
+              "org.jetbrains.kotlin.android",
+          )
+
+          seen = set()
           for cache in caches:
-              hosted = os.path.join(cache, "hosted")
-              if not os.path.exists(hosted):
+              if not os.path.exists(cache):
                   continue
-              for pattern in ["*/*/android/build.gradle", "*/*/android/build.gradle.kts"]:
-                  for path in glob.glob(os.path.join(hosted, pattern)):
+              for root, dirs, files in os.walk(cache):
+                  for fname in files:
+                      if fname not in ("build.gradle", "build.gradle.kts"):
+                          continue
+                      path = os.path.join(root, fname)
+                      if path in seen or "/example/" in path:
+                          continue
+                      seen.add(path)
+
                       with open(path, "r", encoding="utf-8", errors="ignore") as f:
                           text = f.read().replace("\r\n", "\n")
                       orig = text
 
                       if "com.android.application" in text:
                           continue
-                      if "com.android.library" not in text and "android {" not in text and "android{" not in text:
+                      if not any(k in text for k in keywords):
                           continue
 
-                      is_kts = path.endswith(".kts")
+                      is_kts = fname.endswith(".kts")
                       has_kotlin = ("kotlin-android" in text) or ("org.jetbrains.kotlin.android" in text)
 
                       m = re.search(r'\bplugins\s*\{', text)
@@ -318,31 +337,30 @@ jobs:
                           body_lines = []
                           for line in block.replace(";", "\n").splitlines():
                               s = line.strip()
-                              if not s:
-                                  continue
-                              if "com.android.library" in s:
+                              if not s or "com.android.library" in s:
                                   continue
                               body_lines.append("    " + s)
 
                           lib_decl = '    id("com.android.library")' if is_kts else '    id "com.android.library"'
                           new_plugins = "plugins {\n" + lib_decl + "\n" + ("\n".join(body_lines) + "\n" if body_lines else "") + "}\n"
                           text = new_plugins + rest.lstrip("\n")
+                      elif is_kts:
+                          text = re.sub(r'^\s*apply\s*\(\s*plugin\s*=\s*[\'"]com\.android\.library[\'"]\s*\).*\n?', '', text, flags=re.M)
+                          text = re.sub(r'^\s*apply\s*\(\s*plugin\s*=\s*[\'"](?:kotlin-android|org\.jetbrains\.kotlin\.android)[\'"]\s*\).*\n?', '', text, flags=re.M)
+                          p_lines = ['    id("com.android.library")']
+                          if has_kotlin:
+                              p_lines.append('    id("org.jetbrains.kotlin.android")')
+                          text = "plugins {\n" + "\n".join(p_lines) + "\n}\n" + text.lstrip("\n")
                       else:
                           text = re.sub(r'^\s*apply\s+plugin\s*:\s*[\'"]com\.android\.library[\'"].*\n?', '', text, flags=re.M)
-                          text = re.sub(r'^\s*apply\s*\(\s*plugin\s*=\s*[\'"]com\.android\.library[\'"]\s*\).*\n?', '', text, flags=re.M)
                           text = re.sub(r'^\s*apply\s+plugin\s*:\s*[\'"](?:kotlin-android|org\.jetbrains\.kotlin\.android)[\'"].*\n?', '', text, flags=re.M)
-                          text = re.sub(r'^\s*apply\s*\(\s*plugin\s*=\s*[\'"](?:kotlin-android|org\.jetbrains\.kotlin\.android)[\'"]\s*\).*\n?', '', text, flags=re.M)
-
-                          if is_kts:
-                              inject = 'apply(plugin = "com.android.library")\n'
-                              if has_kotlin:
-                                  inject += 'apply(plugin = "org.jetbrains.kotlin.android")\n'
+                          inject = 'apply plugin: "com.android.library"\n'
+                          if has_kotlin:
+                              inject += 'apply plugin: "kotlin-android"\n'
+                          if re.search(r'^\s*android\s*\{', text, flags=re.M):
+                              text = re.sub(r'^(\s*android\s*\{)', inject + r'\1', text, count=1, flags=re.M)
                           else:
-                              inject = 'apply plugin: "com.android.library"\n'
-                              if has_kotlin:
-                                  inject += 'apply plugin: "kotlin-android"\n'
-
-                          text = re.sub(r'^(\s*android\s*\{)', inject + r'\1', text, count=1, flags=re.M)
+                              text = inject + text
 
                       if text != orig:
                           with open(path, "w", encoding="utf-8") as f:
