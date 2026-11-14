@@ -120,6 +120,15 @@ jobs:
               with open("android/build.gradle.kts", "r") as f:
                   rb = f.read()
               ns_fix = """
+          allprojects {
+              extensions.extraProperties.set("compileSdk", 35)
+              extensions.extraProperties.set("compileSdkVersion", 35)
+              extensions.extraProperties.set("minSdk", 23)
+              extensions.extraProperties.set("minSdkVersion", 23)
+              extensions.extraProperties.set("targetSdk", 35)
+              extensions.extraProperties.set("targetSdkVersion", 35)
+          }
+
           subprojects {
               plugins.withId("com.android.library") {
                   val androidExt = extensions.findByName("android")
@@ -302,6 +311,23 @@ jobs:
                           break
               return text[start:end], text[:start] + text[end:]
 
+          def needs_patch(text):
+              if "com.android.application" in text:
+                  return False
+              lib_m = re.search(r'com\.android\.library', text)
+              kot_m = re.search(r'kotlin-android|org\.jetbrains\.kotlin\.android|kotlin\(\s*[\'"]android[\'"]\s*\)', text)
+              and_m = re.search(r'(?m)^\s*android\s*\{|LibraryExtension', text)
+              if not and_m and not lib_m:
+                  return False
+              if not lib_m:
+                  return True
+              lib_pos = lib_m.start()
+              if kot_m and kot_m.start() < lib_pos:
+                  return True
+              if and_m and and_m.start() < lib_pos:
+                  return True
+              return False
+
           search_roots = set()
           if os.path.exists(".dart_tool/package_config.json"):
               with open(".dart_tool/package_config.json", "r", encoding="utf-8") as f:
@@ -318,19 +344,6 @@ jobs:
           search_roots.add(os.path.expanduser("~/.pub-cache"))
           search_roots.add("/home/runner/.pub-cache")
 
-          keywords = (
-              "com.android.library",
-              "LibraryExtension",
-              "android {",
-              "android{",
-              "compileSdk",
-              "minSdk",
-              "kotlin-android",
-              "org.jetbrains.kotlin.android",
-              'kotlin("android")',
-              "kotlin('android')",
-          )
-
           seen = set()
           for sroot in search_roots:
               if not os.path.exists(sroot):
@@ -346,11 +359,11 @@ jobs:
 
                       with open(path, "r", encoding="utf-8", errors="ignore") as f:
                           text = f.read().replace("\r\n", "\n")
-                      orig = text
 
-                      if not any(k in text for k in keywords):
+                      if not needs_patch(text):
                           continue
 
+                      orig = text
                       is_kts = fname.endswith(".kts")
                       has_kotlin = (
                           ("kotlin-android" in text)
@@ -365,24 +378,13 @@ jobs:
                       body = re.sub(r'(?m)^\s*(?:project\.)?apply\s*\(?\s*plugin\s*[:=]\s*[\'"]com\.android\.library[\'"]\s*\)?.*\n?', '', body)
                       body = re.sub(r'(?m)^\s*(?:project\.)?apply\s*\(?\s*plugin\s*[:=]\s*[\'"](?:kotlin-android|org\.jetbrains\.kotlin\.android)[\'"]\s*\)?.*\n?', '', body)
 
-                      # Replace flutter.* SDK references with explicit numbers so compileSdk is never missing
-                      body = body.replace("flutter.compileSdkVersion", "35")
-                      body = body.replace("flutter.minSdkVersion", "23")
-                      body = body.replace("flutter.targetSdkVersion", "35")
-
-                      if not re.search(r'\bcompileSdk(?:Version)?\b', body):
-                          sdk_line = "    compileSdk = 35\n" if is_kts else "    compileSdk 35\n"
-                          body = re.sub(r'(?m)^(\s*android\s*\{\s*\n)', r'\1' + sdk_line, body, count=1)
-
                       if pl_block or is_kts:
                           p_items = []
                           if pl_block:
                               inner = pl_block[pl_block.find("{") + 1 : pl_block.rfind("}")]
                               for line in inner.replace(";", "\n").splitlines():
                                   s = line.strip()
-                                  if not s or s.startswith("//"):
-                                      continue
-                                  if "com.android.library" in s:
+                                  if not s or s.startswith("//") or "com.android.library" in s:
                                       continue
                                   p_items.append("    " + s)
                           if has_kotlin and not any(
