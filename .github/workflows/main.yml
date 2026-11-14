@@ -190,11 +190,8 @@ jobs:
                           }
                       } catch (_: Exception) {}
                       try {
-                          val getSdk = androidExt.javaClass.getMethod("getCompileSdkVersion")
-                          if (getSdk.invoke(androidExt) == null) {
-                              val setSdk = androidExt.javaClass.getMethod("compileSdkVersion", Int::class.javaPrimitiveType)
-                              setSdk.invoke(androidExt, 35)
-                          }
+                          val setSdk = androidExt.javaClass.getMethod("compileSdkVersion", Int::class.javaPrimitiveType)
+                          setSdk.invoke(androidExt, 35)
                       } catch (_: Exception) {}
                   }
               }
@@ -369,6 +366,7 @@ jobs:
               "org.jetbrains.kotlin.android",
               'kotlin("android")',
               "kotlin('android')",
+              "flutter-gradle-plugin",
           )
 
           seen = set()
@@ -381,6 +379,8 @@ jobs:
                           continue
                       path = os.path.realpath(os.path.join(root, fname))
                       if path in seen or "/example/" in path:
+                          continue
+                      if "/firebase_" in path or "/cloud_firestore" in path:
                           continue
                       seen.add(path)
 
@@ -404,10 +404,6 @@ jobs:
 
                       bs_block, body = extract_block(text, "buildscript")
                       pl_block, body = extract_block(body, "plugins")
-
-                      body = re.sub(r'\bflutter\.(?:compileSdkVersion|compileSdk)\b', '35', body)
-                      body = re.sub(r'\bflutter\.(?:minSdkVersion|minSdk)\b', '23', body)
-                      body = re.sub(r'\bflutter\.(?:targetSdkVersion|targetSdk)\b', '35', body)
 
                       body = re.sub(r'(?m)^\s*(?:project\.)?apply\s*\(?\s*plugin\s*[:=]\s*[\'"]com\.android\.library[\'"]\s*\)?.*\n?', '', body)
                       body = re.sub(r'(?m)^\s*(?:project\.)?apply\s*\(?\s*plugin\s*[:=]\s*[\'"](?:kotlin-android|org\.jetbrains\.kotlin\.android)[\'"]\s*\)?.*\n?', '', body)
@@ -435,12 +431,8 @@ jobs:
                           inject = 'apply plugin: "com.android.library"\n'
                           if has_kotlin:
                               inject += 'apply plugin: "kotlin-android"\n'
-                          if re.search(r'(?m)^\s*android\s*\{', body):
-                              body = re.sub(r'(?m)^(\s*android\s*\{)', inject + r'\1', body, count=1)
-                          else:
-                              body = inject + body.lstrip("\n")
                           prefix = (bs_block + "\n\n") if bs_block else ""
-                          text = prefix + body.lstrip("\n")
+                          text = prefix + inject + "\n" + body.lstrip("\n")
 
                       if text != orig:
                           with open(path, "w", encoding="utf-8") as f:
