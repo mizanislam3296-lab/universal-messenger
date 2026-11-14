@@ -52,6 +52,8 @@ jobs:
                       shutil.copy2(src, "lib_clean/screens/search_user_screen.dart")
                   elif "chat" in norm:
                       shutil.copy2(src, "lib_clean/screens/chat_screen.dart")
+                  elif "call" in norm:
+                      shutil.copy2(src, "lib_clean/screens/call_screen.dart")
           req_files = [
               "lib_clean/main.dart",
               "lib_clean/screens/auth_screen.dart",
@@ -59,6 +61,7 @@ jobs:
               "lib_clean/screens/home_screen.dart",
               "lib_clean/screens/search_user_screen.dart",
               "lib_clean/screens/chat_screen.dart",
+              "lib_clean/screens/call_screen.dart",
           ]
           for req in req_files:
               if not os.path.exists(req):
@@ -75,7 +78,7 @@ jobs:
           '
           mv lib_clean lib
 
-      - name: Configure Firebase, Release Signing & Android Support
+      - name: Configure Firebase, ZegoCloud, Release Signing & Android Support
         env:
           KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
         run: |
@@ -93,6 +96,11 @@ jobs:
           else
             keytool -genkey -v -keystore android/app/release.jks -keyalg RSA -keysize 2048 -validity 10000 -alias messenger_key -storepass "Messenger@2026" -keypass "Messenger@2026" -dname "CN=Universal Messenger, OU=Mobile, O=Universal, L=Dhaka, S=Dhaka, C=BD"
           fi
+
+          cat << 'EOF' > android/app/proguard-rules.pro
+          -keep class **.zego.** { *; }
+          -keep class **.zegocloud.** { *; }
+          EOF
 
           python3 -c '
           import os, shutil
@@ -140,12 +148,12 @@ jobs:
               content = content.replace("com.universal.universal_messenger", "com.universal.messenger")
               signing_block = "    lint {\n        checkReleaseBuilds = false\n        abortOnError = false\n    }\n    signingConfigs {\n        create(\"release\") {\n            storeFile = file(\"release.jks\")\n            storePassword = \"Messenger@2026\"\n            keyAlias = \"messenger_key\"\n            keyPassword = \"Messenger@2026\"\n        }\n    }\n    buildTypes {"
               content = content.replace("    buildTypes {", signing_block, 1)
-              content = content.replace("signingConfigs.getByName(\"debug\")", "signingConfigs.getByName(\"release\")")
+              content = content.replace("signingConfigs.getByName(\"debug\")", "signingConfigs.getByName(\"release\")\n            proguardFiles(getDefaultProguardFile(\"proguard-android-optimize.txt\"), \"proguard-rules.pro\")")
               lines = content.splitlines()
               out = []
               for l in lines:
                   if "minSdk =" in l or "minSdkVersion" in l:
-                      out.append("        minSdk = 21")
+                      out.append("        minSdk = 23")
                       out.append("        multiDexEnabled = true")
                       continue
                   out.append(l)
@@ -159,12 +167,12 @@ jobs:
               content = content.replace("com.universal.universal_messenger", "com.universal.messenger")
               signing_block = "    lint {\n        checkReleaseBuilds false\n        abortOnError false\n    }\n    signingConfigs {\n        release {\n            storeFile file(\"release.jks\")\n            storePassword \"Messenger@2026\"\n            keyAlias \"messenger_key\"\n            keyPassword \"Messenger@2026\"\n        }\n    }\n    buildTypes {"
               content = content.replace("    buildTypes {", signing_block, 1)
-              content = content.replace("signingConfigs.debug", "signingConfigs.release")
+              content = content.replace("signingConfigs.debug", "signingConfigs.release\n            proguardFiles getDefaultProguardFile(\"proguard-android-optimize.txt\"), \"proguard-rules.pro\"")
               lines = content.splitlines()
               out = []
               for l in lines:
                   if "minSdk =" in l or "minSdkVersion" in l:
-                      out.append("        minSdkVersion 21")
+                      out.append("        minSdkVersion 23")
                       out.append("        multiDexEnabled true")
                       continue
                   out.append(l)
@@ -177,18 +185,30 @@ jobs:
           if os.path.exists(manifest_path):
               with open(manifest_path, "r") as f:
                   m = f.read()
-              if "android.permission.INTERNET" not in m:
-                  m = m.replace("<application", "<uses-permission android:name=\"android.permission.INTERNET\"/>\n    <application", 1)
-              if "<queries>" not in m:
-                  queries_block = "    <queries>\n        <intent>\n            <action android:name=\"android.intent.action.VIEW\" />\n            <data android:scheme=\"https\" />\n        </intent>\n    </queries>\n    <application"
-                  m = m.replace("<application", queries_block, 1)
+              perms = """    <uses-permission android:name="android.permission.INTERNET"/>
+    <uses-permission android:name="android.permission.CAMERA"/>
+    <uses-permission android:name="android.permission.RECORD_AUDIO"/>
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS"/>
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE"/>
+    <uses-permission android:name="android.permission.BLUETOOTH"/>
+    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT"/>
+    <uses-permission android:name="android.permission.WAKE_LOCK"/>
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <data android:scheme="https" />
+        </intent>
+    </queries>
+    <application"""
+              m = m.replace("<application", perms, 1)
               with open(manifest_path, "w") as f:
                   f.write(m)
           '
 
-      - name: Install File Sharing Packages & Dependencies
+      - name: Install Media & Calling Packages
         run: |
-          flutter pub add dio file_picker url_launcher
+          flutter pub add dio file_picker url_launcher zego_uikit_prebuilt_call
           flutter pub get
 
       - name: Build Release APK
@@ -199,4 +219,4 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           cp build/app/outputs/flutter-apk/app-release.apk Universal-Messenger.apk
-          gh release create "v3.0.${{ github.run_number }}" Universal-Messenger.apk --title "Universal Messenger v3.0.${{ github.run_number }}" --notes "Phase 3A: Free Cloud File, PDF & Video Sharing"
+          gh release create "v4.0.${{ github.run_number }}" Universal-Messenger.apk --title "Universal Messenger v4.0.${{ github.run_number }}" --notes "Phase 3B: Audio & Video Calling Complete"
