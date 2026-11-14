@@ -5,6 +5,7 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:dio/dio.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:url_launcher/url_launcher.dart';
+import 'package:universal_messenger/screens/call_screen.dart';
 
 class ChatScreen extends StatefulWidget {
   final String receiverId;
@@ -48,6 +49,37 @@ class _ChatScreenState extends State<ChatScreen> {
     _messageController.dispose();
     _scrollController.dispose();
     super.dispose();
+  }
+
+  Future<void> _startCall(bool isVideo) async {
+    final callId = '${_chatId}_${DateTime.now().millisecondsSinceEpoch}';
+    final callerName =
+        _currentUser.displayName ?? _currentUser.email ?? 'User';
+
+    await FirebaseFirestore.instance
+        .collection('calls')
+        .doc(widget.receiverId)
+        .set({
+      'callId': callId,
+      'callerId': _currentUser.uid,
+      'callerName': callerName,
+      'receiverId': widget.receiverId,
+      'isVideo': isVideo,
+      'status': 'ringing',
+      'timestamp': FieldValue.serverTimestamp(),
+    });
+
+    if (!mounted) return;
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => CallScreen(
+          callID: callId,
+          isVideoCall: isVideo,
+          receiverIdForCleanup: widget.receiverId,
+        ),
+      ),
+    );
   }
 
   String _formatFileSize(int bytes) {
@@ -381,6 +413,18 @@ class _ChatScreenState extends State<ChatScreen> {
             ),
           ],
         ),
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.call),
+            tooltip: 'অডিও কল',
+            onPressed: () => _startCall(false),
+          ),
+          IconButton(
+            icon: const Icon(Icons.videocam),
+            tooltip: 'ভিডিও কল',
+            onPressed: () => _startCall(true),
+          ),
+        ],
       ),
       body: Column(
         children: [
