@@ -1,8 +1,9 @@
+
 name: Build Universal Messenger APK
 
 on:
   push:
-    branches: [ main ]
+    branches: [main]
   workflow_dispatch:
 
 permissions:
@@ -11,510 +12,774 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 60
 
     steps:
+      # 1. Checkout
       - name: Checkout Repository
         uses: actions/checkout@v4
 
+      # 2. Java 17
       - name: Setup Java 17
         uses: actions/setup-java@v4
         with:
-          distribution: 'zulu'
+          distribution: zulu
           java-version: '17'
+          cache: gradle
 
+      # 3. Flutter
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
         with:
-          channel: 'stable'
+          channel: stable
+          cache: true
 
-      - name: Auto-Fix & Organize Dart Files
+      # 4. Prepare Dart project without deleting source files
+      - name: Prepare Flutter Project
+        shell: bash
         run: |
-          cat << 'PYEOF' > organize_dart.py
-          import os, shutil
+          set -euo pipefail
 
-          os.makedirs("lib_clean/screens", exist_ok=True)
-          for root, dirs, files in os.walk(".", topdown=False):
-              if ".git" in root or "lib_clean" in root:
-                  continue
-              for f in files:
-                  norm = f.replace(" ", "").lower()
-                  if norm.endswith((".yml", ".yaml", ".json", ".md", ".py")):
-                      continue
-                  src = os.path.join(root, f)
-                  if "main" in norm and ("dart" in norm or root.strip().endswith("lib")):
-                      shutil.copy2(src, "lib_clean/main.dart")
-                  elif "auth" in norm:
-                      shutil.copy2(src, "lib_clean/screens/auth_screen.dart")
-                  elif "verify" in norm:
-                      shutil.copy2(src, "lib_clean/screens/verify_email_screen.dart")
-                  elif "home" in norm:
-                      shutil.copy2(src, "lib_clean/screens/home_screen.dart")
-                  elif "search" in norm:
-                      shutil.copy2(src, "lib_clean/screens/search_user_screen.dart")
-                  elif "chat" in norm:
-                      shutil.copy2(src, "lib_clean/screens/chat_screen.dart")
-                  elif "call" in norm:
-                      shutil.copy2(src, "lib_clean/screens/call_screen.dart")
+          mkdir -p lib
 
-          req_files = [
-              "lib_clean/main.dart",
-              "lib_clean/screens/auth_screen.dart",
-              "lib_clean/screens/verify_email_screen.dart",
-              "lib_clean/screens/home_screen.dart",
-              "lib_clean/screens/search_user_screen.dart",
-              "lib_clean/screens/chat_screen.dart",
-              "lib_clean/screens/call_screen.dart",
-          ]
-          for req in req_files:
-              if not os.path.exists(req):
-                  raise SystemExit("MISSING FILE: " + req)
-          PYEOF
-          python3 organize_dart.py
-          rm -f organize_dart.py
+          for f in \
+            main.dart \
+            auth_screen.dart \
+            verify_email_screen.dart \
+            home_screen.dart \
+            search_user_screen.dart \
+            chat_screen.dart \
+            call_screen.dart
+          do
+            if [ ! -f "lib/$f" ] && [ -f "$f" ]; then
+              cp "$f" "lib/$f"
+            fi
+          done
 
-          flutter create . --platforms=android --org com.universal --project-name universal_messenger
-          rm -rf lib test
-          mv lib_clean lib
+          required=(
+            main.dart
+            auth_screen.dart
+            verify_email_screen.dart
+            home_screen.dart
+            search_user_screen.dart
+            chat_screen.dart
+            call_screen.dart
+          )
 
-      - name: Configure Firebase, ZegoCloud, Release Signing & Android Support
-        env:
-          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
-        run: |
-          mkdir -p android/app
-          if [ -f "google-services.json" ]; then
-            cp google-services.json android/app/google-services.json
-          fi
-          if [ ! -f "android/app/google-services.json" ]; then
-            echo "ERROR: google-services.json ফাইলটি রিপোজিটরিতে পাওয়া যায়নি!"
+          for f in "${required[@]}"; do
+            if [ ! -f "lib/$f" ]; then
+              echo "ERROR: Missing lib/$f"
+              exit 1
+            fi
+          done
+
+          if [ ! -f pubspec.yaml ]; then
+            echo "ERROR: pubspec.yaml missing"
             exit 1
           fi
 
-          if [ -n "$KEYSTORE_BASE64" ]; then
-            echo "$KEYSTORE_BASE64" | base64 -d > android/app/release.jks
-          else
-            keytool -genkey -v -keystore android/app/release.jks -keyalg RSA -keysize 2048 -validity 10000 -alias messenger_key -storepass "Messenger@2026" -keypass "Messenger@2026" -dname "CN=Universal Messenger, OU=Mobile, O=Universal, L=Dhaka, S=Dhaka, C=BD"
+          flutter create . \
+            --platforms=android \
+            --org com.universal \
+            --project-name universal_messenger
+
+          echo "Flutter project prepared."
+
+      # 5. Firebase configuration
+      - name: Configure Firebase
+        run: |
+          set -euo pipefail
+
+          mkdir -p android/app
+
+          if [ ! -f google-services.json ]; then
+            echo "ERROR: google-services.json missing"
+            exit 1
           fi
 
-          printf -- "-keep class **.zego.** { *; }\n-keep class **.zegocloud.** { *; }\n-dontwarn **\n" > android/app/proguard-rules.pro
+          cp google-services.json android/app/google-services.json
 
-          cat << 'PYEOF' > configure_android.py
-          import os, shutil
+          if [ ! -f android/app/google-services.json ]; then
+            exit 1
+          fi
 
-          for lang in ["kotlin", "java"]:
-              base = f"android/app/src/main/{lang}"
-              if os.path.exists(base):
-                  shutil.rmtree(base)
-          target_dir = "android/app/src/main/kotlin/com/universal/messenger"
-          os.makedirs(target_dir, exist_ok=True)
-          with open(f"{target_dir}/MainActivity.kt", "w") as f:
-              f.write("package com.universal.messenger\n\nimport io.flutter.embedding.android.FlutterActivity\n\nclass MainActivity : FlutterActivity()\n")
+      # 6. Install dependencies
+      - name: Install Flutter Dependencies
+        run: |
+          set -euo pipefail
+          flutter pub get
+          flutter pub deps
 
-          if os.path.exists("android/gradle.properties"):
-              with open("android/gradle.properties", "r") as f:
-                  gp = f.read()
-              gp = gp.replace("-Xmx2G", "-Xmx4G").replace("-Xmx1536M", "-Xmx4G").replace("-Xmx1G", "-Xmx4G")
-              if "android.enableJetifier" not in gp:
-                  gp += "\nandroid.enableJetifier=true\n"
-              with open("android/gradle.properties", "w") as f:
-                  f.write(gp)
+      # 7. Configure Gradle, Firebase properties and namespace
+      - name: Configure Android Gradle
+        shell: bash
+        run: |
+          set -euo pipefail
 
-          if os.path.exists("android/settings.gradle.kts"):
-              with open("android/settings.gradle.kts", "r") as f:
-                  lines = f.read().splitlines()
-              out = []
-              for l in lines:
-                  out.append(l)
-                  if "com.android.application" in l and "apply false" in l:
-                      out.append('    id("com.google.gms.google-services") version "4.4.2" apply false')
-              before_proj = """
-          gradle.beforeProject {
-              extensions.extraProperties.set("compileSdk", 35)
-              extensions.extraProperties.set("compileSdkVersion", 35)
-              extensions.extraProperties.set("minSdk", 23)
-              extensions.extraProperties.set("minSdkVersion", 23)
-              extensions.extraProperties.set("targetSdk", 35)
-              extensions.extraProperties.set("targetSdkVersion", 35)
-              extensions.extraProperties.set("javaVersion", org.gradle.api.JavaVersion.VERSION_17)
+          cat > configure_gradle.py <<'PYEOF'
+          import os
+          import re
+          import glob
+
+          settings_files = [
+              "android/settings.gradle.kts",
+              "android/settings.gradle"
+          ]
+
+          settings = next(
+              (p for p in settings_files if os.path.isfile(p)),
+              None
+          )
+
+          if not settings:
+              raise SystemExit("Android settings.gradle not found")
+
+          is_kts = settings.endswith(".kts")
+
+          with open(settings, encoding="utf-8") as f:
+              content = f.read()
+
+          # Google Services plugin
+          if "com.google.gms.google-services" not in content:
+              if is_kts:
+                  line = '    id("com.google.gms.google-services") version "4.4.2" apply false'
+              else:
+                  line = '    id "com.google.gms.google-services" version "4.4.2" apply false'
+
+              match = re.search(
+                  r'(?m)^\s*id\s*\(?\s*["\']com\.android\.application["\'][^\n]*$',
+                  content
+              )
+
+              if match:
+                  pos = match.end()
+                  content = content[:pos] + "\n" + line + content[pos:]
+              else:
+                  raise SystemExit(
+                      "Cannot safely add Google Services plugin. "
+                      "Inspect settings.gradle."
+                  )
+
+          # Firebase and older plugin extra properties.
+          marker = "// UNIVERSAL_MESSENGER_BEFORE_PROJECT"
+
+          if marker not in content:
+              if is_kts:
+                  block = """
+          // UNIVERSAL_MESSENGER_BEFORE_PROJECT
+          gradle.beforeProject { p ->
+              val extras = p.extensions.extraProperties
+              extras.set("compileSdk", 35)
+              extras.set("compileSdkVersion", 35)
+              extras.set("minSdk", 23)
+              extras.set("minSdkVersion", 23)
+              extras.set("targetSdk", 35)
+              extras.set("targetSdkVersion", 35)
+              extras.set(
+                  "javaVersion",
+                  org.gradle.api.JavaVersion.VERSION_17
+              )
           }
           """
-              with open("android/settings.gradle.kts", "w") as f:
-                  f.write("\n".join(out) + "\n" + before_proj)
-          elif os.path.exists("android/settings.gradle"):
-              with open("android/settings.gradle", "r") as f:
-                  lines = f.read().splitlines()
-              out = []
-              for l in lines:
-                  out.append(l)
-                  if "com.android.application" in l and "apply false" in l:
-                      out.append('    id "com.google.gms.google-services" version "4.4.2" apply false')
-              before_proj = """
-          gradle.beforeProject { proj ->
-              proj.ext.compileSdk = 35
-              proj.ext.compileSdkVersion = 35
-              proj.ext.minSdk = 23
-              proj.ext.minSdkVersion = 23
-              proj.ext.targetSdk = 35
-              proj.ext.targetSdkVersion = 35
-              proj.ext.javaVersion = org.gradle.api.JavaVersion.VERSION_17
+              else:
+                  block = """
+          // UNIVERSAL_MESSENGER_BEFORE_PROJECT
+          gradle.beforeProject { p ->
+              p.extensions.extraProperties.set("compileSdk", 35)
+              p.extensions.extraProperties.set("compileSdkVersion", 35)
+              p.extensions.extraProperties.set("minSdk", 23)
+              p.extensions.extraProperties.set("minSdkVersion", 23)
+              p.extensions.extraProperties.set("targetSdk", 35)
+              p.extensions.extraProperties.set("targetSdkVersion", 35)
+              p.extensions.extraProperties.set(
+                  "javaVersion",
+                  org.gradle.api.JavaVersion.VERSION_17
+              )
           }
           """
-              with open("android/settings.gradle", "w") as f:
-                  f.write("\n".join(out) + "\n" + before_proj)
+                  # Groovy Gradle supports the same JavaVersion constant.
 
-          if os.path.exists("android/build.gradle.kts"):
-              with open("android/build.gradle.kts", "r") as f:
-                  rb = f.read()
-              top_ext = """
-          allprojects {
-              extensions.extraProperties.set("compileSdk", 35)
-              extensions.extraProperties.set("compileSdkVersion", 35)
-              extensions.extraProperties.set("minSdk", 23)
-              extensions.extraProperties.set("minSdkVersion", 23)
-              extensions.extraProperties.set("targetSdk", 35)
-              extensions.extraProperties.set("targetSdkVersion", 35)
-              extensions.extraProperties.set("javaVersion", org.gradle.api.JavaVersion.VERSION_17)
-          }
-          """
-              ns_fix = """
+              content += "\n" + block
+
+          with open(settings, "w", encoding="utf-8") as f:
+              f.write(content)
+
+          print("Configured:", settings)
+
+          # Root Gradle namespace compatibility.
+          root_files = [
+              "android/build.gradle.kts",
+              "android/build.gradle"
+          ]
+
+          root_gradle = next(
+              (p for p in root_files if os.path.isfile(p)),
+              None
+          )
+
+          if not root_gradle:
+              raise SystemExit("Root Android build.gradle missing")
+
+          root_kts = root_gradle.endswith(".kts")
+
+          with open(root_gradle, encoding="utf-8") as f:
+              root_content = f.read()
+
+          ns_marker = "// UNIVERSAL_MESSENGER_NAMESPACE_FIX"
+
+          if ns_marker not in root_content:
+              if root_kts:
+                  ns_block = """
+          // UNIVERSAL_MESSENGER_NAMESPACE_FIX
           subprojects {
+              val targetProject = this
+
               plugins.withId("com.android.library") {
-                  val androidExt = extensions.findByName("android")
+                  val androidExt =
+                      targetProject.extensions.findByName("android")
+
                   if (androidExt != null) {
                       try {
-                          val getNs = androidExt.javaClass.getMethod("getNamespace")
-                          val curNs = getNs.invoke(androidExt) as? String
-                          if (curNs.isNullOrEmpty()) {
-                              val setNs = androidExt.javaClass.getMethod("setNamespace", String::class.java)
-                              val safeName = "com.universal.plugin." + project.name.replace("-", "_").replace(".", "_")
-                              setNs.invoke(androidExt, safeName)
+                          val getter = androidExt.javaClass
+                              .getMethod("getNamespace")
+
+                          val current = getter.invoke(androidExt) as? String
+
+                          if (current.isNullOrBlank()) {
+                              val manifest = java.io.File(
+                                  targetProject.projectDir,
+                                  "src/main/AndroidManifest.xml"
+                              )
+
+                              val manifestText =
+                                  if (manifest.exists()) manifest.readText()
+                                  else ""
+
+                              val match = Regex(
+                                  """package\\s*=\\s*["']([^"']+)["']"""
+                              ).find(manifestText)
+
+                              val safeName = targetProject.name
+                                  .replace("-", "_")
+                                  .replace(".", "_")
+
+                              val namespace = match?.groupValues?.get(1)
+                                  ?: "com.universal.plugin." + safeName
+
+                              androidExt.javaClass
+                                  .getMethod("setNamespace", String::class.java)
+                                  .invoke(androidExt, namespace)
                           }
-                      } catch (_: Exception) {}
-                      try {
-                          val setSdk = androidExt.javaClass.getMethod("compileSdkVersion", Int::class.javaPrimitiveType)
-                          setSdk.invoke(androidExt, 35)
-                      } catch (_: Exception) {}
+                      } catch (e: Exception) {
+                          throw GradleException(
+                              "Namespace configuration failed for " +
+                                  targetProject.path, e
+                          )
+                      }
                   }
               }
           }
           """
-              with open("android/build.gradle.kts", "w") as f:
-                  f.write(top_ext + "\n" + rb + "\n" + ns_fix)
+              else:
+                  ns_block = """
+          // UNIVERSAL_MESSENGER_NAMESPACE_FIX
+          subprojects { p ->
+              p.plugins.withId("com.android.library") {
+                  def androidExt = p.extensions.findByName("android")
 
-          if os.path.exists("android/app/build.gradle.kts"):
-              with open("android/app/build.gradle.kts", "r") as f:
-                  content = f.read()
-              content = content.replace("com.universal.universal_messenger", "com.universal.messenger")
-              signing_block = (
-                  '    lint {\n'
-                  '        checkReleaseBuilds = false\n'
-                  '        abortOnError = false\n'
-                  '    }\n'
-                  '    signingConfigs {\n'
-                  '        create("release") {\n'
-                  '            storeFile = file("release.jks")\n'
-                  '            storePassword = "Messenger@2026"\n'
-                  '            keyAlias = "messenger_key"\n'
-                  '            keyPassword = "Messenger@2026"\n'
-                  '        }\n'
-                  '    }\n'
-                  '    buildTypes {'
-              )
-              content = content.replace("    buildTypes {", signing_block, 1)
-              content = content.replace(
-                  'signingConfigs.getByName("debug")',
-                  'signingConfigs.getByName("release")\n            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")'
-              )
-              lines = content.splitlines()
-              out = []
-              for l in lines:
-                  if "compileSdk =" in l:
-                      out.append("    compileSdk = 35")
-                      continue
-                  if "minSdk =" in l or "minSdkVersion" in l:
-                      out.append("        minSdk = 23")
-                      out.append("        multiDexEnabled = true")
-                      continue
-                  out.append(l)
-                  if 'id("com.android.application")' in l:
-                      out.append('    id("com.google.gms.google-services")')
-              with open("android/app/build.gradle.kts", "w") as f:
-                  f.write("\n".join(out) + "\n")
-          elif os.path.exists("android/app/build.gradle"):
-              with open("android/app/build.gradle", "r") as f:
-                  content = f.read()
-              content = content.replace("com.universal.universal_messenger", "com.universal.messenger")
-              signing_block = (
-                  '    lint {\n'
-                  '        checkReleaseBuilds false\n'
-                  '        abortOnError false\n'
-                  '    }\n'
-                  '    signingConfigs {\n'
-                  '        release {\n'
-                  '            storeFile file("release.jks")\n'
-                  '            storePassword "Messenger@2026"\n'
-                  '            keyAlias "messenger_key"\n'
-                  '            keyPassword "Messenger@2026"\n'
-                  '        }\n'
-                  '    }\n'
-                  '    buildTypes {'
-              )
-              content = content.replace("    buildTypes {", signing_block, 1)
-              content = content.replace(
-                  'signingConfigs.debug',
-                  'signingConfigs.release\n            proguardFiles getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro"'
-              )
-              lines = content.splitlines()
-              out = []
-              for l in lines:
-                  if "compileSdk " in l or "compileSdkVersion" in l:
-                      out.append("    compileSdk 35")
-                      continue
-                  if "minSdk =" in l or "minSdkVersion" in l:
-                      out.append("        minSdkVersion 23")
-                      out.append("        multiDexEnabled true")
-                      continue
-                  out.append(l)
-                  if "com.android.application" in l:
-                      out.append('    id "com.google.gms.google-services"')
-              with open("android/app/build.gradle", "w") as f:
-                  f.write("\n".join(out) + "\n")
+                  if (androidExt != null) {
+                      def getter = androidExt.class.methods.find {
+                          it.name == "getNamespace"
+                      }
 
-          manifest_path = "android/app/src/main/AndroidManifest.xml"
-          if os.path.exists(manifest_path):
-              with open(manifest_path, "r") as f:
-                  m = f.read()
-              perms = (
-                  '    <uses-permission android:name="android.permission.INTERNET"/>\n'
-                  '    <uses-permission android:name="android.permission.CAMERA"/>\n'
-                  '    <uses-permission android:name="android.permission.RECORD_AUDIO"/>\n'
-                  '    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS"/>\n'
-                  '    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>\n'
-                  '    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE"/>\n'
-                  '    <uses-permission android:name="android.permission.BLUETOOTH"/>\n'
-                  '    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT"/>\n'
-                  '    <uses-permission android:name="android.permission.WAKE_LOCK"/>\n'
-                  '    <queries>\n'
-                  '        <intent>\n'
-                  '            <action android:name="android.intent.action.VIEW" />\n'
-                  '            <data android:scheme="https" />\n'
-                  '        </intent>\n'
-                  '    </queries>\n'
-                  '    <application'
-              )
-              m = m.replace("<application", perms, 1)
-              with open(manifest_path, "w") as f:
-                  f.write(m)
-          PYEOF
-          python3 configure_android.py
-          rm -f configure_android.py
+                      def current = getter ? getter.invoke(androidExt) : null
 
-      - name: Install Media & Calling Packages
-        run: |
-          flutter pub add dio file_picker url_launcher zego_uikit_prebuilt_call
-          flutter pub get
+                      if (!current) {
+                          def manifest = new File(
+                              p.projectDir,
+                              "src/main/AndroidManifest.xml"
+                          )
 
-          cat << 'PYEOF' > fix_plugins.py
-          import os, re, json, urllib.parse
+                          def manifestText = manifest.exists()
+                              ? manifest.getText("UTF-8")
+                              : ""
 
-          def strip_comments(code):
-              code = re.sub(r'/\*.*?\*/', '', code, flags=re.S)
-              code = re.sub(r'//.*', '', code)
-              return code
+                          def matcher = manifestText =~ /package\\s*=\\s*["']([^"']+)["']/
 
-          def find_top_block(text, keyword):
-              i = 0
-              n = len(text)
-              in_sl_comment = False
-              in_ml_comment = False
-              in_str = None
-              while i < n:
-                  ch = text[i]
-                  nxt = text[i + 1] if i + 1 < n else ""
-                  if in_sl_comment:
-                      if ch == "\n":
-                          in_sl_comment = False
-                      i += 1
-                      continue
-                  if in_ml_comment:
-                      if ch == "*" and nxt == "/":
-                          in_ml_comment = False
-                          i += 2
-                      else:
-                          i += 1
-                      continue
-                  if in_str:
-                      if ch == "\\":
-                          i += 2
-                          continue
-                      if ch == in_str:
-                          in_str = None
-                      i += 1
-                      continue
-                  if ch == "/" and nxt == "/":
-                      in_sl_comment = True
-                      i += 2
-                      continue
-                  if ch == "/" and nxt == "*":
-                      in_ml_comment = True
-                      i += 2
-                      continue
-                  if ch in ('"', "'"):
-                      in_str = ch
-                      i += 1
-                      continue
+                          def safeName = p.name
+                              .replace("-", "_")
+                              .replace(".", "_")
 
-                  if text[i:].startswith(keyword):
-                      prev_ok = (i == 0) or (not (text[i - 1].isalnum() or text[i - 1] in "_."))
-                      after_idx = i + len(keyword)
-                      if prev_ok and after_idx < n and (text[after_idx].isspace() or text[after_idx] == "{"):
-                          j = after_idx
-                          while j < n and text[j].isspace():
-                              j += 1
-                          if j < n and text[j] == "{":
-                              depth = 0
-                              k = j
-                              while k < n:
-                                  if text[k] == "{":
-                                      depth += 1
-                                  elif text[k] == "}":
-                                      depth -= 1
-                                      if depth == 0:
-                                          return text[i : k + 1], text[:i] + text[k + 1 :]
-                                  k += 1
-                  i += 1
-              return None, text
+                          def namespace = matcher.find()
+                              ? matcher.group(1)
+                              : "com.universal.plugin." + safeName
 
-          search_roots = set()
-          if os.path.exists(".dart_tool/package_config.json"):
-              with open(".dart_tool/package_config.json", "r", encoding="utf-8") as f:
-                  cfg = json.load(f)
-              for pkg in cfg.get("packages", []):
-                  uri = pkg.get("rootUri", "")
-                  if uri.startswith("file://"):
-                      p = urllib.parse.unquote(urllib.parse.urlparse(uri).path)
-                  else:
-                      p = os.path.realpath(os.path.join(".dart_tool", uri))
-                  if os.path.exists(p):
-                      search_roots.add(p)
+                          androidExt.namespace = namespace
+                      }
+                  }
+              }
+          }
+          """
 
-          for env_var in ["PUB_CACHE", "FLUTTER_ROOT"]:
-              if os.environ.get(env_var):
-                  search_roots.add(os.environ[env_var])
-          search_roots.add(os.path.expanduser("~/.pub-cache"))
-          search_roots.add("/home/runner/.pub-cache")
+              root_content += "\n" + ns_block
 
-          keywords = (
-              "com.android.library",
-              "LibraryExtension",
-              "android {",
-              "android{",
-              "compileSdk",
-              "minSdk",
-              "kotlin-android",
-              "org.jetbrains.kotlin.android",
-              'kotlin("android")',
-              "kotlin('android')",
-              "flutter-gradle-plugin",
+          with open(root_gradle, "w", encoding="utf-8") as f:
+              f.write(root_content)
+
+          # Locate application Gradle file.
+          app_files = [
+              "android/app/build.gradle.kts",
+              "android/app/build.gradle"
+          ]
+
+          app_gradle = next(
+              (p for p in app_files if os.path.isfile(p)),
+              None
           )
 
-          seen = set()
-          for sroot in search_roots:
-              if not os.path.exists(sroot):
+          if not app_gradle:
+              raise SystemExit("App build.gradle missing")
+
+          app_kts = app_gradle.endswith(".kts")
+
+          with open(app_gradle, encoding="utf-8") as f:
+              app = f.read()
+
+          # Package name
+          app = re.sub(
+              r'com\.universal\.universal_messenger',
+              'com.universal.messenger',
+              app
+          )
+
+          if "com.universal.messenger" not in app:
+              if app_kts:
+                  app = re.sub(
+                      r'(?m)^\s*namespace\s*=.*$',
+                      '    namespace = "com.universal.messenger"',
+                      app
+                  )
+              else:
+                  app = re.sub(
+                      r'(?m)^\s*namespace\s+.*$',
+                      '    namespace "com.universal.messenger"',
+                      app
+                  )
+
+          # Ensure Google plugin in application plugin block.
+          if "com.google.gms.google-services" not in app:
+              if app_kts:
+                  app = re.sub(
+                      r'(id\(["\']com\.android\.application["\']\)[^\n]*\n)',
+                      r'\1    id("com.google.gms.google-services")\n',
+                      app,
+                      count=1
+                  )
+              else:
+                  app = re.sub(
+                      r'(?m)^(\s*id\s+["\']com\.android\.application["\'][^\n]*\n)',
+                      r'\1    id "com.google.gms.google-services"\n',
+                      app,
+                      count=1
+                  )
+
+          # SDK settings.
+          if app_kts:
+              app = re.sub(
+                  r'(?m)^(\s*)compileSdk\s*=.*$',
+                  r'\1compileSdk = 35',
+                  app
+              )
+              app = re.sub(
+                  r'(?m)^(\s*)minSdk\s*=.*$',
+                  r'\1minSdk = 23',
+                  app
+              )
+              app = re.sub(
+                  r'(?m)^(\s*)targetSdk\s*=.*$',
+                  r'\1targetSdk = 35',
+                  app
+              )
+          else:
+              app = re.sub(
+                  r'(?m)^(\s*)compileSdk(?:Version)?\s*(?:=)?\s*.*$',
+                  r'\1compileSdk 35',
+                  app
+              )
+              app = re.sub(
+                  r'(?m)^(\s*)minSdk(?:Version)?\s*(?:=)?\s*.*$',
+                  r'\1minSdkVersion 23',
+                  app
+              )
+              app = re.sub(
+                  r'(?m)^(\s*)targetSdk(?:Version)?\s*(?:=)?\s*.*$',
+                  r'\1targetSdkVersion 35',
+                  app
+              )
+
+          # Enable multidex inside defaultConfig.
+          if "multiDexEnabled" not in app:
+              match = re.search(r'defaultConfig\s*\{', app)
+              if not match:
+                  raise SystemExit("defaultConfig block not found")
+
+              insertion = (
+                  "\n        multiDexEnabled = true\n"
+                  if app_kts
+                  else "\n        multiDexEnabled true\n"
+              )
+
+              pos = match.end()
+              app = app[:pos] + insertion + app[pos:]
+
+          # Signing configuration.
+          if "create(\"release\")" not in app and "release {" not in app:
+              raise SystemExit("Release buildTypes block not found")
+
+          if app_kts:
+              signing = """
+              signingConfigs {
+                  create("release") {
+                      storeFile = file("release.jks")
+                      storePassword = project.findProperty("RELEASE_STORE_PASSWORD") as String
+                      keyAlias = project.findProperty("RELEASE_KEY_ALIAS") as String
+                      keyPassword = project.findProperty("RELEASE_KEY_PASSWORD") as String
+                  }
+              }
+          """
+              if "create(\"release\")" not in app:
+                  app = re.sub(
+                      r'(?m)^\s*buildTypes\s*\{',
+                      signing + "\n    buildTypes {",
+                      app,
+                      count=1
+                  )
+
+              app = re.sub(
+                  r'signingConfig\s*=\s*signingConfigs\.getByName\("debug"\)',
+                  'signingConfig = signingConfigs.getByName("release")',
+                  app
+              )
+
+              app = re.sub(
+                  r'(release\s*\{)',
+                  r'\1\n            signingConfig = signingConfigs.getByName("release")\n            isMinifyEnabled = true\n            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")',
+                  app,
+                  count=1
+              )
+
+          else:
+              signing = """
+              signingConfigs {
+                  release {
+                      storeFile file("release.jks")
+                      storePassword project.findProperty("RELEASE_STORE_PASSWORD")
+                      keyAlias project.findProperty("RELEASE_KEY_ALIAS")
+                      keyPassword project.findProperty("RELEASE_KEY_PASSWORD")
+                  }
+              }
+          """
+              if "signingConfigs {" not in app:
+                  app = re.sub(
+                      r'(?m)^\s*buildTypes\s*\{',
+                      signing + "\n    buildTypes {",
+                      app,
+                      count=1
+                  )
+
+              app = re.sub(
+                  r'signingConfig\s+signingConfigs\.debug',
+                  'signingConfig signingConfigs.release',
+                  app
+              )
+
+              app = re.sub(
+                  r'(release\s*\{)',
+                  r'\1\n            signingConfig signingConfigs.release\n            minifyEnabled true\n            proguardFiles getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro"',
+                  app,
+                  count=1
+              )
+
+          # Avoid duplicate release settings.
+          with open(app_gradle, "w", encoding="utf-8") as f:
+              f.write(app)
+
+          print("Configured application:", app_gradle)
+          PYEOF
+
+          python3 configure_gradle.py
+          rm configure_gradle.py
+
+      # 8. Release signing
+      - name: Configure Release Signing
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "$KEYSTORE_BASE64" ]; then
+            echo "ERROR: KEYSTORE_BASE64 secret is missing."
+            exit 1
+          fi
+
+          mkdir -p android/app
+          printf '%s' "$KEYSTORE_BASE64" | base64 --decode > android/app/release.jks
+
+          test -s android/app/release.jks
+
+          STORE_PASS="${KEYSTORE_PASSWORD:-Messenger@2026}"
+          ALIAS="${KEY_ALIAS:-messenger_key}"
+          KEY_PASS="${KEY_PASSWORD:-Messenger@2026}"
+
+          {
+            echo "RELEASE_STORE_PASSWORD=$STORE_PASS"
+            echo "RELEASE_KEY_ALIAS=$ALIAS"
+            echo "RELEASE_KEY_PASSWORD=$KEY_PASS"
+          } >> "$GITHUB_ENV"
+
+          keytool -list \
+            -keystore android/app/release.jks \
+            -storepass "$STORE_PASS" \
+            -alias "$ALIAS"
+
+      # 9. ProGuard rules
+      - name: Configure ProGuard
+        run: |
+          set -euo pipefail
+
+          cat > android/app/proguard-rules.pro <<'EOF'
+          -keep class **.zego.** { *; }
+          -keep class **.zegocloud.** { *; }
+          -keep class im.zego.** { *; }
+          -keep class com.zego.** { *; }
+          -keep class com.google.firebase.** { *; }
+          -keepattributes *Annotation*
+          -keepattributes Signature
+          -dontwarn im.zego.**
+          -dontwarn com.zego.**
+          EOF
+
+          if ! grep -q 'android.enableJetifier=true' android/gradle.properties; then
+            echo 'android.enableJetifier=true' >> android/gradle.properties
+          fi
+
+          if ! grep -q 'android.useAndroidX=true' android/gradle.properties; then
+            echo 'android.useAndroidX=true' >> android/gradle.properties
+          fi
+
+      # 10. Patch only third-party Pub packages
+      - name: Fix Third Party Android Plugin Order
+        run: |
+          set -euo pipefail
+
+          cat > fix_plugins.py <<'PYEOF'
+          import os
+          import re
+          import json
+          import urllib.parse
+
+          config = ".dart_tool/package_config.json"
+
+          if not os.path.isfile(config):
+              raise SystemExit("package_config.json missing")
+
+          with open(config, encoding="utf-8") as f:
+              packages = json.load(f)["packages"]
+
+          patched = 0
+
+          for pkg in packages:
+              uri = pkg.get("rootUri", "")
+
+              if uri.startswith("file://"):
+                  root = urllib.parse.unquote(
+                      urllib.parse.urlparse(uri).path
+                  )
+              else:
+                  root = os.path.realpath(
+                      os.path.join(".dart_tool", uri)
+                  )
+
+              android_dir = os.path.join(root, "android")
+
+              if not os.path.isdir(android_dir):
                   continue
-              for root, dirs, files in os.walk(sroot):
-                  for fname in files:
-                      if fname not in ("build.gradle", "build.gradle.kts"):
-                          continue
-                      path = os.path.realpath(os.path.join(root, fname))
-                      if path in seen or "/example/" in path:
-                          continue
-                      if "/firebase_" in path or "/cloud_firestore" in path:
-                          continue
-                      seen.add(path)
 
-                      with open(path, "r", encoding="utf-8", errors="ignore") as f:
-                          text = f.read().lstrip("\ufeff").replace("\r\n", "\n")
+              for current, dirs, files in os.walk(android_dir):
+                  dirs[:] = [
+                      d for d in dirs
+                      if d not in ("build", ".gradle", ".dart_tool")
+                  ]
 
-                      clean = strip_comments(text)
-                      if "com.android.application" in clean:
-                          continue
-                      if not any(k in clean for k in keywords):
+                  for filename in files:
+                      if filename not in (
+                          "build.gradle",
+                          "build.gradle.kts"
+                      ):
                           continue
 
-                      orig = text
-                      is_kts = fname.endswith(".kts")
-                      has_kotlin = (
-                          ("kotlin-android" in clean)
-                          or ("org.jetbrains.kotlin.android" in clean)
-                          or ('kotlin("android")' in clean)
-                          or ("kotlin('android')" in clean)
+                      path = os.path.join(current, filename)
+
+                      with open(path, encoding="utf-8", errors="ignore") as f:
+                          original = f.read()
+
+                      if "LibraryExtension" not in original and "android {" not in original:
+                          continue
+
+                      if not re.search(
+                          r'kotlin-android|org\.jetbrains\.kotlin\.android|kotlin\(["\']android',
+                          original
+                      ):
+                          continue
+
+                      text = original
+                      kts = filename.endswith(".kts")
+
+                      # Reorder plugin DSL declarations.
+                      match = re.search(
+                          r'plugins\s*\{([^{}]*)\}',
+                          text,
+                          flags=re.S
                       )
-                      has_flutter_plugin = "dev.flutter.flutter-gradle-plugin" in clean
 
-                      bs_block, body = find_top_block(text, "buildscript")
-                      pl_block, body = find_top_block(body, "plugins")
+                      if match:
+                          block = match.group(1)
+                          lines = block.splitlines()
 
-                      # Remove all imperative apply calls for android.library, kotlin, and flutter-gradle-plugin
-                      apply_pat = (
-                          r'(?m)^[ \t]*(?:project\.)?(?:plugins\.|pluginManager\.)?apply'
-                          r'(?:\s*\(\s*plugin\s*[:=]\s*|\s*\(\s*|\s+plugin\s*:\s*)'
-                          r'[\'"](?:com\.android\.library|kotlin-android|org\.jetbrains\.kotlin\.android|dev\.flutter\.flutter-gradle-plugin)[\'"]'
-                          r'\s*\)?[ \t]*;?[ \t]*\n?'
-                      )
-                      body = re.sub(apply_pat, '', body)
+                          android_lines = [
+                              x for x in lines
+                              if "com.android.library" in x
+                          ]
 
-                      if pl_block or is_kts:
-                          p_items = []
-                          if pl_block:
-                              inner = strip_comments(pl_block[pl_block.find("{") + 1 : pl_block.rfind("}")])
-                              for line in inner.replace(";", "\n").splitlines():
-                                  s = line.strip()
-                                  if not s:
-                                      continue
-                                  if any(x in s for x in (
-                                      "com.android.library",
-                                      "kotlin-android",
-                                      "org.jetbrains.kotlin.android",
-                                      'kotlin("android")',
-                                      "kotlin('android')",
-                                      "dev.flutter.flutter-gradle-plugin",
-                                  )):
-                                      continue
-                                  p_items.append("    " + s)
+                          kotlin_lines = [
+                              x for x in lines
+                              if (
+                                  "kotlin-android" in x
+                                  or "org.jetbrains.kotlin.android" in x
+                                  or 'kotlin("android")' in x
+                              )
+                          ]
 
-                          ordered = ['    id("com.android.library")' if is_kts else '    id "com.android.library"']
-                          if has_kotlin:
-                              ordered.append('    id("org.jetbrains.kotlin.android")' if is_kts else '    id "kotlin-android"')
-                          ordered.extend(p_items)
-                          if has_flutter_plugin:
-                              ordered.append('    id("dev.flutter.flutter-gradle-plugin")' if is_kts else '    id "dev.flutter.flutter-gradle-plugin"')
+                          if kotlin_lines:
+                              remaining = [
+                                  x for x in lines
+                                  if x not in android_lines
+                              ]
 
-                          new_pl = "plugins {\n" + "\n".join(ordered) + "\n}\n\n"
-                          prefix = (bs_block + "\n\n") if bs_block else ""
-                          text = prefix + new_pl + body.lstrip("\n")
+                              if not android_lines:
+                                  android_lines = [
+                                      '    id("com.android.library")'
+                                      if kts else
+                                      '    id "com.android.library"'
+                                  ]
+
+                              first_kotlin = next(
+                                  i for i, line in enumerate(remaining)
+                                  if (
+                                      "kotlin-android" in line
+                                      or "org.jetbrains.kotlin.android" in line
+                                      or 'kotlin("android")' in line
+                                  )
+                              )
+
+                              remaining[first_kotlin:first_kotlin] = android_lines
+
+                              new_block = "\n".join(remaining)
+
+                              text = (
+                                  text[:match.start(1)]
+                                  + new_block
+                                  + text[match.end(1):]
+                              )
+
                       else:
-                          inject = 'apply plugin: "com.android.library"\n'
-                          if has_kotlin:
-                              inject += 'apply plugin: "kotlin-android"\n'
-                          if has_flutter_plugin:
-                              inject += 'apply plugin: "dev.flutter.flutter-gradle-plugin"\n'
-                          prefix = (bs_block + "\n\n") if bs_block else ""
-                          text = prefix + inject + "\n" + body.lstrip("\n")
+                          # Legacy imperative plugin declarations.
+                          pattern = re.compile(
+                              r'(?m)^([ \t]*apply plugin:\s*["\']'
+                              r'(?:kotlin-android|org\.jetbrains\.kotlin\.android)'
+                              r'["\'].*)$'
+                          )
 
-                      if text != orig:
+                          if pattern.search(text):
+                              android_apply = (
+                                  'apply plugin: "com.android.library"\n'
+                              )
+
+                              if "apply plugin: \"com.android.library\"" not in text and \
+                                 "apply plugin: 'com.android.library'" not in text:
+                                  text = pattern.sub(
+                                      lambda m: android_apply + m.group(1),
+                                      text,
+                                      count=1
+                                  )
+
+                      if text != original:
                           with open(path, "w", encoding="utf-8") as f:
                               f.write(text)
-                          print("PATCHED PLUGIN:", path)
+
+                          patched += 1
+                          print("Patched third-party plugin:", path)
+
+          print("Total patched files:", patched)
           PYEOF
+
           python3 fix_plugins.py
-          rm -f fix_plugins.py
+          rm fix_plugins.py
 
-      - name: Build Release APK
-        run: flutter build apk --release --no-pub
+      # 11. Validate Gradle
+      - name: Validate Gradle Configuration
+        working-directory: android
+        run: |
+          set -euo pipefail
+          chmod +x gradlew
+          ./gradlew tasks --no-daemon
 
-      - name: Publish Direct APK to Releases
+      # 12. Build release
+      - name: Build Universal Messenger APK
+        run: |
+          set -euo pipefail
+          flutter build apk \
+            --release \
+            --target-platform android-arm64,android-arm
+
+      # 13. Verify and rename APK
+      - name: Prepare APK
+        run: |
+          set -euo pipefail
+
+          APK="build/app/outputs/flutter-apk/app-release.apk"
+
+          if [ ! -s "$APK" ]; then
+            echo "ERROR: Release APK not found."
+            exit 1
+          fi
+
+          cp "$APK" Universal-Messenger.apk
+
+          ls -lh Universal-Messenger.apk
+
+      # 14. Publish GitHub Release
+      - name: Publish APK to GitHub Releases
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          cp build/app/outputs/flutter-apk/app-release.apk Universal-Messenger.apk
-          gh release create "v4.0.${{ github.run_number }}" Universal-Messenger.apk --title "Universal Messenger v4.0.${{ github.run_number }}" --notes "Phase 3B: Audio & Video Calling Complete"
+          set -euo pipefail
+
+          TAG="v4.0.${{ github.run_number }}"
+          TITLE="Universal Messenger v4.0.${{ github.run_number }}"
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" \
+              Universal-Messenger.apk \
+              --clobber
+          else
+            gh release create "$TAG" \
+              Universal-Messenger.apk \
+              --title "$TITLE" \
+              --notes "Universal Messenger Android Release"
+          fi
+
+          echo "GitHub Release published: $TAG"
