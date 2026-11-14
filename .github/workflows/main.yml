@@ -113,6 +113,8 @@ jobs:
               with open("android/gradle.properties", "r") as f:
                   gp = f.read()
               gp = gp.replace("-Xmx2G", "-Xmx4G").replace("-Xmx1536M", "-Xmx4G").replace("-Xmx1G", "-Xmx4G")
+              if "android.enableJetifier" not in gp:
+                  gp += "\nandroid.enableJetifier=true\n"
               with open("android/gradle.properties", "w") as f:
                   f.write(gp)
 
@@ -337,24 +339,6 @@ jobs:
                           break
               return text[start:end], text[:start] + text[end:]
 
-          def needs_patch(text):
-              clean = strip_comments(text)
-              if "com.android.application" in clean:
-                  return False
-              lib_m = re.search(r'(?:apply\s*\(?\s*plugin\s*[:=]\s*|id\s*\(?\s*)[\'"]com\.android\.library[\'"]', clean)
-              kot_m = re.search(r'kotlin-android|org\.jetbrains\.kotlin\.android|kotlin\(\s*[\'"]android[\'"]\s*\)', clean)
-              and_m = re.search(r'(?m)^\s*android\s*\{|LibraryExtension', clean)
-              if not and_m and not lib_m:
-                  return False
-              if not lib_m:
-                  return True
-              lib_pos = lib_m.start()
-              if kot_m and kot_m.start() < lib_pos:
-                  return True
-              if and_m and and_m.start() < lib_pos:
-                  return True
-              return False
-
           search_roots = set()
           if os.path.exists(".dart_tool/package_config.json"):
               with open(".dart_tool/package_config.json", "r", encoding="utf-8") as f:
@@ -371,6 +355,19 @@ jobs:
           search_roots.add(os.path.expanduser("~/.pub-cache"))
           search_roots.add("/home/runner/.pub-cache")
 
+          keywords = (
+              "com.android.library",
+              "LibraryExtension",
+              "android {",
+              "android{",
+              "compileSdk",
+              "minSdk",
+              "kotlin-android",
+              "org.jetbrains.kotlin.android",
+              'kotlin("android")',
+              "kotlin('android')",
+          )
+
           seen = set()
           for sroot in search_roots:
               if not os.path.exists(sroot):
@@ -382,18 +379,18 @@ jobs:
                       path = os.path.realpath(os.path.join(root, fname))
                       if path in seen or "/example/" in path:
                           continue
-                      if "/firebase_" in path or "/cloud_firestore" in path:
-                          continue
                       seen.add(path)
 
                       with open(path, "r", encoding="utf-8", errors="ignore") as f:
                           text = f.read().replace("\r\n", "\n")
 
-                      if not needs_patch(text):
+                      clean = strip_comments(text)
+                      if "com.android.application" in clean:
+                          continue
+                      if not any(k in clean for k in keywords):
                           continue
 
                       orig = text
-                      clean = strip_comments(text)
                       is_kts = fname.endswith(".kts")
                       has_kotlin = (
                           ("kotlin-android" in clean)
@@ -405,6 +402,12 @@ jobs:
                       bs_block, body = extract_block(text, "buildscript")
                       pl_block, body = extract_block(body, "plugins")
 
+                      # Explicitly resolve flutter.* SDK properties across all plugins (including Firebase)
+                      body = re.sub(r'\bflutter\.(?:compileSdkVersion|compileSdk)\b', '35', body)
+                      body = re.sub(r'\bflutter\.(?:minSdkVersion|minSdk)\b', '23', body)
+                      body = re.sub(r'\bflutter\.(?:targetSdkVersion|targetSdk)\b', '35', body)
+
+                      # Remove standalone com.android.library & kotlin apply lines so com.android.library is guaranteed first
                       body = re.sub(r'(?m)^\s*(?:project\.)?apply\s*\(?\s*plugin\s*[:=]\s*[\'"]com\.android\.library[\'"]\s*\)?.*\n?', '', body)
                       body = re.sub(r'(?m)^\s*(?:project\.)?apply\s*\(?\s*plugin\s*[:=]\s*[\'"](?:kotlin-android|org\.jetbrains\.kotlin\.android)[\'"]\s*\)?.*\n?', '', body)
 
