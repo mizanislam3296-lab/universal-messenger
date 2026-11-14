@@ -133,6 +133,13 @@ jobs:
                               setNs.invoke(androidExt, safeName)
                           }
                       } catch (_: Exception) {}
+                      try {
+                          val getSdk = androidExt.javaClass.getMethod("getCompileSdkVersion")
+                          if (getSdk.invoke(androidExt) == null) {
+                              val setSdk = androidExt.javaClass.getMethod("compileSdkVersion", Int::class.javaPrimitiveType)
+                              setSdk.invoke(androidExt, 35)
+                          }
+                      } catch (_: Exception) {}
                   }
               }
           }
@@ -188,6 +195,9 @@ jobs:
               lines = content.splitlines()
               out = []
               for l in lines:
+                  if "compileSdk =" in l:
+                      out.append("    compileSdk = 35")
+                      continue
                   if "minSdk =" in l or "minSdkVersion" in l:
                       out.append("        minSdk = 23")
                       out.append("        multiDexEnabled = true")
@@ -224,6 +234,9 @@ jobs:
               lines = content.splitlines()
               out = []
               for l in lines:
+                  if "compileSdk " in l or "compileSdkVersion" in l:
+                      out.append("    compileSdk 35")
+                      continue
                   if "minSdk =" in l or "minSdkVersion" in l:
                       out.append("        minSdkVersion 23")
                       out.append("        multiDexEnabled true")
@@ -300,9 +313,8 @@ jobs:
                       if os.path.exists(p):
                           search_roots.add(p)
 
-          for env_var in ["PUB_CACHE"]:
-              if os.environ.get(env_var):
-                  search_roots.add(os.environ[env_var])
+          if os.environ.get("PUB_CACHE"):
+              search_roots.add(os.environ["PUB_CACHE"])
           search_roots.add(os.path.expanduser("~/.pub-cache"))
           search_roots.add("/home/runner/.pub-cache")
 
@@ -350,9 +362,17 @@ jobs:
                       bs_block, body = extract_block(text, "buildscript")
                       pl_block, body = extract_block(body, "plugins")
 
-                      # Remove all standalone apply plugin lines for android library & kotlin
                       body = re.sub(r'(?m)^\s*(?:project\.)?apply\s*\(?\s*plugin\s*[:=]\s*[\'"]com\.android\.library[\'"]\s*\)?.*\n?', '', body)
                       body = re.sub(r'(?m)^\s*(?:project\.)?apply\s*\(?\s*plugin\s*[:=]\s*[\'"](?:kotlin-android|org\.jetbrains\.kotlin\.android)[\'"]\s*\)?.*\n?', '', body)
+
+                      # Replace flutter.* SDK references with explicit numbers so compileSdk is never missing
+                      body = body.replace("flutter.compileSdkVersion", "35")
+                      body = body.replace("flutter.minSdkVersion", "23")
+                      body = body.replace("flutter.targetSdkVersion", "35")
+
+                      if not re.search(r'\bcompileSdk(?:Version)?\b', body):
+                          sdk_line = "    compileSdk = 35\n" if is_kts else "    compileSdk 35\n"
+                          body = re.sub(r'(?m)^(\s*android\s*\{\s*\n)', r'\1' + sdk_line, body, count=1)
 
                       if pl_block or is_kts:
                           p_items = []
