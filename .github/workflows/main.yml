@@ -95,7 +95,7 @@ jobs:
             keytool -genkey -v -keystore android/app/release.jks -keyalg RSA -keysize 2048 -validity 10000 -alias messenger_key -storepass "Messenger@2026" -keypass "Messenger@2026" -dname "CN=Universal Messenger, OU=Mobile, O=Universal, L=Dhaka, S=Dhaka, C=BD"
           fi
 
-          printf -- "-keep class **.zego.** { *; }\n-keep class **.zegocloud.** { *; }\n" > android/app/proguard-rules.pro
+          printf -- "-keep class **.zego.** { *; }\n-keep class **.zegocloud.** { *; }\n-dontwarn **\n" > android/app/proguard-rules.pro
 
           cat << 'PYEOF' > configure_android.py
           import os, shutil
@@ -134,6 +134,7 @@ jobs:
               extensions.extraProperties.set("minSdkVersion", 23)
               extensions.extraProperties.set("targetSdk", 35)
               extensions.extraProperties.set("targetSdkVersion", 35)
+              extensions.extraProperties.set("javaVersion", org.gradle.api.JavaVersion.VERSION_17)
           }
           """
               with open("android/settings.gradle.kts", "w") as f:
@@ -154,6 +155,7 @@ jobs:
               proj.ext.minSdkVersion = 23
               proj.ext.targetSdk = 35
               proj.ext.targetSdkVersion = 35
+              proj.ext.javaVersion = org.gradle.api.JavaVersion.VERSION_17
           }
           """
               with open("android/settings.gradle", "w") as f:
@@ -170,6 +172,7 @@ jobs:
               extensions.extraProperties.set("minSdkVersion", 23)
               extensions.extraProperties.set("targetSdk", 35)
               extensions.extraProperties.set("targetSdkVersion", 35)
+              extensions.extraProperties.set("javaVersion", org.gradle.api.JavaVersion.VERSION_17)
           }
           """
               ns_fix = """
@@ -402,12 +405,10 @@ jobs:
                       bs_block, body = extract_block(text, "buildscript")
                       pl_block, body = extract_block(body, "plugins")
 
-                      # Explicitly resolve flutter.* SDK properties across all plugins (including Firebase)
                       body = re.sub(r'\bflutter\.(?:compileSdkVersion|compileSdk)\b', '35', body)
                       body = re.sub(r'\bflutter\.(?:minSdkVersion|minSdk)\b', '23', body)
                       body = re.sub(r'\bflutter\.(?:targetSdkVersion|targetSdk)\b', '35', body)
 
-                      # Remove standalone com.android.library & kotlin apply lines so com.android.library is guaranteed first
                       body = re.sub(r'(?m)^\s*(?:project\.)?apply\s*\(?\s*plugin\s*[:=]\s*[\'"]com\.android\.library[\'"]\s*\)?.*\n?', '', body)
                       body = re.sub(r'(?m)^\s*(?:project\.)?apply\s*\(?\s*plugin\s*[:=]\s*[\'"](?:kotlin-android|org\.jetbrains\.kotlin\.android)[\'"]\s*\)?.*\n?', '', body)
 
