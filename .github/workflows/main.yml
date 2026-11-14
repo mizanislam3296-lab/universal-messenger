@@ -118,6 +118,30 @@ jobs:
               with open("android/gradle.properties", "w") as f:
                   f.write(gp)
 
+          if os.path.exists("android/build.gradle.kts"):
+              with open("android/build.gradle.kts", "r") as f:
+                  rb = f.read()
+              ns_fix = """
+subprojects {
+    plugins.withId("com.android.library") {
+        val androidExt = extensions.findByName("android")
+        if (androidExt != null) {
+            try {
+                val getNs = androidExt.javaClass.getMethod("getNamespace")
+                val curNs = getNs.invoke(androidExt) as? String
+                if (curNs.isNullOrEmpty()) {
+                    val setNs = androidExt.javaClass.getMethod("setNamespace", String::class.java)
+                    val safeName = "com.universal.plugin." + project.name.replace("-", "_").replace(".", "_")
+                    setNs.invoke(androidExt, safeName)
+                }
+            } catch (_: Exception) {}
+        }
+    }
+}
+"""
+              with open("android/build.gradle.kts", "w") as f:
+                  f.write(rb + "\n" + ns_fix)
+
           if os.path.exists("android/settings.gradle.kts"):
               with open("android/settings.gradle.kts", "r") as f:
                   lines = f.read().splitlines()
@@ -210,28 +234,45 @@ jobs:
           flutter pub add dio file_picker url_launcher zego_uikit_prebuilt_call
           flutter pub get
           python3 -c '
-          import os, glob
-          pub_cache = os.path.expanduser("~/.pub-cache/hosted/pub.dev")
-          for pattern in ["*/android/build.gradle", "*/android/build.gradle.kts"]:
-              for path in glob.glob(os.path.join(pub_cache, pattern)):
-                  with open(path, "r", encoding="utf-8", errors="ignore") as f:
-                      lines = f.read().splitlines()
-                  lib_idx = -1
-                  kot_idx = -1
-                  for i, l in enumerate(lines):
-                      if "com.android.library" in l and ("apply" in l or "id" in l):
-                          lib_idx = i
-                      if ("kotlin-android" in l or "org.jetbrains.kotlin.android" in l) and ("apply" in l or "id" in l):
-                          kot_idx = i
-                  if lib_idx != -1 and kot_idx != -1 and kot_idx < lib_idx:
-                      lines[kot_idx], lines[lib_idx] = lines[lib_idx], lines[kot_idx]
-                      with open(path, "w", encoding="utf-8") as f:
-                          f.write("\n".join(lines) + "\n")
-                      print("Fixed plugin order in:", path)
+          import os, glob, re
+
+          caches = set()
+          if os.environ.get("PUB_CACHE"):
+              caches.add(os.environ["PUB_CACHE"])
+          caches.add(os.path.expanduser("~/.pub-cache"))
+          caches.add("/home/runner/.pub-cache")
+
+          for cache in caches:
+              hosted = os.path.join(cache, "hosted")
+              if not os.path.exists(hosted):
+                  continue
+              for pattern in ["*/*/android/build.gradle", "*/*/android/build.gradle.kts"]:
+                  for path in glob.glob(os.path.join(hosted, pattern)):
+                      with open(path, "r", encoding="utf-8", errors="ignore") as f:
+                          text = f.read()
+                      orig = text
+
+                      if "plugins {" in text and "com.android.library" in text:
+                          text = re.sub(r"^\s*apply\s+plugin\s*:\s*[\x27\"]com\.android\.library[\x27\"]\s*\n?", "", text, flags=re.M)
+                          if not re.search(r"plugins\s*\{[^}]*com\.android\.library", text, flags=re.S):
+                              text = re.sub(r"(plugins\s*\{\s*\n)", r"\1    id \"com.android.library\"\n", text, count=1)
+                      elif "android {" in text:
+                          has_kotlin = "kotlin-android" in text or "org.jetbrains.kotlin.android" in text
+                          text = re.sub(r"^\s*apply\s+plugin\s*:\s*[\x27\"]com\.android\.library[\x27\"]\s*\n?", "", text, flags=re.M)
+                          text = re.sub(r"^\s*apply\s+plugin\s*:\s*[\x27\"](?:kotlin-android|org\.jetbrains\.kotlin\.android)[\x27\"]\s*\n?", "", text, flags=re.M)
+                          inject = "apply plugin: \"com.android.library\"\n"
+                          if has_kotlin and "plugins {" not in text:
+                              inject += "apply plugin: \"kotlin-android\"\n"
+                          text = re.sub(r"^(\s*android\s*\{)", inject + r"\1", text, count=1, flags=re.M)
+
+                      if text != orig:
+                          with open(path, "w", encoding="utf-8") as f:
+                              f.write(text)
+                          print("Patched Gradle plugin order in:", path)
           '
 
       - name: Build Release APK
-        run: flutter build apk --release
+        run: flutter build apk --release --stacktrace
 
       - name: Publish Direct APK to Releases
         env:
