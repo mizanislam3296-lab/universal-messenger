@@ -321,23 +321,68 @@ jobs:
               code = re.sub(r'//.*', '', code)
               return code
 
-          def extract_block(text, keyword):
-              m = re.search(r'(?m)^\s*' + keyword + r'\s*\{', text)
-              if not m:
-                  return None, text
-              start = m.start()
-              brace_start = text.find("{", start)
-              depth = 0
-              end = brace_start
-              for idx in range(brace_start, len(text)):
-                  if text[idx] == "{":
-                      depth += 1
-                  elif text[idx] == "}":
-                      depth -= 1
-                      if depth == 0:
-                          end = idx + 1
-                          break
-              return text[start:end], text[:start] + text[end:]
+          def find_top_block(text, keyword):
+              i = 0
+              n = len(text)
+              in_sl_comment = False
+              in_ml_comment = False
+              in_str = None
+              while i < n:
+                  ch = text[i]
+                  nxt = text[i + 1] if i + 1 < n else ""
+                  if in_sl_comment:
+                      if ch == "\n":
+                          in_sl_comment = False
+                      i += 1
+                      continue
+                  if in_ml_comment:
+                      if ch == "*" and nxt == "/":
+                          in_ml_comment = False
+                          i += 2
+                      else:
+                          i += 1
+                      continue
+                  if in_str:
+                      if ch == "\\":
+                          i += 2
+                          continue
+                      if ch == in_str:
+                          in_str = None
+                      i += 1
+                      continue
+                  if ch == "/" and nxt == "/":
+                      in_sl_comment = True
+                      i += 2
+                      continue
+                  if ch == "/" and nxt == "*":
+                      in_ml_comment = True
+                      i += 2
+                      continue
+                  if ch in ('"', "'"):
+                      in_str = ch
+                      i += 1
+                      continue
+
+                  if text[i:].startswith(keyword):
+                      prev_ok = (i == 0) or (not (text[i - 1].isalnum() or text[i - 1] in "_."))
+                      after_idx = i + len(keyword)
+                      if prev_ok and after_idx < n and (text[after_idx].isspace() or text[after_idx] == "{"):
+                          j = after_idx
+                          while j < n and text[j].isspace():
+                              j += 1
+                          if j < n and text[j] == "{":
+                              depth = 0
+                              k = j
+                              while k < n:
+                                  if text[k] == "{":
+                                      depth += 1
+                                  elif text[k] == "}":
+                                      depth -= 1
+                                      if depth == 0:
+                                          return text[i : k + 1], text[:i] + text[k + 1 :]
+                                  k += 1
+                  i += 1
+              return None, text
 
           search_roots = set()
           if os.path.exists(".dart_tool/package_config.json"):
@@ -347,11 +392,14 @@ jobs:
                   uri = pkg.get("rootUri", "")
                   if uri.startswith("file://"):
                       p = urllib.parse.unquote(urllib.parse.urlparse(uri).path)
-                      if os.path.exists(p):
-                          search_roots.add(p)
+                  else:
+                      p = os.path.realpath(os.path.join(".dart_tool", uri))
+                  if os.path.exists(p):
+                      search_roots.add(p)
 
-          if os.environ.get("PUB_CACHE"):
-              search_roots.add(os.environ["PUB_CACHE"])
+          for env_var in ["PUB_CACHE", "FLUTTER_ROOT"]:
+              if os.environ.get(env_var):
+                  search_roots.add(os.environ[env_var])
           search_roots.add(os.path.expanduser("~/.pub-cache"))
           search_roots.add("/home/runner/.pub-cache")
 
@@ -385,7 +433,7 @@ jobs:
                       seen.add(path)
 
                       with open(path, "r", encoding="utf-8", errors="ignore") as f:
-                          text = f.read().replace("\r\n", "\n")
+                          text = f.read().lstrip("\ufeff").replace("\r\n", "\n")
 
                       clean = strip_comments(text)
                       if "com.android.application" in clean:
@@ -401,36 +449,55 @@ jobs:
                           or ('kotlin("android")' in clean)
                           or ("kotlin('android')" in clean)
                       )
+                      has_flutter_plugin = "dev.flutter.flutter-gradle-plugin" in clean
 
-                      bs_block, body = extract_block(text, "buildscript")
-                      pl_block, body = extract_block(body, "plugins")
+                      bs_block, body = find_top_block(text, "buildscript")
+                      pl_block, body = find_top_block(body, "plugins")
 
-                      body = re.sub(r'(?m)^\s*(?:project\.)?apply\s*\(?\s*plugin\s*[:=]\s*[\'"]com\.android\.library[\'"]\s*\)?.*\n?', '', body)
-                      body = re.sub(r'(?m)^\s*(?:project\.)?apply\s*\(?\s*plugin\s*[:=]\s*[\'"](?:kotlin-android|org\.jetbrains\.kotlin\.android)[\'"]\s*\)?.*\n?', '', body)
+                      # Remove all imperative apply calls for android.library, kotlin, and flutter-gradle-plugin
+                      apply_pat = (
+                          r'(?m)^[ \t]*(?:project\.)?(?:plugins\.|pluginManager\.)?apply'
+                          r'(?:\s*\(\s*plugin\s*[:=]\s*|\s*\(\s*|\s+plugin\s*:\s*)'
+                          r'[\'"](?:com\.android\.library|kotlin-android|org\.jetbrains\.kotlin\.android|dev\.flutter\.flutter-gradle-plugin)[\'"]'
+                          r'\s*\)?[ \t]*;?[ \t]*\n?'
+                      )
+                      body = re.sub(apply_pat, '', body)
 
                       if pl_block or is_kts:
                           p_items = []
                           if pl_block:
-                              inner = pl_block[pl_block.find("{") + 1 : pl_block.rfind("}")]
+                              inner = strip_comments(pl_block[pl_block.find("{") + 1 : pl_block.rfind("}")])
                               for line in inner.replace(";", "\n").splitlines():
                                   s = line.strip()
-                                  if not s or s.startswith("//") or "com.android.library" in s:
+                                  if not s:
+                                      continue
+                                  if any(x in s for x in (
+                                      "com.android.library",
+                                      "kotlin-android",
+                                      "org.jetbrains.kotlin.android",
+                                      'kotlin("android")',
+                                      "kotlin('android')",
+                                      "dev.flutter.flutter-gradle-plugin",
+                                  )):
                                       continue
                                   p_items.append("    " + s)
-                          if has_kotlin and not any(
-                              ("kotlin-android" in x or "org.jetbrains.kotlin.android" in x or "kotlin(" in x)
-                              for x in p_items
-                          ):
-                              p_items.append('    id("org.jetbrains.kotlin.android")' if is_kts else '    id "kotlin-android"')
 
-                          lib_line = '    id("com.android.library")' if is_kts else '    id "com.android.library"'
-                          new_pl = "plugins {\n" + lib_line + "\n" + ("\n".join(p_items) + "\n" if p_items else "") + "}\n\n"
+                          ordered = ['    id("com.android.library")' if is_kts else '    id "com.android.library"']
+                          if has_kotlin:
+                              ordered.append('    id("org.jetbrains.kotlin.android")' if is_kts else '    id "kotlin-android"')
+                          ordered.extend(p_items)
+                          if has_flutter_plugin:
+                              ordered.append('    id("dev.flutter.flutter-gradle-plugin")' if is_kts else '    id "dev.flutter.flutter-gradle-plugin"')
+
+                          new_pl = "plugins {\n" + "\n".join(ordered) + "\n}\n\n"
                           prefix = (bs_block + "\n\n") if bs_block else ""
                           text = prefix + new_pl + body.lstrip("\n")
                       else:
                           inject = 'apply plugin: "com.android.library"\n'
                           if has_kotlin:
                               inject += 'apply plugin: "kotlin-android"\n'
+                          if has_flutter_plugin:
+                              inject += 'apply plugin: "dev.flutter.flutter-gradle-plugin"\n'
                           prefix = (bs_block + "\n\n") if bs_block else ""
                           text = prefix + inject + "\n" + body.lstrip("\n")
 
