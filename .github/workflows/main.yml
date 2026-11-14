@@ -166,15 +166,20 @@ jobs:
           cat << 'PYEOF' > fix_plugins.py
           import json, os, re, urllib.parse
 
-          roots = {os.environ.get("PUB_CACHE") or os.path.expanduser("~/.pub-cache")}
+          proj_dir = os.path.realpath(".")
+          flutter_root = os.path.realpath(os.environ["FLUTTER_ROOT"]) if os.environ.get("FLUTTER_ROOT") else ""
+          roots = {os.path.realpath(os.environ.get("PUB_CACHE") or os.path.expanduser("~/.pub-cache"))}
+
           if os.path.exists(".dart_tool/package_config.json"):
               with open(".dart_tool/package_config.json", encoding="utf-8") as f:
                   cfg = json.load(f)
               for pkg in cfg.get("packages", []):
                   uri = pkg.get("rootUri", "")
-                  p = urllib.parse.unquote(urllib.parse.urlparse(uri).path) if uri.startswith("file://") else os.path.realpath(os.path.join(".dart_tool", uri))
-                  if os.path.exists(p):
-                      roots.add(p)
+                  p = urllib.parse.unquote(urllib.parse.urlparse(uri).path) if uri.startswith("file://") else os.path.join(".dart_tool", uri)
+                  rp = os.path.realpath(p)
+                  if os.path.exists(rp) and rp != proj_dir and not rp.startswith(proj_dir + os.sep):
+                      if not flutter_root or not rp.startswith(flutter_root + os.sep):
+                          roots.add(rp)
 
           seen = set()
           for base in roots:
@@ -187,7 +192,9 @@ jobs:
                       path = os.path.realpath(os.path.join(root, fname))
                       if path in seen or not path.endswith(("/android/build.gradle", "/android/build.gradle.kts")):
                           continue
-                      if any(skip in path for skip in ("/example/", "/firebase_", "/cloud_firestore", "/flutter/packages/", "/flutter_tools/")):
+                      if path.startswith(proj_dir + os.sep) or (flutter_root and path.startswith(flutter_root + os.sep)):
+                          continue
+                      if any(skip in path for skip in ("/example/", "/firebase_", "/cloud_firestore")):
                           continue
                       seen.add(path)
 
