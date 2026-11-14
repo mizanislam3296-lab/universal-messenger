@@ -80,27 +80,34 @@ jobs:
           printf -- "-keep class **.zego.** { *; }\n-keep class **.zegocloud.** { *; }\n-dontwarn **\n" > android/app/proguard-rules.pro
 
           cat << 'PYEOF' > configure_android.py
-          import os, shutil
+          import os, re, shutil, xml.etree.ElementTree as ET
 
           for lang in ["kotlin", "java"]:
               shutil.rmtree(f"android/app/src/main/{lang}", ignore_errors=True)
           tdir = "android/app/src/main/kotlin/com/universal/messenger"
           os.makedirs(tdir, exist_ok=True)
-          open(f"{tdir}/MainActivity.kt", "w").write("package com.universal.messenger\nimport io.flutter.embedding.android.FlutterActivity\nclass MainActivity : FlutterActivity()\n")
+          with open(f"{tdir}/MainActivity.kt", "w") as f:
+              f.write("package com.universal.messenger\nimport io.flutter.embedding.android.FlutterActivity\nclass MainActivity : FlutterActivity()\n")
 
           if os.path.exists("android/gradle.properties"):
-              gp = open("android/gradle.properties").read().replace("-Xmx2G", "-Xmx4G").replace("-Xmx1536M", "-Xmx4G")
+              with open("android/gradle.properties", "r") as f:
+                  gp = f.read()
+              gp = gp.replace("-Xmx2G", "-Xmx4G").replace("-Xmx1536M", "-Xmx4G")
               gp += "\nandroid.enableJetifier=true\nkotlin.jvm.target.validation.mode=warning\n"
-              open("android/gradle.properties", "w").write(gp)
+              with open("android/gradle.properties", "w") as f:
+                  f.write(gp)
 
           if os.path.exists("android/settings.gradle.kts"):
-              s = open("android/settings.gradle.kts").read()
+              with open("android/settings.gradle.kts", "r") as f:
+                  s = f.read()
               s = s.replace('apply false', 'apply false\n    id("com.google.gms.google-services") version "4.4.2" apply false', 1)
               s += '\ngradle.beforeProject {\n    listOf("compileSdk", "compileSdkVersion", "targetSdk", "targetSdkVersion").forEach { extensions.extraProperties.set(it, 35) }\n    listOf("minSdk", "minSdkVersion").forEach { extensions.extraProperties.set(it, 23) }\n    extensions.extraProperties.set("javaVersion", org.gradle.api.JavaVersion.VERSION_17)\n}\n'
-              open("android/settings.gradle.kts", "w").write(s)
+              with open("android/settings.gradle.kts", "w") as f:
+                  f.write(s)
 
           if os.path.exists("android/build.gradle.kts"):
-              b = open("android/build.gradle.kts").read()
+              with open("android/build.gradle.kts", "r") as f:
+                  b = f.read()
               fix = '''
           allprojects {
               listOf("compileSdk", "compileSdkVersion", "targetSdk", "targetSdkVersion").forEach { extensions.extraProperties.set(it, 35) }
@@ -122,23 +129,32 @@ jobs:
               }
           }
           '''
-              open("android/build.gradle.kts", "w").write(b + "\n" + fix)
+              with open("android/build.gradle.kts", "w") as f:
+                  f.write(b + "\n" + fix)
 
           if os.path.exists("android/app/build.gradle.kts"):
-              c = open("android/app/build.gradle.kts").read().replace("com.universal.universal_messenger", "com.universal.messenger")
+              with open("android/app/build.gradle.kts", "r") as f:
+                  c = f.read()
+              c = c.replace("com.universal.universal_messenger", "com.universal.messenger")
               c = c.replace('id("com.android.application")', 'id("com.android.application")\n    id("com.google.gms.google-services")')
-              c = c.replace("compileSdk = flutter.compileSdkVersion", "compileSdk = 35")
-              c = c.replace("minSdk = flutter.minSdkVersion", "minSdk = 23\n        multiDexEnabled = true")
+              c = re.sub(r'compileSdk\s*=\s*\S+', 'compileSdk = 35', c, count=1)
+              c = re.sub(r'minSdk\s*=\s*\S+', 'minSdk = 23\n        multiDexEnabled = true', c, count=1)
               sign = '    lint { checkReleaseBuilds = false; abortOnError = false }\n    signingConfigs { create("release") { storeFile = file("release.jks"); storePassword = "Messenger@2026"; keyAlias = "messenger_key"; keyPassword = "Messenger@2026" } }\n    buildTypes {'
               c = c.replace("    buildTypes {", sign, 1)
               c = c.replace('signingConfigs.getByName("debug")', 'signingConfigs.getByName("release")\n            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")')
-              open("android/app/build.gradle.kts", "w").write(c)
+              with open("android/app/build.gradle.kts", "w") as f:
+                  f.write(c)
 
           mp = "android/app/src/main/AndroidManifest.xml"
           if os.path.exists(mp):
+              with open(mp, "r", encoding="utf-8") as f:
+                  m_xml = f.read()
               perms = ''.join(f'    <uses-permission android:name="android.permission.{p}"/>\n' for p in ["INTERNET","CAMERA","RECORD_AUDIO","MODIFY_AUDIO_SETTINGS","ACCESS_NETWORK_STATE","ACCESS_WIFI_STATE","BLUETOOTH","BLUETOOTH_CONNECT","WAKE_LOCK"])
               perms += '    <queries><intent><action android:name="android.intent.action.VIEW"/><data android:scheme="https"/></intent></queries>\n    <application'
-              open(mp, "w").write(open(mp).read().replace("<application", perms, 1))
+              m_xml = m_xml.replace("<application", perms, 1)
+              ET.fromstring(m_xml)
+              with open(mp, "w", encoding="utf-8") as f:
+                  f.write(m_xml)
           PYEOF
           python3 configure_android.py && rm -f configure_android.py
 
@@ -158,7 +174,8 @@ jobs:
                   path = os.path.join(root, fname)
                   if any(skip in path for skip in ("/example/", "/firebase_", "/cloud_firestore", "/flutter/")):
                       continue
-                  text = open(path, encoding="utf-8", errors="ignore").read().lstrip("\ufeff").replace("\r\n", "\n")
+                  with open(path, encoding="utf-8", errors="ignore") as f:
+                      text = f.read().lstrip("\ufeff").replace("\r\n", "\n")
                   if not any(k in text for k in ("com.android.library", "LibraryExtension", "android {", "android{")):
                       continue
 
@@ -179,8 +196,8 @@ jobs:
                               text = text[:s] + text[k+1:]
                               break
 
-                  text = re.sub(r'(?m)^.*apply.*com\.android\.library.*\n?', '', text)
-                  text = re.sub(r'(?m)^.*apply.*kotlin-android.*\n?', '', text)
+                  text = re.sub(r'(?m)^[ \t]*apply\b.*com\.android\.library.*\n?', '', text)
+                  text = re.sub(r'(?m)^[ \t]*apply\b.*kotlin-android.*\n?', '', text)
 
                   m_pl = re.search(r'(?m)^\s*plugins\s*\{', text)
                   if m_pl:
@@ -205,7 +222,8 @@ jobs:
                       text = bs + inj + "\n" + text.lstrip("\n")
 
                   if text != orig:
-                      open(path, "w", encoding="utf-8").write(text)
+                      with open(path, "w", encoding="utf-8") as f:
+                          f.write(text)
                       print("PATCHED:", path)
           PYEOF
           python3 fix_plugins.py && rm -f fix_plugins.py
