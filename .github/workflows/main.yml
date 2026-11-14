@@ -116,10 +116,51 @@ jobs:
               with open("android/gradle.properties", "w") as f:
                   f.write(gp)
 
+          if os.path.exists("android/settings.gradle.kts"):
+              with open("android/settings.gradle.kts", "r") as f:
+                  lines = f.read().splitlines()
+              out = []
+              for l in lines:
+                  out.append(l)
+                  if "com.android.application" in l and "apply false" in l:
+                      out.append('    id("com.google.gms.google-services") version "4.4.2" apply false')
+              before_proj = """
+          gradle.beforeProject {
+              extensions.extraProperties.set("compileSdk", 35)
+              extensions.extraProperties.set("compileSdkVersion", 35)
+              extensions.extraProperties.set("minSdk", 23)
+              extensions.extraProperties.set("minSdkVersion", 23)
+              extensions.extraProperties.set("targetSdk", 35)
+              extensions.extraProperties.set("targetSdkVersion", 35)
+          }
+          """
+              with open("android/settings.gradle.kts", "w") as f:
+                  f.write("\n".join(out) + "\n" + before_proj)
+          elif os.path.exists("android/settings.gradle"):
+              with open("android/settings.gradle", "r") as f:
+                  lines = f.read().splitlines()
+              out = []
+              for l in lines:
+                  out.append(l)
+                  if "com.android.application" in l and "apply false" in l:
+                      out.append('    id "com.google.gms.google-services" version "4.4.2" apply false')
+              before_proj = """
+          gradle.beforeProject { proj ->
+              proj.ext.compileSdk = 35
+              proj.ext.compileSdkVersion = 35
+              proj.ext.minSdk = 23
+              proj.ext.minSdkVersion = 23
+              proj.ext.targetSdk = 35
+              proj.ext.targetSdkVersion = 35
+          }
+          """
+              with open("android/settings.gradle", "w") as f:
+                  f.write("\n".join(out) + "\n" + before_proj)
+
           if os.path.exists("android/build.gradle.kts"):
               with open("android/build.gradle.kts", "r") as f:
                   rb = f.read()
-              ns_fix = """
+              top_ext = """
           allprojects {
               extensions.extraProperties.set("compileSdk", 35)
               extensions.extraProperties.set("compileSdkVersion", 35)
@@ -128,7 +169,8 @@ jobs:
               extensions.extraProperties.set("targetSdk", 35)
               extensions.extraProperties.set("targetSdkVersion", 35)
           }
-
+          """
+              ns_fix = """
           subprojects {
               plugins.withId("com.android.library") {
                   val androidExt = extensions.findByName("android")
@@ -154,28 +196,7 @@ jobs:
           }
           """
               with open("android/build.gradle.kts", "w") as f:
-                  f.write(rb + "\n" + ns_fix)
-
-          if os.path.exists("android/settings.gradle.kts"):
-              with open("android/settings.gradle.kts", "r") as f:
-                  lines = f.read().splitlines()
-              out = []
-              for l in lines:
-                  out.append(l)
-                  if "com.android.application" in l and "apply false" in l:
-                      out.append('    id("com.google.gms.google-services") version "4.4.2" apply false')
-              with open("android/settings.gradle.kts", "w") as f:
-                  f.write("\n".join(out) + "\n")
-          elif os.path.exists("android/settings.gradle"):
-              with open("android/settings.gradle", "r") as f:
-                  lines = f.read().splitlines()
-              out = []
-              for l in lines:
-                  out.append(l)
-                  if "com.android.application" in l and "apply false" in l:
-                      out.append('    id "com.google.gms.google-services" version "4.4.2" apply false')
-              with open("android/settings.gradle", "w") as f:
-                  f.write("\n".join(out) + "\n")
+                  f.write(top_ext + "\n" + rb + "\n" + ns_fix)
 
           if os.path.exists("android/app/build.gradle.kts"):
               with open("android/app/build.gradle.kts", "r") as f:
@@ -293,6 +314,11 @@ jobs:
           cat << 'PYEOF' > fix_plugins.py
           import os, re, json, urllib.parse
 
+          def strip_comments(code):
+              code = re.sub(r'/\*.*?\*/', '', code, flags=re.S)
+              code = re.sub(r'//.*', '', code)
+              return code
+
           def extract_block(text, keyword):
               m = re.search(r'(?m)^\s*' + keyword + r'\s*\{', text)
               if not m:
@@ -312,11 +338,12 @@ jobs:
               return text[start:end], text[:start] + text[end:]
 
           def needs_patch(text):
-              if "com.android.application" in text:
+              clean = strip_comments(text)
+              if "com.android.application" in clean:
                   return False
-              lib_m = re.search(r'com\.android\.library', text)
-              kot_m = re.search(r'kotlin-android|org\.jetbrains\.kotlin\.android|kotlin\(\s*[\'"]android[\'"]\s*\)', text)
-              and_m = re.search(r'(?m)^\s*android\s*\{|LibraryExtension', text)
+              lib_m = re.search(r'(?:apply\s*\(?\s*plugin\s*[:=]\s*|id\s*\(?\s*)[\'"]com\.android\.library[\'"]', clean)
+              kot_m = re.search(r'kotlin-android|org\.jetbrains\.kotlin\.android|kotlin\(\s*[\'"]android[\'"]\s*\)', clean)
+              and_m = re.search(r'(?m)^\s*android\s*\{|LibraryExtension', clean)
               if not and_m and not lib_m:
                   return False
               if not lib_m:
@@ -355,6 +382,8 @@ jobs:
                       path = os.path.realpath(os.path.join(root, fname))
                       if path in seen or "/example/" in path:
                           continue
+                      if "/firebase_" in path or "/cloud_firestore" in path:
+                          continue
                       seen.add(path)
 
                       with open(path, "r", encoding="utf-8", errors="ignore") as f:
@@ -364,12 +393,13 @@ jobs:
                           continue
 
                       orig = text
+                      clean = strip_comments(text)
                       is_kts = fname.endswith(".kts")
                       has_kotlin = (
-                          ("kotlin-android" in text)
-                          or ("org.jetbrains.kotlin.android" in text)
-                          or ('kotlin("android")' in text)
-                          or ("kotlin('android')" in text)
+                          ("kotlin-android" in clean)
+                          or ("org.jetbrains.kotlin.android" in clean)
+                          or ('kotlin("android")' in clean)
+                          or ("kotlin('android')" in clean)
                       )
 
                       bs_block, body = extract_block(text, "buildscript")
