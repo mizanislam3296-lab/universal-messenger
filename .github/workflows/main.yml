@@ -213,9 +213,10 @@ jobs:
                       if fname.endswith(".java") and "sqflite_android" in path:
                           with open(path, encoding="utf-8", errors="ignore") as f:
                               jtxt = f.read()
-                          if ".threadId()" in jtxt:
+                          new_jtxt = jtxt.replace(".threadId()", ".getId()").replace("Locale.of(", "new Locale(")
+                          if new_jtxt != jtxt:
                               with open(path, "w", encoding="utf-8") as f:
-                                  f.write(jtxt.replace(".threadId()", ".getId()"))
+                                  f.write(new_jtxt)
                               print("PATCHED JAVA:", path)
                           continue
 
