@@ -79,18 +79,8 @@ jobs:
 
           printf -- "-keep class **.zego.** { *; }\n-keep class **.zegocloud.** { *; }\n-dontwarn **\n-ignorewarnings\n" > android/app/proguard-rules.pro
 
-          SDKMGR=$(command -v sdkmanager || echo "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager")
-          if [ -x "$SDKMGR" ]; then
-            yes | "$SDKMGR" "platforms;android-37" >/dev/null 2>&1 || true
-          fi
-          MAX_SDK=$(ls "$ANDROID_HOME/platforms" 2>/dev/null | sed 's/android-//' | grep -E '^[0-9]+$' | sort -n | tail -1)
-          MAX_SDK=${MAX_SDK:-36}
-          echo "MAX_SDK=$MAX_SDK" >> $GITHUB_ENV
-
           cat << 'PYEOF' > configure_android.py
           import os, re, shutil, xml.etree.ElementTree as ET
-
-          max_sdk = int(os.environ.get("MAX_SDK", "36"))
 
           for lang in ["kotlin", "java"]:
               shutil.rmtree(f"android/app/src/main/{lang}", ignore_errors=True)
@@ -99,21 +89,11 @@ jobs:
           with open(f"{tdir}/MainActivity.kt", "w") as f:
               f.write("package com.universal.messenger\nimport io.flutter.embedding.android.FlutterActivity\nclass MainActivity : FlutterActivity()\n")
 
-          lp = "android/local.properties"
-          lp_txt = open(lp).read() if os.path.exists(lp) else ""
-          for k, v in [("flutter.compileSdkVersion", max_sdk), ("flutter.targetSdkVersion", 35), ("flutter.minSdkVersion", 23)]:
-              if k in lp_txt:
-                  lp_txt = re.sub(rf'{k}=.*', f'{k}={v}', lp_txt)
-              else:
-                  lp_txt += f"\n{k}={v}\n"
-          with open(lp, "w") as f:
-              f.write(lp_txt)
-
           if os.path.exists("android/gradle.properties"):
               with open("android/gradle.properties", "r") as f:
                   gp = f.read()
               gp = gp.replace("-Xmx2G", "-Xmx4G").replace("-Xmx1536M", "-Xmx4G")
-              gp += "\nandroid.enableJetifier=true\nkotlin.jvm.target.validation.mode=warning\n"
+              gp += "\nandroid.enableJetifier=true\nkotlin.jvm.target.validation.mode=warning\nandroid.suppressUnsupportedCompileSdk=36\n"
               with open("android/gradle.properties", "w") as f:
                   f.write(gp)
 
@@ -121,16 +101,16 @@ jobs:
               with open("android/settings.gradle.kts", "r") as f:
                   s = f.read()
               s = s.replace('apply false', 'apply false\n    id("com.google.gms.google-services") version "4.4.2" apply false', 1)
-              s += f'''
-          gradle.beforeProject {{
-              listOf("compileSdk", "compileSdkVersion").forEach {{ extensions.extraProperties.set(it, {max_sdk}) }}
-              listOf("targetSdk", "targetSdkVersion").forEach {{ extensions.extraProperties.set(it, 35) }}
-              listOf("minSdk", "minSdkVersion").forEach {{ extensions.extraProperties.set(it, 23) }}
+              s += '''
+          gradle.beforeProject {
+              listOf("compileSdk", "compileSdkVersion").forEach { extensions.extraProperties.set(it, 36) }
+              listOf("targetSdk", "targetSdkVersion").forEach { extensions.extraProperties.set(it, 35) }
+              listOf("minSdk", "minSdkVersion").forEach { extensions.extraProperties.set(it, 23) }
               extensions.extraProperties.set("javaVersion", org.gradle.api.JavaVersion.VERSION_17)
-              if (project != rootProject && project.name != "app") {{
+              if (project != rootProject && project.name != "app") {
                   project.pluginManager.apply("com.android.library")
-              }}
-          }}
+              }
+          }
           '''
               with open("android/settings.gradle.kts", "w") as f:
                   f.write(s)
@@ -138,37 +118,42 @@ jobs:
           if os.path.exists("android/build.gradle.kts"):
               with open("android/build.gradle.kts", "r") as f:
                   b = f.read()
-              fix = f'''
-          allprojects {{
-              listOf("compileSdk", "compileSdkVersion").forEach {{ extensions.extraProperties.set(it, {max_sdk}) }}
-              listOf("targetSdk", "targetSdkVersion").forEach {{ extensions.extraProperties.set(it, 35) }}
-              listOf("minSdk", "minSdkVersion").forEach {{ extensions.extraProperties.set(it, 23) }}
+              fix = '''
+          allprojects {
+              listOf("compileSdk", "compileSdkVersion").forEach { extensions.extraProperties.set(it, 36) }
+              listOf("targetSdk", "targetSdkVersion").forEach { extensions.extraProperties.set(it, 35) }
+              listOf("minSdk", "minSdkVersion").forEach { extensions.extraProperties.set(it, 23) }
               extensions.extraProperties.set("javaVersion", org.gradle.api.JavaVersion.VERSION_17)
-              tasks.matching {{ it.name.startsWith("check") && it.name.endsWith("AarMetadata") }}.configureEach {{
-                  enabled = false
-              }}
-          }}
-          subprojects {{
-              plugins.withId("com.android.library") {{
-                  val ext = extensions.findByName("android") ?: return@withId
-                  try {{
-                      val cur = ext.javaClass.getMethod("getNamespace").invoke(ext) as? String
-                      if (cur.isNullOrEmpty()) {{
-                          val mf = file("src/main/AndroidManifest.xml")
-                          val pkg = if (mf.exists()) Regex("package\\\\s*=\\\\s*[\\"']([^\\"']+)[\\"']").find(mf.readText())?.groupValues?.get(1) else null
-                          ext.javaClass.getMethod("setNamespace", String::class.java).invoke(ext, pkg ?: ("com.universal.plugin." + project.name.replace("-", "_").replace(".", "_")))
-                      }}
-                  }} catch (_: Exception) {{}}
-                  val applyMaxSdk = {{
-                      try {{
-                          ext.javaClass.methods.firstOrNull {{ it.name == "setCompileSdk" && it.parameterCount == 1 }}?.invoke(ext, {max_sdk})
-                          ext.javaClass.methods.firstOrNull {{ it.name == "compileSdkVersion" && it.parameterTypes.contentEquals(arrayOf(Int::class.javaPrimitiveType)) }}?.invoke(ext, {max_sdk})
-                      }} catch (_: Exception) {{}}
-                  }}
-                  applyMaxSdk()
-                  afterEvaluate {{ applyMaxSdk() }}
-              }}
-          }}
+          }
+          subprojects {
+              val configureLib = {
+                  val ext = extensions.findByName("android")
+                  if (ext != null) {
+                      try {
+                          val cur = ext.javaClass.getMethod("getNamespace").invoke(ext) as? String
+                          if (cur.isNullOrEmpty()) {
+                              val mf = file("src/main/AndroidManifest.xml")
+                              val pkg = if (mf.exists()) Regex("package\\\\s*=\\\\s*[\\"']([^\\"']+)[\\"']").find(mf.readText())?.groupValues?.get(1) else null
+                              ext.javaClass.getMethod("setNamespace", String::class.java).invoke(ext, pkg ?: ("com.universal.plugin." + project.name.replace("-", "_").replace(".", "_")))
+                          }
+                      } catch (_: Exception) {}
+                      try {
+                          ext.javaClass.getMethod("setCompileSdk", Int::class.javaObjectType).invoke(ext, 36)
+                      } catch (_: Exception) {}
+                      try {
+                          ext.javaClass.getMethod("compileSdkVersion", Int::class.javaPrimitiveType).invoke(ext, 36)
+                      } catch (_: Exception) {}
+                  }
+              }
+              plugins.withId("com.android.library") {
+                  configureLib()
+                  if (state.executed) {
+                      configureLib()
+                  } else {
+                      afterEvaluate { configureLib() }
+                  }
+              }
+          }
           '''
               with open("android/build.gradle.kts", "w") as f:
                   f.write(b + "\n" + fix)
@@ -178,13 +163,13 @@ jobs:
                   c = f.read()
               c = c.replace("com.universal.universal_messenger", "com.universal.messenger")
               c = c.replace('id("com.android.application")', 'id("com.android.application")\n    id("com.google.gms.google-services")')
-              c = re.sub(r'compileSdk\s*=\s*\S+', f'compileSdk = {max_sdk}', c, count=1)
+              c = re.sub(r'compileSdk\s*=\s*\S+', 'compileSdk = 36', c, count=1)
               c = re.sub(r'targetSdk\s*=\s*\S+', 'targetSdk = 35', c, count=1)
               c = re.sub(r'minSdk\s*=\s*\S+', 'minSdk = 23\n        multiDexEnabled = true', c, count=1)
               sign = '    lint { checkReleaseBuilds = false; abortOnError = false }\n    signingConfigs { create("release") { storeFile = file("release.jks"); storePassword = "Messenger@2026"; keyAlias = "messenger_key"; keyPassword = "Messenger@2026" } }\n    buildTypes {'
               c = c.replace("    buildTypes {", sign, 1)
               c = c.replace('signingConfigs.getByName("debug")', 'signingConfigs.getByName("release")\n            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")')
-              c += f'\nandroid {{\n    compileSdk = {max_sdk}\n    defaultConfig {{\n        targetSdk = 35\n        minSdk = 23\n    }}\n}}\n'
+              c += '\nandroid {\n    compileSdk = 36\n    defaultConfig {\n        targetSdk = 35\n        minSdk = 23\n    }\n}\n'
               with open("android/app/build.gradle.kts", "w") as f:
                   f.write(c)
 
@@ -209,7 +194,6 @@ jobs:
           cat << 'PYEOF' > fix_plugins.py
           import json, os, re, urllib.parse
 
-          max_sdk = os.environ.get("MAX_SDK", "36")
           proj_dir = os.path.realpath(".")
           flutter_root = os.path.realpath(os.environ["FLUTTER_ROOT"]) if os.environ.get("FLUTTER_ROOT") else ""
           roots = {os.path.realpath(os.environ.get("PUB_CACHE") or os.path.expanduser("~/.pub-cache"))}
@@ -261,11 +245,11 @@ jobs:
                           text = f.read().replace("\r\n", "\n")
                       orig = text
                       text = re.sub(r'\bjcenter\s*\(\s*\)', 'mavenCentral()', text)
-                      text = re.sub(r'\bflutter\.(?:compileSdkVersion|compileSdk)\b', max_sdk, text)
+                      text = re.sub(r'\bflutter\.(?:compileSdkVersion|compileSdk)\b', '36', text)
                       text = re.sub(r'\bflutter\.(?:minSdkVersion|minSdk)\b', '23', text)
                       text = re.sub(r'\bflutter\.(?:targetSdkVersion|targetSdk)\b', '35', text)
-                      text = re.sub(r'\b(compileSdkVersion|compileSdk)(\s*=\s*)(?:3[0-6]|2\d)\b', rf'\g<1>\g<2>{max_sdk}', text)
-                      text = re.sub(r'\b(compileSdkVersion|compileSdk)(\s+)(?:3[0-6]|2\d)\b', rf'\g<1>\g<2>{max_sdk}', text)
+                      text = re.sub(r'\b(compileSdkVersion|compileSdk)(\s*=\s*)(?:3[0-5]|2\d)\b', r'\g<1>\g<2>36', text)
+                      text = re.sub(r'\b(compileSdkVersion|compileSdk)(\s+)(?:3[0-5]|2\d)\b', r'\g<1>\g<2>36', text)
                       if text != orig:
                           with open(path, "w", encoding="utf-8") as f:
                               f.write(text)
