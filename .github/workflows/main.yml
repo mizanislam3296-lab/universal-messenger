@@ -77,10 +77,11 @@ jobs:
             keytool -genkey -v -keystore android/app/release.jks -keyalg RSA -keysize 2048 -validity 10000 -alias messenger_key -storepass "Messenger@2026" -keypass "Messenger@2026" -dname "CN=Universal Messenger, OU=Mobile, O=Universal, L=Dhaka, S=Dhaka, C=BD"
           fi
 
-          printf -- "-keep class **.zego.** { *; }\n-keep class **.zegocloud.** { *; }\n-dontwarn **\n" > android/app/proguard-rules.pro
+          printf -- "-keep class **.zego.** { *; }\n-keep class **.zegocloud.** { *; }\n-dontwarn **\n-ignorewarnings\n" > android/app/proguard-rules.pro
 
-          if [ -n "$ANDROID_HOME" ] && [ -x "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" ]; then
-            yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-37" >/dev/null 2>&1 || true
+          SDKMGR=$(command -v sdkmanager || echo "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager")
+          if [ -x "$SDKMGR" ]; then
+            yes | "$SDKMGR" "platforms;android-37" >/dev/null 2>&1 || true
           fi
           MAX_SDK=$(ls "$ANDROID_HOME/platforms" 2>/dev/null | sed 's/android-//' | grep -E '^[0-9]+$' | sort -n | tail -1)
           MAX_SDK=${MAX_SDK:-36}
@@ -143,7 +144,7 @@ jobs:
               listOf("targetSdk", "targetSdkVersion").forEach {{ extensions.extraProperties.set(it, 35) }}
               listOf("minSdk", "minSdkVersion").forEach {{ extensions.extraProperties.set(it, 23) }}
               extensions.extraProperties.set("javaVersion", org.gradle.api.JavaVersion.VERSION_17)
-              tasks.matching {{ it.name.contains("AarMetadata") }}.configureEach {{
+              tasks.matching {{ it.name.startsWith("check") && it.name.endsWith("AarMetadata") }}.configureEach {{
                   enabled = false
               }}
           }}
