@@ -103,7 +103,8 @@ jobs:
               s = s.replace('apply false', 'apply false\n    id("com.google.gms.google-services") version "4.4.2" apply false', 1)
               s += '''
           gradle.beforeProject {
-              listOf("compileSdk", "compileSdkVersion", "targetSdk", "targetSdkVersion").forEach { extensions.extraProperties.set(it, 35) }
+              listOf("compileSdk", "compileSdkVersion").forEach { extensions.extraProperties.set(it, 36) }
+              listOf("targetSdk", "targetSdkVersion").forEach { extensions.extraProperties.set(it, 35) }
               listOf("minSdk", "minSdkVersion").forEach { extensions.extraProperties.set(it, 23) }
               extensions.extraProperties.set("javaVersion", org.gradle.api.JavaVersion.VERSION_17)
               if (project != rootProject && project.name != "app") {
@@ -119,7 +120,8 @@ jobs:
                   b = f.read()
               fix = '''
           allprojects {
-              listOf("compileSdk", "compileSdkVersion", "targetSdk", "targetSdkVersion").forEach { extensions.extraProperties.set(it, 35) }
+              listOf("compileSdk", "compileSdkVersion").forEach { extensions.extraProperties.set(it, 36) }
+              listOf("targetSdk", "targetSdkVersion").forEach { extensions.extraProperties.set(it, 35) }
               listOf("minSdk", "minSdkVersion").forEach { extensions.extraProperties.set(it, 23) }
               extensions.extraProperties.set("javaVersion", org.gradle.api.JavaVersion.VERSION_17)
           }
@@ -133,11 +135,11 @@ jobs:
                           val pkg = if (mf.exists()) Regex("package\\\\s*=\\\\s*[\\"']([^\\"']+)[\\"']").find(mf.readText())?.groupValues?.get(1) else null
                           ext.javaClass.getMethod("setNamespace", String::class.java).invoke(ext, pkg ?: ("com.universal.plugin." + project.name.replace("-", "_").replace(".", "_")))
                       }
-                      ext.javaClass.getMethod("compileSdkVersion", Int::class.javaPrimitiveType).invoke(ext, 35)
+                      ext.javaClass.getMethod("compileSdkVersion", Int::class.javaPrimitiveType).invoke(ext, 36)
                   } catch (_: Exception) {}
                   afterEvaluate {
                       try {
-                          ext.javaClass.getMethod("compileSdkVersion", Int::class.javaPrimitiveType).invoke(ext, 35)
+                          ext.javaClass.getMethod("compileSdkVersion", Int::class.javaPrimitiveType).invoke(ext, 36)
                       } catch (_: Exception) {}
                   }
               }
@@ -151,7 +153,8 @@ jobs:
                   c = f.read()
               c = c.replace("com.universal.universal_messenger", "com.universal.messenger")
               c = c.replace('id("com.android.application")', 'id("com.android.application")\n    id("com.google.gms.google-services")')
-              c = re.sub(r'compileSdk\s*=\s*\S+', 'compileSdk = 35', c, count=1)
+              c = re.sub(r'compileSdk\s*=\s*\S+', 'compileSdk = 36', c, count=1)
+              c = re.sub(r'targetSdk\s*=\s*\S+', 'targetSdk = 35', c, count=1)
               c = re.sub(r'minSdk\s*=\s*\S+', 'minSdk = 23\n        multiDexEnabled = true', c, count=1)
               sign = '    lint { checkReleaseBuilds = false; abortOnError = false }\n    signingConfigs { create("release") { storeFile = file("release.jks"); storePassword = "Messenger@2026"; keyAlias = "messenger_key"; keyPassword = "Messenger@2026" } }\n    buildTypes {'
               c = c.replace("    buildTypes {", sign, 1)
@@ -201,6 +204,8 @@ jobs:
                   continue
               for root, _, files in os.walk(base):
                   for fname in files:
+                      if not fname.endswith((".gradle", ".gradle.kts")):
+                          continue
                       path = os.path.realpath(os.path.join(root, fname))
                       if path in seen:
                           continue
@@ -210,36 +215,19 @@ jobs:
                           continue
                       seen.add(path)
 
-                      if fname.endswith((".java", ".kt")):
-                          with open(path, encoding="utf-8", errors="ignore") as f:
-                              jtxt = f.read()
-                          new_jtxt = jtxt
-                          if "sqflite_android" in path:
-                              new_jtxt = new_jtxt.replace(".threadId()", ".getId()").replace("Locale.of(", "new Locale(")
-                          if "Build.VERSION_CODES.BAKLAVA" in new_jtxt:
-                              new_jtxt = new_jtxt.replace("Build.VERSION_CODES.BAKLAVA", "36")
-                          if new_jtxt != jtxt:
-                              with open(path, "w", encoding="utf-8") as f:
-                                  f.write(new_jtxt)
-                              print("PATCHED SOURCE:", path)
-                          continue
-
-                      if not fname.endswith((".gradle", ".gradle.kts")):
-                          continue
-
                       with open(path, encoding="utf-8", errors="ignore") as f:
                           text = f.read().replace("\r\n", "\n")
                       orig = text
                       is_kts = fname.endswith(".kts")
                       text = re.sub(r'\bjcenter\s*\(\s*\)', 'mavenCentral()', text)
                       if not any(skip in path for skip in ("/firebase_", "/cloud_firestore")):
-                          text = re.sub(r'\bflutter\.(?:compileSdkVersion|compileSdk)\b', '35', text)
+                          text = re.sub(r'\bflutter\.(?:compileSdkVersion|compileSdk)\b', '36', text)
                           text = re.sub(r'\bflutter\.(?:minSdkVersion|minSdk)\b', '23', text)
                           text = re.sub(r'\bflutter\.(?:targetSdkVersion|targetSdk)\b', '35', text)
                           if is_kts:
-                              text = re.sub(r'\bcompileSdk\s*=\s*(?:3[0-4]|2\d)\b', 'compileSdk = 35', text)
+                              text = re.sub(r'\bcompileSdk\s*=\s*(?:3[0-5]|2\d)\b', 'compileSdk = 36', text)
                           else:
-                              text = re.sub(r'\b(compileSdkVersion|compileSdk)\s*=?\s*(?:3[0-4]|2\d)\b', r'\1 35', text)
+                              text = re.sub(r'\b(compileSdkVersion|compileSdk)\s*=?\s*(?:3[0-5]|2\d)\b', r'\1 36', text)
                       if text != orig:
                           with open(path, "w", encoding="utf-8") as f:
                               f.write(text)
