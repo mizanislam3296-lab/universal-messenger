@@ -236,15 +236,12 @@ jobs:
                       with open(path, encoding="utf-8", errors="ignore") as f:
                           text = f.read().replace("\r\n", "\n")
                       orig = text
-                      is_kts = fname.endswith(".kts")
                       text = re.sub(r'\bjcenter\s*\(\s*\)', 'mavenCentral()', text)
                       text = re.sub(r'\bflutter\.(?:compileSdkVersion|compileSdk)\b', '36', text)
                       text = re.sub(r'\bflutter\.(?:minSdkVersion|minSdk)\b', '23', text)
                       text = re.sub(r'\bflutter\.(?:targetSdkVersion|targetSdk)\b', '35', text)
-                      if is_kts:
-                          text = re.sub(r'\bcompileSdk\s*=\s*(?:3[0-5]|2\d)\b', 'compileSdk = 36', text)
-                      else:
-                          text = re.sub(r'\b(compileSdkVersion|compileSdk)\s*=?\s*(?:3[0-5]|2\d)\b', r'\1 36', text)
+                      text = re.sub(r'\b(compileSdkVersion|compileSdk)(\s*=\s*)(?:3[0-5]|2\d)\b', r'\g<1>\g<2>36', text)
+                      text = re.sub(r'\b(compileSdkVersion|compileSdk)(\s+)(?:3[0-5]|2\d)\b', r'\g<1>\g<2>36', text)
                       if text != orig:
                           with open(path, "w", encoding="utf-8") as f:
                               f.write(text)
