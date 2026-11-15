@@ -16,11 +16,11 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Setup Java 17
+      - name: Setup Java 21
         uses: actions/setup-java@v4
         with:
           distribution: 'zulu'
-          java-version: '17'
+          java-version: '21'
 
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
@@ -135,6 +135,11 @@ jobs:
                       }
                       ext.javaClass.getMethod("compileSdkVersion", Int::class.javaPrimitiveType).invoke(ext, 35)
                   } catch (_: Exception) {}
+                  afterEvaluate {
+                      try {
+                          ext.javaClass.getMethod("compileSdkVersion", Int::class.javaPrimitiveType).invoke(ext, 35)
+                      } catch (_: Exception) {}
+                  }
               }
           }
           '''
@@ -210,11 +215,16 @@ jobs:
                       with open(path, encoding="utf-8", errors="ignore") as f:
                           text = f.read().replace("\r\n", "\n")
                       orig = text
+                      is_kts = fname.endswith(".kts")
                       text = re.sub(r'\bjcenter\s*\(\s*\)', 'mavenCentral()', text)
                       if not any(skip in path for skip in ("/firebase_", "/cloud_firestore")):
                           text = re.sub(r'\bflutter\.(?:compileSdkVersion|compileSdk)\b', '35', text)
                           text = re.sub(r'\bflutter\.(?:minSdkVersion|minSdk)\b', '23', text)
                           text = re.sub(r'\bflutter\.(?:targetSdkVersion|targetSdk)\b', '35', text)
+                          if is_kts:
+                              text = re.sub(r'\bcompileSdk\s*=\s*(?:3[0-4]|2\d)\b', 'compileSdk = 35', text)
+                          else:
+                              text = re.sub(r'\b(compileSdkVersion|compileSdk)\s*=?\s*(?:3[0-4]|2\d)\b', r'\1 35', text)
                       if text != orig:
                           with open(path, "w", encoding="utf-8") as f:
                               f.write(text)
