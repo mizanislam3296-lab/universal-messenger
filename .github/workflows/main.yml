@@ -265,9 +265,19 @@ jobs:
         timeout-minutes: 25
         run: flutter build apk --release --no-pub --target-platform android-arm64
 
+      - name: Prepare APK File
+        run: |
+          APK_PATH=$(find build/app/outputs/flutter-apk -name "*.apk" | head -n 1)
+          cp "$APK_PATH" Universal-Messenger.apk
+
+      - name: Upload APK Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Universal-Messenger-APK
+          path: Universal-Messenger.apk
+
       - name: Publish Direct APK to Releases
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          cp build/app/outputs/flutter-apk/app-release.apk Universal-Messenger.apk
-          gh release create "v4.0.${{ github.run_number }}" Universal-Messenger.apk --title "Universal Messenger v4.0.${{ github.run_number }}" --notes "Phase 3B: Audio & Video Calling Complete"
+          gh release create "v4.0.${{ github.run_number }}" Universal-Messenger.apk --target "${{ github.ref_name }}" --title "Universal Messenger v4.0.${{ github.run_number }}" --notes "Phase 3B: Audio & Video Calling Complete" || true
