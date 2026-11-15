@@ -14,6 +14,9 @@ jobs:
     timeout-minutes: 30
 
     steps:
+      - name: Free Disk Space
+        run: sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost || true
+
       - name: Checkout Repository
         uses: actions/checkout@v4
 
@@ -264,36 +267,18 @@ jobs:
       - name: Build Release APK
         timeout-minutes: 25
         run: |
-          set -o pipefail
-          flutter build apk --release --no-pub --target-platform android-arm64 | tee build.log
-
-      - name: Prepare APK File
-        run: |
-          APK_PATH=$(grep -oE '[^[:space:]]+\.apk' build.log | tail -n 1)
-          if [ -z "$APK_PATH" ] || [ ! -e "$APK_PATH" ]; then
-            APK_PATH=$(find -L . .. /home/runner/work -maxdepth 8 -name "*release*.apk" 2>/dev/null | head -n 1)
-          fi
-          if [ -z "$APK_PATH" ] || [ ! -e "$APK_PATH" ]; then
-            APK_PATH=$(find -L . .. /home/runner/work -maxdepth 8 -name "*.apk" 2>/dev/null | head -n 1)
-          fi
-          echo "FOUND APK: $APK_PATH"
-          if [ -z "$APK_PATH" ] || [ ! -e "$APK_PATH" ]; then
-            echo "ERROR: APK file not found"
-            tail -n 50 build.log || true
-            exit 1
-          fi
-          cp -L "$APK_PATH" Universal-Messenger.apk
-          ls -lh Universal-Messenger.apk
+          flutter build apk --release --no-pub --target-platform android-arm64
+          rm -rf build/app/intermediates
 
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
         with:
           name: Universal-Messenger-APK
-          path: Universal-Messenger.apk
+          path: build/app/outputs/flutter-apk/app-release.apk
           if-no-files-found: error
 
       - name: Publish Direct APK to Releases
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release create "v4.0.${{ github.run_number }}-${{ github.run_attempt }}" Universal-Messenger.apk --target "${{ github.ref_name }}" --title "Universal Messenger v4.0.${{ github.run_number }}" --notes "Phase 3B: Audio & Video Calling Complete" || true
+          gh release create "v4.0.${{ github.run_number }}-${{ github.run_attempt }}" "build/app/outputs/flutter-apk/app-release.apk#Universal-Messenger.apk" --target "${{ github.ref_name }}" --title "Universal Messenger v4.0.${{ github.run_number }}" --notes "Phase 3B: Audio & Video Calling Complete" || true
