@@ -11,6 +11,7 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
 
     steps:
       - name: Checkout Repository
@@ -77,8 +78,6 @@ jobs:
             keytool -genkey -v -keystore android/app/release.jks -keyalg RSA -keysize 2048 -validity 10000 -alias messenger_key -storepass "Messenger@2026" -keypass "Messenger@2026" -dname "CN=Universal Messenger, OU=Mobile, O=Universal, L=Dhaka, S=Dhaka, C=BD"
           fi
 
-          printf -- "-keep class **.zego.** { *; }\n-keep class **.zegocloud.** { *; }\n-dontwarn **\n-ignorewarnings\n" > android/app/proguard-rules.pro
-
           export PATH="$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/tools/bin:$PATH"
           yes | sdkmanager --licenses >/dev/null 2>&1 || true
           yes | sdkmanager "platforms;android-37" || true
@@ -96,8 +95,8 @@ jobs:
           if os.path.exists("android/gradle.properties"):
               with open("android/gradle.properties", "r") as f:
                   gp = f.read()
-              gp = gp.replace("-Xmx2G", "-Xmx4G").replace("-Xmx1536M", "-Xmx4G")
-              gp += "\nandroid.enableJetifier=true\nkotlin.jvm.target.validation.mode=warning\nandroid.suppressUnsupportedCompileSdk=37\n"
+              gp = re.sub(r'-Xmx\S+', '-Xmx3G', gp)
+              gp += "\nandroid.enableJetifier=true\nkotlin.jvm.target.validation.mode=warning\nandroid.suppressUnsupportedCompileSdk=37\norg.gradle.workers.max=2\norg.gradle.daemon=false\n"
               with open("android/gradle.properties", "w") as f:
                   f.write(gp)
 
@@ -172,7 +171,7 @@ jobs:
               c = re.sub(r'minSdk\s*=\s*\S+', 'minSdk = 23\n        multiDexEnabled = true', c, count=1)
               sign = '    lint { checkReleaseBuilds = false; abortOnError = false }\n    signingConfigs { create("release") { storeFile = file("release.jks"); storePassword = "Messenger@2026"; keyAlias = "messenger_key"; keyPassword = "Messenger@2026" } }\n    buildTypes {'
               c = c.replace("    buildTypes {", sign, 1)
-              c = c.replace('signingConfigs.getByName("debug")', 'signingConfigs.getByName("release")\n            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")')
+              c = c.replace('signingConfigs.getByName("debug")', 'signingConfigs.getByName("release")\n            isMinifyEnabled = false\n            isShrinkResources = false')
               c += '\nandroid {\n    compileSdk = 37\n    defaultConfig {\n        targetSdk = 35\n        minSdk = 23\n    }\n}\n'
               with open("android/app/build.gradle.kts", "w") as f:
                   f.write(c)
@@ -263,7 +262,8 @@ jobs:
           python3 fix_plugins.py && rm -f fix_plugins.py
 
       - name: Build Release APK
-        run: flutter build apk --release --no-pub
+        timeout-minutes: 25
+        run: flutter build apk --release --no-pub --target-platform android-arm64
 
       - name: Publish Direct APK to Releases
         env:
