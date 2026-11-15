@@ -79,6 +79,10 @@ jobs:
 
           printf -- "-keep class **.zego.** { *; }\n-keep class **.zegocloud.** { *; }\n-dontwarn **\n-ignorewarnings\n" > android/app/proguard-rules.pro
 
+          export PATH="$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/tools/bin:$PATH"
+          yes | sdkmanager --licenses >/dev/null 2>&1 || true
+          yes | sdkmanager "platforms;android-37" || true
+
           cat << 'PYEOF' > configure_android.py
           import os, re, shutil, xml.etree.ElementTree as ET
 
@@ -93,7 +97,7 @@ jobs:
               with open("android/gradle.properties", "r") as f:
                   gp = f.read()
               gp = gp.replace("-Xmx2G", "-Xmx4G").replace("-Xmx1536M", "-Xmx4G")
-              gp += "\nandroid.enableJetifier=true\nkotlin.jvm.target.validation.mode=warning\nandroid.suppressUnsupportedCompileSdk=36\n"
+              gp += "\nandroid.enableJetifier=true\nkotlin.jvm.target.validation.mode=warning\nandroid.suppressUnsupportedCompileSdk=37\n"
               with open("android/gradle.properties", "w") as f:
                   f.write(gp)
 
@@ -103,7 +107,7 @@ jobs:
               s = s.replace('apply false', 'apply false\n    id("com.google.gms.google-services") version "4.4.2" apply false', 1)
               s += '''
           gradle.beforeProject {
-              listOf("compileSdk", "compileSdkVersion").forEach { extensions.extraProperties.set(it, 36) }
+              listOf("compileSdk", "compileSdkVersion").forEach { extensions.extraProperties.set(it, 37) }
               listOf("targetSdk", "targetSdkVersion").forEach { extensions.extraProperties.set(it, 35) }
               listOf("minSdk", "minSdkVersion").forEach { extensions.extraProperties.set(it, 23) }
               extensions.extraProperties.set("javaVersion", org.gradle.api.JavaVersion.VERSION_17)
@@ -120,7 +124,7 @@ jobs:
                   b = f.read()
               fix = '''
           allprojects {
-              listOf("compileSdk", "compileSdkVersion").forEach { extensions.extraProperties.set(it, 36) }
+              listOf("compileSdk", "compileSdkVersion").forEach { extensions.extraProperties.set(it, 37) }
               listOf("targetSdk", "targetSdkVersion").forEach { extensions.extraProperties.set(it, 35) }
               listOf("minSdk", "minSdkVersion").forEach { extensions.extraProperties.set(it, 23) }
               extensions.extraProperties.set("javaVersion", org.gradle.api.JavaVersion.VERSION_17)
@@ -138,10 +142,10 @@ jobs:
                           }
                       } catch (_: Exception) {}
                       try {
-                          ext.javaClass.getMethod("setCompileSdk", Int::class.javaObjectType).invoke(ext, 36)
+                          ext.javaClass.getMethod("setCompileSdk", Int::class.javaObjectType).invoke(ext, 37)
                       } catch (_: Exception) {}
                       try {
-                          ext.javaClass.getMethod("compileSdkVersion", Int::class.javaPrimitiveType).invoke(ext, 36)
+                          ext.javaClass.getMethod("compileSdkVersion", Int::class.javaPrimitiveType).invoke(ext, 37)
                       } catch (_: Exception) {}
                   }
               }
@@ -163,13 +167,13 @@ jobs:
                   c = f.read()
               c = c.replace("com.universal.universal_messenger", "com.universal.messenger")
               c = c.replace('id("com.android.application")', 'id("com.android.application")\n    id("com.google.gms.google-services")')
-              c = re.sub(r'compileSdk\s*=\s*\S+', 'compileSdk = 36', c, count=1)
+              c = re.sub(r'compileSdk\s*=\s*\S+', 'compileSdk = 37', c, count=1)
               c = re.sub(r'targetSdk\s*=\s*\S+', 'targetSdk = 35', c, count=1)
               c = re.sub(r'minSdk\s*=\s*\S+', 'minSdk = 23\n        multiDexEnabled = true', c, count=1)
               sign = '    lint { checkReleaseBuilds = false; abortOnError = false }\n    signingConfigs { create("release") { storeFile = file("release.jks"); storePassword = "Messenger@2026"; keyAlias = "messenger_key"; keyPassword = "Messenger@2026" } }\n    buildTypes {'
               c = c.replace("    buildTypes {", sign, 1)
               c = c.replace('signingConfigs.getByName("debug")', 'signingConfigs.getByName("release")\n            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")')
-              c += '\nandroid {\n    compileSdk = 36\n    defaultConfig {\n        targetSdk = 35\n        minSdk = 23\n    }\n}\n'
+              c += '\nandroid {\n    compileSdk = 37\n    defaultConfig {\n        targetSdk = 35\n        minSdk = 23\n    }\n}\n'
               with open("android/app/build.gradle.kts", "w") as f:
                   f.write(c)
 
@@ -245,13 +249,12 @@ jobs:
                           text = f.read().replace("\r\n", "\n")
                       orig = text
                       text = re.sub(r'\bjcenter\s*\(\s*\)', 'mavenCentral()', text)
-                      text = re.sub(r'\bflutter\.(?:compileSdkVersion|compileSdk)\b', '36', text)
+                      text = re.sub(r'\bflutter\.(?:compileSdkVersion|compileSdk)\b', '37', text)
                       text = re.sub(r'\bflutter\.(?:minSdkVersion|minSdk)\b', '23', text)
                       text = re.sub(r'\bflutter\.(?:targetSdkVersion|targetSdk)\b', '35', text)
-                      text = re.sub(r'\b(compileSdkVersion|compileSdk)(\s*=\s*)[2-4]\d\b', r'\g<1>\g<2>36', text)
-                      text = re.sub(r'\b(compileSdkVersion|compileSdk)(\s+)[2-4]\d\b', r'\g<1>\g<2>36', text)
-                      text = re.sub(r'\b(compileSdkVersion|compileSdk)\s*\(\s*[2-4]\d\s*\)', r'\g<1>(36)', text)
-                      text = re.sub(r'(?m)^[ \t]*compileSdkPreview\b.*\n?', '', text)
+                      text = re.sub(r'\b(compileSdkVersion|compileSdk)(\s*=\s*)(?:3[0-6]|2\d)\b', r'\g<1>\g<2>37', text)
+                      text = re.sub(r'\b(compileSdkVersion|compileSdk)(\s+)(?:3[0-6]|2\d)\b', r'\g<1>\g<2>37', text)
+                      text = re.sub(r'\b(compileSdkVersion|compileSdk)\s*\(\s*(?:3[0-6]|2\d)\s*\)', r'\g<1>(37)', text)
                       if text != orig:
                           with open(path, "w", encoding="utf-8") as f:
                               f.write(text)
