@@ -210,14 +210,18 @@ jobs:
                           continue
                       seen.add(path)
 
-                      if fname.endswith(".java") and "sqflite_android" in path:
+                      if fname.endswith((".java", ".kt")):
                           with open(path, encoding="utf-8", errors="ignore") as f:
                               jtxt = f.read()
-                          new_jtxt = jtxt.replace(".threadId()", ".getId()").replace("Locale.of(", "new Locale(")
+                          new_jtxt = jtxt
+                          if "sqflite_android" in path:
+                              new_jtxt = new_jtxt.replace(".threadId()", ".getId()").replace("Locale.of(", "new Locale(")
+                          if "Build.VERSION_CODES.BAKLAVA" in new_jtxt:
+                              new_jtxt = new_jtxt.replace("Build.VERSION_CODES.BAKLAVA", "36")
                           if new_jtxt != jtxt:
                               with open(path, "w", encoding="utf-8") as f:
                                   f.write(new_jtxt)
-                              print("PATCHED JAVA:", path)
+                              print("PATCHED SOURCE:", path)
                           continue
 
                       if not fname.endswith((".gradle", ".gradle.kts")):
