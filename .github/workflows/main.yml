@@ -267,8 +267,17 @@ jobs:
 
       - name: Prepare APK File
         run: |
-          APK_PATH=$(find build/app/outputs/flutter-apk -name "*.apk" | head -n 1)
+          APK_PATH=$(find build android -type f -name "*release*.apk" 2>/dev/null | head -n 1)
+          if [ -z "$APK_PATH" ]; then
+            APK_PATH=$(find build android -type f -name "*.apk" 2>/dev/null | head -n 1)
+          fi
+          echo "FOUND APK: $APK_PATH"
+          if [ -z "$APK_PATH" ] || [ ! -f "$APK_PATH" ]; then
+            echo "ERROR: APK file not found"
+            exit 1
+          fi
           cp "$APK_PATH" Universal-Messenger.apk
+          ls -lh Universal-Messenger.apk
 
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
@@ -280,4 +289,4 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release create "v4.0.${{ github.run_number }}" Universal-Messenger.apk --target "${{ github.ref_name }}" --title "Universal Messenger v4.0.${{ github.run_number }}" --notes "Phase 3B: Audio & Video Calling Complete" || true
+          gh release create "v4.0.${{ github.run_number }}-${{ github.run_attempt }}" Universal-Messenger.apk --target "${{ github.ref_name }}" --title "Universal Messenger v4.0.${{ github.run_number }}" --notes "Phase 3B: Audio & Video Calling Complete" || true
