@@ -201,8 +201,6 @@ jobs:
                   continue
               for root, _, files in os.walk(base):
                   for fname in files:
-                      if not fname.endswith((".gradle", ".gradle.kts")):
-                          continue
                       path = os.path.realpath(os.path.join(root, fname))
                       if path in seen:
                           continue
@@ -211,6 +209,18 @@ jobs:
                       if "/example/" in path:
                           continue
                       seen.add(path)
+
+                      if fname.endswith(".java") and "sqflite_android" in path:
+                          with open(path, encoding="utf-8", errors="ignore") as f:
+                              jtxt = f.read()
+                          if ".threadId()" in jtxt:
+                              with open(path, "w", encoding="utf-8") as f:
+                                  f.write(jtxt.replace(".threadId()", ".getId()"))
+                              print("PATCHED JAVA:", path)
+                          continue
+
+                      if not fname.endswith((".gradle", ".gradle.kts")):
+                          continue
 
                       with open(path, encoding="utf-8", errors="ignore") as f:
                           text = f.read().replace("\r\n", "\n")
