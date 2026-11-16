@@ -1,3 +1,4 @@
+import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
@@ -18,7 +19,8 @@ class HomeScreen extends StatelessWidget {
     return '$hour:$min $period';
   }
 
-  Widget _buildIncomingCallBanner(BuildContext context, User currentUser) {
+  Widget _buildIncomingCallBanner(
+      BuildContext context, User currentUser, Color primaryColor) {
     return StreamBuilder<DocumentSnapshot>(
       stream: FirebaseFirestore.instance
           .collection('calls')
@@ -42,7 +44,7 @@ class HomeScreen extends StatelessWidget {
           margin: const EdgeInsets.all(10),
           padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
           decoration: BoxDecoration(
-            color: const Color(0xFF008069),
+            color: primaryColor,
             borderRadius: BorderRadius.circular(14),
             boxShadow: [
               BoxShadow(
@@ -125,173 +127,232 @@ class HomeScreen extends StatelessWidget {
   Widget build(BuildContext context) {
     final currentUser = FirebaseAuth.instance.currentUser!;
 
-    return Scaffold(
-      appBar: AppBar(
-        title: const Text('Universal Messenger'),
-        backgroundColor: const Color(0xFF008069),
-        foregroundColor: Colors.white,
-        actions: [
-          IconButton(
-            icon: const Icon(Icons.search),
-            tooltip: 'ইউজার খুঁজুন',
-            onPressed: () {
-              Navigator.push(
-                context,
-                MaterialPageRoute(builder: (_) => const SearchUsersScreen()),
-              );
-            },
-          ),
-          IconButton(
-            icon: const Icon(Icons.settings),
-            tooltip: 'Settings',
-            onPressed: () {
-              Navigator.push(
-                context,
-                MaterialPageRoute(builder: (_) => const SettingsScreen()),
-              );
-            },
-          ),
-        ],
-      ),
-      body: Column(
-        children: [
-          _buildIncomingCallBanner(context, currentUser),
-          Expanded(
-            child: StreamBuilder<QuerySnapshot>(
-              stream: FirebaseFirestore.instance
-                  .collection('chats')
-                  .where('participants', arrayContains: currentUser.uid)
-                  .snapshots(),
-              builder: (context, snapshot) {
-                if (snapshot.connectionState == ConnectionState.waiting) {
-                  return const Center(child: CircularProgressIndicator());
-                }
+    return ValueListenableBuilder<Color>(
+      valueListenable: AppSettingsController.appThemeColor,
+      builder: (context, themeColor, _) {
+        return ValueListenableBuilder<String?>(
+          valueListenable: AppSettingsController.appThemeImage,
+          builder: (context, themeImagePath, _) {
+            final hasBgImage =
+                themeImagePath != null && File(themeImagePath).existsSync();
+            final isDark = Theme.of(context).brightness == Brightness.dark;
 
-                if (!snapshot.hasData || snapshot.data!.docs.isEmpty) {
-                  return Center(
-                    child: Padding(
-                      padding: const EdgeInsets.all(24),
-                      child: Column(
-                        mainAxisAlignment: MainAxisAlignment.center,
-                        children: [
-                          Icon(
-                            Icons.chat_bubble_outline,
-                            size: 64,
-                            color: Colors.grey.shade400,
-                          ),
-                          const SizedBox(height: 16),
-                          const Text(
-                            'কোনো চ্যাট নেই',
-                            style: TextStyle(
-                              fontSize: 18,
-                              fontWeight: FontWeight.bold,
-                            ),
-                          ),
-                          const SizedBox(height: 8),
-                          Text(
-                            'নিচের বাটনে ট্যাপ করে নাম বা জিমেইল দিয়ে বন্ধুদের খুঁজে বের করুন এবং মেসেজ বা কল করুন।',
-                            textAlign: TextAlign.center,
-                            style: TextStyle(color: Colors.grey.shade600),
-                          ),
-                        ],
-                      ),
-                    ),
-                  );
-                }
-
-                final chats = snapshot.data!.docs.toList()
-                  ..sort((a, b) {
-                    final tA = (a.data() as Map<String, dynamic>)['lastMessageTime']
-                        as Timestamp?;
-                    final tB = (b.data() as Map<String, dynamic>)['lastMessageTime']
-                        as Timestamp?;
-                    if (tA == null) return 1;
-                    if (tB == null) return -1;
-                    return tB.compareTo(tA);
-                  });
-
-                return ListView.separated(
-                  itemCount: chats.length,
-                  separatorBuilder: (_, __) => const Divider(height: 1),
-                  itemBuilder: (context, index) {
-                    final data = chats[index].data() as Map<String, dynamic>;
-                    final participants =
-                        List<String>.from(data['participants'] ?? []);
-                    final otherId = participants.firstWhere(
-                      (id) => id != currentUser.uid,
-                      orElse: () => currentUser.uid,
-                    );
-
-                    final usersMap =
-                        (data['users'] as Map<String, dynamic>?) ?? {};
-                    final otherUser =
-                        (usersMap[otherId] as Map<String, dynamic>?) ?? {};
-                    final name = (otherUser['name'] ?? 'User').toString();
-                    final email = (otherUser['email'] ?? '').toString();
-                    final lastMsg = (data['lastMessage'] ?? '').toString();
-                    final timeText =
-                        _formatDate(data['lastMessageTime'] as Timestamp?);
-
-                    return ListTile(
-                      leading: CircleAvatar(
-                        radius: 24,
-                        backgroundColor: const Color(0xFF008069),
-                        child: Text(
-                          name.isNotEmpty ? name[0].toUpperCase() : 'U',
-                          style: const TextStyle(
-                            color: Colors.white,
-                            fontSize: 18,
-                          ),
-                        ),
-                      ),
-                      title: Text(
-                        name,
-                        style: const TextStyle(fontWeight: FontWeight.bold),
-                      ),
-                      subtitle: Text(
-                        lastMsg,
-                        maxLines: 1,
+            return Scaffold(
+              appBar: AppBar(
+                title: Row(
+                  children: [
+                    AppSettingsController.buildAppIcon(radius: 16),
+                    const SizedBox(width: 10),
+                    const Expanded(
+                      child: Text(
+                        'Universal Messenger',
                         overflow: TextOverflow.ellipsis,
                       ),
-                      trailing: Text(
-                        timeText,
-                        style: TextStyle(
-                          fontSize: 12,
-                          color: Colors.grey.shade600,
-                        ),
-                      ),
-                      onTap: () {
-                        Navigator.push(
-                          context,
-                          MaterialPageRoute(
-                            builder: (_) => ChatScreen(
-                              receiverId: otherId,
-                              receiverName: name,
-                              receiverEmail: email,
-                            ),
+                    ),
+                  ],
+                ),
+                backgroundColor: themeColor,
+                foregroundColor: Colors.white,
+                actions: [
+                  IconButton(
+                    icon: const Icon(Icons.search),
+                    tooltip: 'ইউজার খুঁজুন',
+                    onPressed: () {
+                      Navigator.push(
+                        context,
+                        MaterialPageRoute(
+                            builder: (_) => const SearchUsersScreen()),
+                      );
+                    },
+                  ),
+                  IconButton(
+                    icon: const Icon(Icons.settings),
+                    tooltip: 'Settings',
+                    onPressed: () {
+                      Navigator.push(
+                        context,
+                        MaterialPageRoute(
+                            builder: (_) => const SettingsScreen()),
+                      );
+                    },
+                  ),
+                ],
+              ),
+              body: Container(
+                decoration: hasBgImage
+                    ? BoxDecoration(
+                        image: DecorationImage(
+                          image: FileImage(File(themeImagePath)),
+                          fit: BoxFit.cover,
+                          colorFilter: ColorFilter.mode(
+                            isDark
+                                ? Colors.black.withOpacity(0.55)
+                                : Colors.white.withOpacity(0.72),
+                            isDark ? BlendMode.darken : BlendMode.lighten,
                           ),
-                        );
-                      },
-                    );
-                  },
-                );
-              },
-            ),
-          ),
-        ],
-      ),
-      floatingActionButton: FloatingActionButton(
-        backgroundColor: const Color(0xFF008069),
-        foregroundColor: Colors.white,
-        tooltip: 'নতুন চ্যাট',
-        onPressed: () {
-          Navigator.push(
-            context,
-            MaterialPageRoute(builder: (_) => const SearchUsersScreen()),
-          );
-        },
-        child: const Icon(Icons.message),
-      ),
+                        ),
+                      )
+                    : null,
+                child: Column(
+                  children: [
+                    _buildIncomingCallBanner(context, currentUser, themeColor),
+                    Expanded(
+                      child: StreamBuilder<QuerySnapshot>(
+                        stream: FirebaseFirestore.instance
+                            .collection('chats')
+                            .where('participants',
+                                arrayContains: currentUser.uid)
+                            .snapshots(),
+                        builder: (context, snapshot) {
+                          if (snapshot.connectionState ==
+                              ConnectionState.waiting) {
+                            return const Center(
+                                child: CircularProgressIndicator());
+                          }
+
+                          if (!snapshot.hasData ||
+                              snapshot.data!.docs.isEmpty) {
+                            return Center(
+                              child: Padding(
+                                padding: const EdgeInsets.all(24),
+                                child: Column(
+                                  mainAxisAlignment: MainAxisAlignment.center,
+                                  children: [
+                                    Icon(
+                                      Icons.chat_bubble_outline,
+                                      size: 64,
+                                      color: Colors.grey.shade400,
+                                    ),
+                                    const SizedBox(height: 16),
+                                    const Text(
+                                      'কোনো চ্যাট নেই',
+                                      style: TextStyle(
+                                        fontSize: 18,
+                                        fontWeight: FontWeight.bold,
+                                      ),
+                                    ),
+                                    const SizedBox(height: 8),
+                                    Text(
+                                      'নিচের বাটনে ট্যাপ করে নাম বা জিমেইল দিয়ে বন্ধুদের খুঁজে বের করুন এবং মেসেজ বা কল করুন।',
+                                      textAlign: TextAlign.center,
+                                      style: TextStyle(
+                                          color: Colors.grey.shade600),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            );
+                          }
+
+                          final chats = snapshot.data!.docs.toList()
+                            ..sort((a, b) {
+                              final tA = (a.data() as Map<String, dynamic>)[
+                                  'lastMessageTime'] as Timestamp?;
+                              final tB = (b.data() as Map<String, dynamic>)[
+                                  'lastMessageTime'] as Timestamp?;
+                              if (tA == null) return 1;
+                              if (tB == null) return -1;
+                              return tB.compareTo(tA);
+                            });
+
+                          return ListView.separated(
+                            itemCount: chats.length,
+                            separatorBuilder: (_, __) =>
+                                const Divider(height: 1),
+                            itemBuilder: (context, index) {
+                              final data =
+                                  chats[index].data() as Map<String, dynamic>;
+                              final participants = List<String>.from(
+                                  data['participants'] ?? []);
+                              final otherId = participants.firstWhere(
+                                (id) => id != currentUser.uid,
+                                orElse: () => currentUser.uid,
+                              );
+
+                              final usersMap =
+                                  (data['users'] as Map<String, dynamic>?) ??
+                                      {};
+                              final otherUser = (usersMap[otherId]
+                                      as Map<String, dynamic>?) ??
+                                  {};
+                              final name =
+                                  (otherUser['name'] ?? 'User').toString();
+                              final email =
+                                  (otherUser['email'] ?? '').toString();
+                              final lastMsg =
+                                  (data['lastMessage'] ?? '').toString();
+                              final timeText = _formatDate(
+                                  data['lastMessageTime'] as Timestamp?);
+
+                              return ListTile(
+                                leading: CircleAvatar(
+                                  radius: 24,
+                                  backgroundColor: themeColor,
+                                  child: Text(
+                                    name.isNotEmpty
+                                        ? name[0].toUpperCase()
+                                        : 'U',
+                                    style: const TextStyle(
+                                      color: Colors.white,
+                                      fontSize: 18,
+                                    ),
+                                  ),
+                                ),
+                                title: Text(
+                                  name,
+                                  style: const TextStyle(
+                                      fontWeight: FontWeight.bold),
+                                ),
+                                subtitle: Text(
+                                  lastMsg,
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                ),
+                                trailing: Text(
+                                  timeText,
+                                  style: TextStyle(
+                                    fontSize: 12,
+                                    color: Colors.grey.shade600,
+                                  ),
+                                ),
+                                onTap: () {
+                                  Navigator.push(
+                                    context,
+                                    MaterialPageRoute(
+                                      builder: (_) => ChatScreen(
+                                        receiverId: otherId,
+                                        receiverName: name,
+                                        receiverEmail: email,
+                                      ),
+                                    ),
+                                  );
+                                },
+                              );
+                            },
+                          );
+                        },
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              floatingActionButton: FloatingActionButton(
+                backgroundColor: themeColor,
+                foregroundColor: Colors.white,
+                tooltip: 'নতুন চ্যাট',
+                onPressed: () {
+                  Navigator.push(
+                    context,
+                    MaterialPageRoute(
+                        builder: (_) => const SearchUsersScreen()),
+                  );
+                },
+                child: const Icon(Icons.message),
+              ),
+            );
+          },
+        );
+      },
     );
   }
 }
