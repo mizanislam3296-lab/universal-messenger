@@ -4,6 +4,7 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:universal_messenger/screens/search_user_screen.dart';
 import 'package:universal_messenger/screens/chat_screen.dart';
 import 'package:universal_messenger/screens/call_screen.dart';
+import 'package:universal_messenger/screens/settings_screen.dart';
 
 class HomeScreen extends StatelessWidget {
   const HomeScreen({super.key});
@@ -140,12 +141,18 @@ class HomeScreen extends StatelessWidget {
               );
             },
           ),
-          IconButton(
-            icon: const Icon(Icons.logout),
-            tooltip: 'লগআউট',
-            onPressed: () => FirebaseAuth.instance.signOut(),
+                    IconButton(
+            icon: const Icon(Icons.settings),
+            tooltip: 'Settings',
+            onPressed: () {
+              Navigator.push(
+                context,
+                MaterialPageRoute(builder: (_) => const SettingsScreen()),
+              );
+            },
           ),
         ],
+
       ),
       body: Column(
         children: [
