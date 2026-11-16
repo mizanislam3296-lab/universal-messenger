@@ -151,15 +151,19 @@ class _SettingsScreenState extends State<SettingsScreen> {
   // ১. Change Photo
   Future<void> _changeProfilePhoto() async {
     if (_user == null) return;
-    final res = await FilePicker.pickFiles(type: FileType.image, withData: true);
-    if (res == null || res.files.isEmpty) return;
+    final files = await FilePicker.pickFiles(type: FileType.image);
+    if (files.isEmpty) return;
 
     setState(() => _isBusy = true);
     try {
-      final file = res.files.first;
+      final file = files.first;
       String photoValue = file.path ?? '';
-      if (file.bytes != null && file.bytes!.length <= 500 * 1024) {
-        photoValue = 'data:image/jpeg;base64,${base64Encode(file.bytes!)}';
+      List<int>? bytes = file.bytes;
+      if (bytes == null && file.path != null) {
+        bytes = await File(file.path!).readAsBytes();
+      }
+      if (bytes != null && bytes.length <= 500 * 1024) {
+        photoValue = 'data:image/jpeg;base64,${base64Encode(bytes)}';
       }
       await FirebaseFirestore.instance.collection('users').doc(_user!.uid).set({
         'photoUrl': photoValue,
@@ -305,9 +309,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 icon: const Icon(Icons.image),
                 label: const Text('Choose File Image from Gallery'),
                 onPressed: () async {
-                  final res = await FilePicker.pickFiles(type: FileType.image);
-                  if (res != null && res.files.single.path != null) {
-                    final path = res.files.single.path!;
+                  final files = await FilePicker.pickFiles(type: FileType.image);
+                  if (files.isNotEmpty && files.single.path != null) {
+                    final path = files.single.path!;
                     if (isChatTheme) {
                       AppSettingsController.chatThemeImage.value = path;
                     } else {
@@ -328,10 +332,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   // ৫. Icon (Google Icon & Custom Photo Icon)
   Future<void> _pickCustomPhotoIcon() async {
-    final res = await FilePicker.pickFiles(type: FileType.image);
-    if (res != null && res.files.single.path != null) {
+    final files = await FilePicker.pickFiles(type: FileType.image);
+    if (files.isNotEmpty && files.single.path != null) {
       AppSettingsController.iconType.value = 'custom';
-      AppSettingsController.customIconPath.value = res.files.single.path!;
+      AppSettingsController.customIconPath.value = files.single.path!;
       await AppSettingsController.save();
       setState(() {});
       _showMsg('Custom photo icon selected');
