@@ -4,10 +4,12 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:universal_messenger/screens/auth_screen.dart';
 import 'package:universal_messenger/screens/verify_email_screen.dart';
 import 'package:universal_messenger/screens/home_screen.dart';
+import 'package:universal_messenger/screens/settings_screen.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await Firebase.initializeApp();
+  await AppSettingsController.load();
   runApp(const UniversalMessengerApp());
 }
 
@@ -16,17 +18,39 @@ class UniversalMessengerApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return MaterialApp(
-      title: 'Universal Messenger',
-      debugShowCheckedModeBanner: false,
-      theme: ThemeData(
-        colorScheme: ColorScheme.fromSeed(seedColor: const Color(0xFF008069)),
-        useMaterial3: true,
-      ),
-      home: const AuthGate(),
+    return ValueListenableBuilder<ThemeMode>(
+      valueListenable: AppSettingsController.themeMode,
+      builder: (context, mode, _) {
+        return ValueListenableBuilder<Color>(
+          valueListenable: AppSettingsController.appThemeColor,
+          builder: (context, seedColor, __) {
+            return MaterialApp(
+              title: 'Universal Messenger',
+              debugShowCheckedModeBanner: false,
+              themeMode: mode,
+              theme: ThemeData(
+                colorScheme: ColorScheme.fromSeed(
+                  seedColor: seedColor,
+                  brightness: Brightness.light,
+                ),
+                useMaterial3: true,
+              ),
+              darkTheme: ThemeData(
+                colorScheme: ColorScheme.fromSeed(
+                  seedColor: seedColor,
+                  brightness: Brightness.dark,
+                ),
+                useMaterial3: true,
+              ),
+              home: const AuthGate(),
+            );
+          },
+        );
+      },
     );
   }
 }
+
 
 class AuthGate extends StatelessWidget {
   const AuthGate({super.key});
