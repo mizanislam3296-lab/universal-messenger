@@ -43,6 +43,7 @@ jobs:
               "search": "lib_clean/screens/search_user_screen.dart",
               "chat": "lib_clean/screens/chat_screen.dart",
               "call": "lib_clean/screens/call_screen.dart",
+              "setting": "lib_clean/screens/settings_screen.dart",
           }
           for root, _, files in os.walk(".", topdown=False):
               if ".git" in root or "lib_clean" in root:
