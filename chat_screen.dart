@@ -1,4 +1,6 @@
+import 'dart:async';
 import 'dart:io';
+import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
@@ -36,6 +38,9 @@ class _ChatScreenState extends State<ChatScreen> {
   double _uploadProgress = 0.0;
   String _uploadingFileName = '';
 
+  bool _isTyping = false;
+  Timer? _typingTimer;
+
   @override
   void initState() {
     super.initState();
@@ -46,9 +51,38 @@ class _ChatScreenState extends State<ChatScreen> {
 
   @override
   void dispose() {
+    _typingTimer?.cancel();
+    if (_isTyping) {
+      FirebaseFirestore.instance.collection('chats').doc(_chatId).set({
+        'typing': {_currentUser.uid: false},
+      }, SetOptions(merge: true));
+    }
     _messageController.dispose();
     _scrollController.dispose();
     super.dispose();
+  }
+
+  Future<void> _setTypingStatus(bool typing) async {
+    if (_isTyping == typing) return;
+    _isTyping = typing;
+    try {
+      await FirebaseFirestore.instance.collection('chats').doc(_chatId).set({
+        'typing': {_currentUser.uid: typing},
+      }, SetOptions(merge: true));
+    } catch (_) {}
+  }
+
+  void _onTextChanged(String val) {
+    if (val.trim().isNotEmpty) {
+      _setTypingStatus(true);
+      _typingTimer?.cancel();
+      _typingTimer = Timer(const Duration(seconds: 3), () {
+        _setTypingStatus(false);
+      });
+    } else {
+      _typingTimer?.cancel();
+      _setTypingStatus(false);
+    }
   }
 
   Future<void> _startCall(bool isVideo) async {
@@ -119,6 +153,7 @@ class _ChatScreenState extends State<ChatScreen> {
       'participants': [_currentUser.uid, widget.receiverId],
       'lastMessage': lastMessageText,
       'lastMessageTime': now,
+      'typing': {_currentUser.uid: false},
       'users': {
         _currentUser.uid: {
           'name': _currentUser.displayName ?? _currentUser.email ?? 'User',
@@ -137,6 +172,9 @@ class _ChatScreenState extends State<ChatScreen> {
     if (text.isEmpty) return;
 
     _messageController.clear();
+    _typingTimer?.cancel();
+    _isTyping = false;
+
     final now = FieldValue.serverTimestamp();
 
     await FirebaseFirestore.instance
@@ -217,7 +255,8 @@ class _ChatScreenState extends State<ChatScreen> {
       await _updateChatSummary('📎 $fileName');
     } on DioException catch (e) {
       if (!mounted) return;
-      final serverMsg = e.response?.data?.toString() ?? e.message ?? 'নেটওয়ার্ক ত্রুটি';
+      final serverMsg =
+          e.response?.data?.toString() ?? e.message ?? 'নেটওয়ার্ক ত্রুটি';
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text('আপলোড ব্যর্থ: $serverMsg'),
@@ -400,12 +439,14 @@ class _ChatScreenState extends State<ChatScreen> {
                 children: [
                   Text(
                     widget.receiverName,
-                    style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+                    style: const TextStyle(
+                        fontSize: 16, fontWeight: FontWeight.bold),
                     overflow: TextOverflow.ellipsis,
                   ),
                   Text(
                     widget.receiverEmail,
-                    style: const TextStyle(fontSize: 11, color: Colors.white70),
+                    style:
+                        const TextStyle(fontSize: 11, color: Colors.white70),
                     overflow: TextOverflow.ellipsis,
                   ),
                 ],
@@ -496,18 +537,22 @@ class _ChatScreenState extends State<ChatScreen> {
                 return ListView.builder(
                   controller: _scrollController,
                   reverse: true,
-                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 16),
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 12, vertical: 16),
                   itemCount: messages.length,
                   itemBuilder: (context, index) {
-                    final data = messages[index].data() as Map<String, dynamic>;
+                    final data =
+                        messages[index].data() as Map<String, dynamic>;
                     final isMe = data['senderId'] == _currentUser.uid;
                     final time = _formatTime(data['timestamp'] as Timestamp?);
 
                     return Align(
-                      alignment: isMe ? Alignment.centerRight : Alignment.centerLeft,
+                      alignment:
+                          isMe ? Alignment.centerRight : Alignment.centerLeft,
                       child: Container(
                         margin: const EdgeInsets.symmetric(vertical: 4),
-                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 12, vertical: 8),
                         constraints: BoxConstraints(
                           maxWidth: MediaQuery.of(context).size.width * 0.78,
                         ),
@@ -534,7 +579,8 @@ class _ChatScreenState extends State<ChatScreen> {
                             const SizedBox(height: 4),
                             Text(
                               time,
-                              style: TextStyle(fontSize: 10, color: Colors.grey.shade600),
+                              style: TextStyle(
+                                  fontSize: 10, color: Colors.grey.shade600),
                             ),
                           ],
                         ),
@@ -545,6 +591,49 @@ class _ChatScreenState extends State<ChatScreen> {
               },
             ),
           ),
+          // রিয়েল-টাইম টাইপিং ইনডিকেটর (wait...)
+          StreamBuilder<DocumentSnapshot>(
+            stream: FirebaseFirestore.instance
+                .collection('chats')
+                .doc(_chatId)
+                .snapshots(),
+            builder: (context, snapshot) {
+              final chatData =
+                  snapshot.data?.data() as Map<String, dynamic>?;
+              final typingMap =
+                  chatData?['typing'] as Map<String, dynamic>?;
+              final isReceiverTyping =
+                  typingMap?[widget.receiverId] == true;
+
+              if (!isReceiverTyping) return const SizedBox.shrink();
+
+              return Align(
+                alignment: Alignment.centerLeft,
+                child: Container(
+                  margin: const EdgeInsets.only(left: 14, bottom: 6, top: 2),
+                  padding: const EdgeInsets.symmetric(
+                      horizontal: 14, vertical: 8),
+                  decoration: BoxDecoration(
+                    color: Colors.white,
+                    borderRadius: const BorderRadius.only(
+                      topLeft: Radius.circular(14),
+                      topRight: Radius.circular(14),
+                      bottomLeft: Radius.circular(2),
+                      bottomRight: Radius.circular(14),
+                    ),
+                    boxShadow: [
+                      BoxShadow(
+                        color: Colors.black.withOpacity(0.08),
+                        blurRadius: 4,
+                        offset: const Offset(0, 1),
+                      ),
+                    ],
+                  ),
+                  child: const _AnimatedWaitIndicator(),
+                ),
+              );
+            },
+          ),
           SafeArea(
             child: Container(
               padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
@@ -552,13 +641,15 @@ class _ChatScreenState extends State<ChatScreen> {
               child: Row(
                 children: [
                   IconButton(
-                    icon: const Icon(Icons.attach_file, color: Color(0xFF008069)),
+                    icon: const Icon(Icons.attach_file,
+                        color: Color(0xFF008069)),
                     tooltip: 'ফাইল, ভিডিও বা PDF পাঠান',
                     onPressed: _isUploading ? null : _pickAndSendFile,
                   ),
                   Expanded(
                     child: TextField(
                       controller: _messageController,
+                      onChanged: _onTextChanged,
                       textCapitalization: TextCapitalization.sentences,
                       minLines: 1,
                       maxLines: 4,
@@ -582,7 +673,8 @@ class _ChatScreenState extends State<ChatScreen> {
                     backgroundColor: const Color(0xFF008069),
                     radius: 23,
                     child: IconButton(
-                      icon: const Icon(Icons.send, color: Colors.white, size: 20),
+                      icon:
+                          const Icon(Icons.send, color: Colors.white, size: 20),
                       onPressed: _sendMessage,
                     ),
                   ),
@@ -592,6 +684,82 @@ class _ChatScreenState extends State<ChatScreen> {
           ),
         ],
       ),
+    );
+  }
+}
+
+class _AnimatedWaitIndicator extends StatefulWidget {
+  const _AnimatedWaitIndicator();
+
+  @override
+  State<_AnimatedWaitIndicator> createState() => _AnimatedWaitIndicatorState();
+}
+
+class _AnimatedWaitIndicatorState extends State<_AnimatedWaitIndicator>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _controller;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 1100),
+    )..repeat();
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: _controller,
+      builder: (context, _) {
+        return Row(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.end,
+          children: [
+            const Text(
+              'wait',
+              style: TextStyle(
+                fontSize: 14,
+                fontWeight: FontWeight.w600,
+                color: Color(0xFF008069),
+              ),
+            ),
+            const SizedBox(width: 2),
+            ...List.generate(3, (index) {
+              final phase = (_controller.value * 2 * math.pi) - (index * 0.9);
+              final wave = math.sin(phase);
+              final offsetY = wave > 0 ? -wave * 4.5 : 0.0;
+              final opacity = 0.35 + (0.65 * ((wave + 1) / 2));
+
+              return Transform.translate(
+                offset: Offset(0, offsetY),
+                child: Opacity(
+                  opacity: opacity,
+                  child: const Padding(
+                    padding: EdgeInsets.symmetric(horizontal: 1),
+                    child: Text(
+                      '.',
+                      style: TextStyle(
+                        fontSize: 18,
+                        fontWeight: FontWeight.bold,
+                        height: 0.9,
+                        color: Color(0xFF008069),
+                      ),
+                    ),
+                  ),
+                ),
+              );
+            }),
+          ],
+        );
+      },
     );
   }
 }
