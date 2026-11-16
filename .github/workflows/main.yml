@@ -234,6 +234,8 @@ jobs:
                               new_jtxt = new_jtxt.replace(".threadId()", ".getId()").replace("Locale.of(", "new Locale(")
                           if "Build.VERSION_CODES.BAKLAVA" in new_jtxt:
                               new_jtxt = new_jtxt.replace("Build.VERSION_CODES.BAKLAVA", "36")
+                          if "Build.VERSION_CODES.CINNAMON_BUN" in new_jtxt:
+                              new_jtxt = new_jtxt.replace("Build.VERSION_CODES.CINNAMON_BUN", "37")
                           if "Manifest.permission.ACCESS_LOCAL_NETWORK" in new_jtxt:
                               new_jtxt = new_jtxt.replace("Manifest.permission.ACCESS_LOCAL_NETWORK", '"android.permission.ACCESS_LOCAL_NETWORK"')
                           if new_jtxt != jtxt:
