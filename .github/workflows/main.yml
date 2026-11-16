@@ -183,7 +183,7 @@ jobs:
               sign = '    lint { checkReleaseBuilds = false; abortOnError = false }\n    signingConfigs { create("release") { storeFile = file("release.jks"); storePassword = "Messenger@2026"; keyAlias = "messenger_key"; keyPassword = "Messenger@2026" } }\n    buildTypes {'
               c = c.replace("    buildTypes {", sign, 1)
               c = c.replace('signingConfigs.getByName("debug")', 'signingConfigs.getByName("release")\n            isMinifyEnabled = false\n            isShrinkResources = false')
-              c += '\nandroid {\n    compileSdk = 36\n    defaultConfig {\n        targetSdk = 34\n        minSdk = 23\n    }\n    packaging {\n        jniLibs {\n            useLegacyPackaging = true\n        }\n    }\n}\n'
+              c += '\nandroid {\n    compileSdk = 36\n    defaultConfig {\n        targetSdk = 34\n        minSdk = 23\n    }\n}\n'
               with open("android/app/build.gradle.kts", "w") as f:
                   f.write(c)
 
@@ -191,9 +191,8 @@ jobs:
           if os.path.exists(mp):
               with open(mp, "r", encoding="utf-8") as f:
                   m_xml = f.read()
-              m_xml = re.sub(r'\s*android:extractNativeLibs="[^"]*"', '', m_xml)
               perms = ''.join(f'    <uses-permission android:name="android.permission.{p}"/>\n' for p in ["INTERNET","CAMERA","RECORD_AUDIO","MODIFY_AUDIO_SETTINGS","ACCESS_NETWORK_STATE","ACCESS_WIFI_STATE","BLUETOOTH","BLUETOOTH_CONNECT","WAKE_LOCK"])
-              perms += '    <queries><intent><action android:name="android.intent.action.VIEW"/><data android:scheme="https"/></intent></queries>\n    <application android:extractNativeLibs="true"'
+              perms += '    <queries><intent><action android:name="android.intent.action.VIEW"/><data android:scheme="https"/></intent></queries>\n    <application'
               m_xml = m_xml.replace("<application", perms, 1)
               ET.fromstring(m_xml)
               with open(mp, "w", encoding="utf-8") as f:
