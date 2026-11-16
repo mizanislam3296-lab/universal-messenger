@@ -179,8 +179,9 @@ jobs:
           if os.path.exists(mp):
               with open(mp, "r", encoding="utf-8") as f:
                   m_xml = f.read()
+              m_xml = re.sub(r'\s*android:extractNativeLibs="[^"]*"', '', m_xml)
               perms = ''.join(f'    <uses-permission android:name="android.permission.{p}"/>\n' for p in ["INTERNET","CAMERA","RECORD_AUDIO","MODIFY_AUDIO_SETTINGS","ACCESS_NETWORK_STATE","ACCESS_WIFI_STATE","BLUETOOTH","BLUETOOTH_CONNECT","WAKE_LOCK"])
-              perms += '    <queries><intent><action android:name="android.intent.action.VIEW"/><data android:scheme="https"/></intent></queries>\n    <application'
+              perms += '    <queries><intent><action android:name="android.intent.action.VIEW"/><data android:scheme="https"/></intent></queries>\n    <application android:extractNativeLibs="true"'
               m_xml = m_xml.replace("<application", perms, 1)
               ET.fromstring(m_xml)
               with open(mp, "w", encoding="utf-8") as f:
@@ -268,12 +269,14 @@ jobs:
       - name: Build Release APK
         timeout-minutes: 25
         run: |
-          flutter build apk --release --no-pub --target-platform android-arm64
+          flutter build apk --release --no-pub --target-platform android-arm,android-arm64
           APK_FILE="build/app/outputs/flutter-apk/app-release.apk"
-          APKSIGNER=$(find "$ANDROID_HOME/build-tools" -name "apksigner" 2>/dev/null | sort -V | tail -n 1)
-          if [ -x "$APKSIGNER" ]; then
-            "$APKSIGNER" sign --ks android/app/release.jks --ks-pass pass:Messenger@2026 --ks-key-alias messenger_key --key-pass pass:Messenger@2026 "$APK_FILE"
-            "$APKSIGNER" verify --verbose "$APK_FILE"
+          BUILD_TOOLS=$(find "$ANDROID_HOME/build-tools" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sort -V | tail -n 1)
+          if [ -x "$BUILD_TOOLS/zipalign" ] && [ -x "$BUILD_TOOLS/apksigner" ]; then
+            "$BUILD_TOOLS/zipalign" -p -f 4 "$APK_FILE" "${APK_FILE}.aligned"
+            mv "${APK_FILE}.aligned" "$APK_FILE"
+            "$BUILD_TOOLS/apksigner" sign --ks android/app/release.jks --ks-pass pass:Messenger@2026 --ks-key-alias messenger_key --key-pass pass:Messenger@2026 "$APK_FILE"
+            "$BUILD_TOOLS/apksigner" verify --verbose "$APK_FILE"
           fi
           rm -rf build/app/intermediates
 
