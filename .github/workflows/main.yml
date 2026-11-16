@@ -186,6 +186,11 @@ jobs:
               c += f'''
           android {{
               compileSdk = 36
+              compileOptions {{
+                  isCoreLibraryDesugaringEnabled = true
+                  sourceCompatibility = JavaVersion.VERSION_17
+                  targetCompatibility = JavaVersion.VERSION_17
+              }}
               lint {{
                   checkReleaseBuilds = false
                   abortOnError = false
@@ -218,6 +223,9 @@ jobs:
                   }}
               }}
           }}
+          dependencies {{
+              coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.4")
+          }}
           '''
               with open("android/app/build.gradle.kts", "w") as f:
                   f.write(c)
@@ -227,7 +235,12 @@ jobs:
               with open(mp, "r", encoding="utf-8") as f:
                   m_xml = f.read()
               m_xml = re.sub(r'\s*android:extractNativeLibs="[^"]*"', '', m_xml)
-              perms = ''.join(f'    <uses-permission android:name="android.permission.{p}"/>\n' for p in ["INTERNET","CAMERA","RECORD_AUDIO","MODIFY_AUDIO_SETTINGS","ACCESS_NETWORK_STATE","ACCESS_WIFI_STATE","BLUETOOTH","BLUETOOTH_CONNECT","WAKE_LOCK"])
+              perms = ''.join(f'    <uses-permission android:name="android.permission.{p}"/>\n' for p in [
+                  "INTERNET","CAMERA","RECORD_AUDIO","MODIFY_AUDIO_SETTINGS",
+                  "ACCESS_NETWORK_STATE","ACCESS_WIFI_STATE","BLUETOOTH",
+                  "BLUETOOTH_CONNECT","WAKE_LOCK","POST_NOTIFICATIONS",
+                  "VIBRATE","USE_FULL_SCREEN_INTENT"
+              ])
               perms += '    <queries><intent><action android:name="android.intent.action.VIEW"/><data android:scheme="https"/></intent></queries>\n    <application android:extractNativeLibs="true"'
               m_xml = m_xml.replace("<application", perms, 1)
               ET.fromstring(m_xml)
@@ -238,7 +251,7 @@ jobs:
 
       - name: Install Packages & Fix Plugin Order
         run: |
-          flutter pub add dio file_picker url_launcher zego_uikit_prebuilt_call
+          flutter pub add dio file_picker url_launcher zego_uikit_prebuilt_call "flutter_local_notifications:^18.0.1"
           flutter pub get
 
           cat << 'PYEOF' > fix_plugins.py
@@ -334,4 +347,4 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release create "v4.0.${{ github.run_number }}-${{ github.run_attempt }}" "build/app/outputs/flutter-apk/app-release.apk#Universal-Messenger.apk" --target "${{ github.ref_name }}" --title "Universal Messenger v4.0.${{ github.run_number }}" --notes "Universal Messenger with Search & Typing Indicator" || true
+          gh release create "v4.0.${{ github.run_number }}-${{ github.run_attempt }}" "build/app/outputs/flutter-apk/app-release.apk#Universal-Messenger.apk" --target "${{ github.ref_name }}" --title "Universal Messenger v4.0.${{ github.run_number }}" --notes "Universal Messenger with Pop-up Notifications, Unread Status & Active Status" || true
