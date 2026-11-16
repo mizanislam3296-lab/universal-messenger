@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'package:cloud_firestore/cloud_firestore.dart';
@@ -5,8 +6,8 @@ import 'package:file_picker/file_picker.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 
-/// অ্যাপের সব সেটিংস লাইভ নিয়ন্ত্রণ ও স্থায়ীভাবে সেভ করার কন্ট্রোলার
 class AppSettingsController {
   static const Color defaultPrimaryColor = Color(0xFF008069);
   static const Color defaultChatBgColor = Color(0xFFECE5DD);
@@ -22,16 +23,13 @@ class AppSettingsController {
   static final ValueNotifier<bool> audioCallSounds = ValueNotifier(true);
   static final ValueNotifier<bool> vibrate = ValueNotifier(true);
 
-  /// 'default' | 'google' | 'custom'
   static final ValueNotifier<String> iconType = ValueNotifier('default');
   static final ValueNotifier<String?> customIconPath = ValueNotifier(null);
 
   static Directory get _appDir {
     final dir = Directory('/data/user/0/com.universal.messenger/files');
     try {
-      if (!dir.existsSync()) {
-        dir.createSync(recursive: true);
-      }
+      if (!dir.existsSync()) dir.createSync(recursive: true);
       return dir;
     } catch (_) {
       return Directory.systemTemp;
@@ -40,7 +38,6 @@ class AppSettingsController {
 
   static File get _settingsFile => File('${_appDir.path}/app_settings.json');
 
-  /// গ্যালারি থেকে নেওয়া ছবি স্থায়ী ফোল্ডারে কপি করে রাখে যাতে ক্যাশ ক্লিয়ার হলেও না হারায়
   static Future<String> savePermanentImage(String sourcePath, String prefix) async {
     try {
       final src = File(sourcePath);
@@ -60,13 +57,9 @@ class AppSettingsController {
       if (!await file.exists()) return;
       final data = jsonDecode(await file.readAsString()) as Map<String, dynamic>;
       themeMode.value = (data['isDark'] == true) ? ThemeMode.dark : ThemeMode.light;
-      if (data['appThemeColor'] != null) {
-        appThemeColor.value = Color(data['appThemeColor']);
-      }
+      if (data['appThemeColor'] != null) appThemeColor.value = Color(data['appThemeColor']);
       appThemeImage.value = data['appThemeImage'];
-      if (data['chatThemeColor'] != null) {
-        chatThemeColor.value = Color(data['chatThemeColor']);
-      }
+      if (data['chatThemeColor'] != null) chatThemeColor.value = Color(data['chatThemeColor']);
       chatThemeImage.value = data['chatThemeImage'];
       chatSounds.value = data['chatSounds'] ?? true;
       videoCallSounds.value = data['videoCallSounds'] ?? true;
@@ -96,7 +89,6 @@ class AppSettingsController {
     } catch (_) {}
   }
 
-  /// নির্বাচিত অ্যাপ আইকন প্রদর্শনের উইজেট
   static Widget buildAppIcon({double radius = 16}) {
     return ValueListenableBuilder<String>(
       valueListenable: iconType,
@@ -120,10 +112,7 @@ class AppSettingsController {
             valueListenable: customIconPath,
             builder: (context, path, _) {
               if (path != null && File(path).existsSync()) {
-                return CircleAvatar(
-                  radius: radius,
-                  backgroundImage: FileImage(File(path)),
-                );
+                return CircleAvatar(radius: radius, backgroundImage: FileImage(File(path)));
               }
               return CircleAvatar(
                 radius: radius,
@@ -137,6 +126,216 @@ class AppSettingsController {
           radius: radius,
           backgroundColor: Colors.white24,
           child: Icon(Icons.forum_rounded, size: radius * 1.1, color: Colors.white),
+        );
+      },
+    );
+  }
+}
+
+class NotificationAndPresenceService {
+  static final FlutterLocalNotificationsPlugin _notifications = FlutterLocalNotificationsPlugin();
+
+  static bool _initialized = false;
+  static String? activeChatId;
+  static String? _lastNotifiedCallId;
+  static bool _initialChatsLoaded = false;
+  static final Map<String, int> _lastChatMsgMillis = {};
+
+  static StreamSubscription<DocumentSnapshot>? _callSub;
+  static StreamSubscription<QuerySnapshot>? _chatSub;
+  static Timer? _heartbeatTimer;
+
+  static Future<void> start() async {
+    final user = FirebaseAuth.instance.currentUser;
+    if (user == null) return;
+
+    if (!_initialized) {
+      _initialized = true;
+      const androidInit = AndroidInitializationSettings('@mipmap/ic_launcher');
+      const initSettings = InitializationSettings(android: androidInit);
+      await _notifications.initialize(initSettings);
+
+      await _notifications
+          .resolvePlatformSpecificImplementation<AndroidFlutterLocalNotificationsPlugin>()
+          ?.requestNotificationsPermission();
+    }
+
+    await setOnlineStatus(true);
+    _heartbeatTimer?.cancel();
+    _heartbeatTimer = Timer.periodic(const Duration(seconds: 40), (_) => setOnlineStatus(true));
+
+    _listenIncomingCalls(user.uid);
+    _listenIncomingMessages(user.uid);
+  }
+
+  static Future<void> setOnlineStatus(bool isOnline) async {
+    final user = FirebaseAuth.instance.currentUser;
+    if (user == null) return;
+    try {
+      await FirebaseFirestore.instance.collection('users').doc(user.uid).set({
+        'isOnline': isOnline,
+        'lastSeen': FieldValue.serverTimestamp(),
+      }, SetOptions(merge: true));
+    } catch (_) {}
+  }
+
+  static Future<void> setOfflineAndStop() async {
+    await setOnlineStatus(false);
+    _heartbeatTimer?.cancel();
+    await _callSub?.cancel();
+    await _chatSub?.cancel();
+    _callSub = null;
+    _chatSub = null;
+    _initialChatsLoaded = false;
+    _lastChatMsgMillis.clear();
+  }
+
+  static void _listenIncomingCalls(String uid) {
+    _callSub?.cancel();
+    _callSub = FirebaseFirestore.instance.collection('calls').doc(uid).snapshots().listen((snap) async {
+      if (!snap.exists) return;
+      final data = snap.data();
+      if (data == null || data['status'] != 'ringing') return;
+
+      final callId = (data['callId'] ?? '').toString();
+      if (callId.isEmpty || callId == _lastNotifiedCallId) return;
+      _lastNotifiedCallId = callId;
+
+      final callerName = (data['callerName'] ?? 'কেউ একজন').toString();
+      final isVideo = data['isVideo'] == true;
+      final playSound = isVideo
+          ? AppSettingsController.videoCallSounds.value
+          : AppSettingsController.audioCallSounds.value;
+
+      final androidDetails = AndroidNotificationDetails(
+        'incoming_calls_high_v1',
+        'Incoming Calls',
+        channelDescription: 'Heads-up pop-up notifications for incoming calls',
+        importance: Importance.max,
+        priority: Priority.max,
+        category: AndroidNotificationCategory.call,
+        fullScreenIntent: true,
+        playSound: playSound,
+        enableVibration: AppSettingsController.vibrate.value,
+        visibility: NotificationVisibility.public,
+      );
+
+      await _notifications.show(
+        callId.hashCode,
+        isVideo ? 'ইনকামিং ভিডিও কল' : 'ইনকামিং অডিও কল',
+        '$callerName আপনাকে কল দিচ্ছেন...',
+        NotificationDetails(android: androidDetails),
+      );
+    });
+  }
+
+  static void _listenIncomingMessages(String uid) {
+    _chatSub?.cancel();
+    _initialChatsLoaded = false;
+    _lastChatMsgMillis.clear();
+
+    _chatSub = FirebaseFirestore.instance
+        .collection('chats')
+        .where('participants', arrayContains: uid)
+        .snapshots()
+        .listen((snap) async {
+      if (!_initialChatsLoaded) {
+        for (final doc in snap.docs) {
+          final ts = doc.data()['lastMessageTime'] as Timestamp?;
+          if (ts != null) _lastChatMsgMillis[doc.id] = ts.millisecondsSinceEpoch;
+        }
+        _initialChatsLoaded = true;
+        return;
+      }
+
+      for (final change in snap.docChanges) {
+        if (change.type != DocumentChangeType.modified && change.type != DocumentChangeType.added) {
+          continue;
+        }
+        final doc = change.doc;
+        final data = doc.data();
+        if (data == null) continue;
+
+        final ts = data['lastMessageTime'] as Timestamp?;
+        final millis = ts?.millisecondsSinceEpoch ?? 0;
+        final prevMillis = _lastChatMsgMillis[doc.id] ?? 0;
+        if (millis <= prevMillis) continue;
+        _lastChatMsgMillis[doc.id] = millis;
+
+        if (activeChatId == doc.id) continue;
+
+        final lastSenderId = (data['lastSenderId'] ?? '').toString();
+        if (lastSenderId == uid) continue;
+
+        final unreadMap = (data['unreadCount'] as Map<String, dynamic>?) ?? {};
+        final unread = (unreadMap[uid] as num?)?.toInt() ?? 0;
+        if (unread <= 0) continue;
+
+        final participants = List<String>.from(data['participants'] ?? []);
+        final otherId = participants.firstWhere((id) => id != uid, orElse: () => '');
+        final usersMap = (data['users'] as Map<String, dynamic>?) ?? {};
+        final senderInfo = (usersMap[otherId] as Map<String, dynamic>?) ?? {};
+        final senderName = (senderInfo['name'] ?? 'নতুন মেসেজ').toString();
+        final lastMsg = (data['lastMessage'] ?? 'নতুন মেসেজ এসেছে').toString();
+
+        final androidDetails = AndroidNotificationDetails(
+          'chat_messages_high_v1',
+          'Chat Messages',
+          channelDescription: 'Heads-up pop-up notifications for new messages',
+          importance: Importance.max,
+          priority: Priority.high,
+          category: AndroidNotificationCategory.message,
+          playSound: AppSettingsController.chatSounds.value,
+          enableVibration: AppSettingsController.vibrate.value,
+          visibility: NotificationVisibility.public,
+        );
+
+        await _notifications.show(
+          doc.id.hashCode,
+          senderName,
+          lastMsg,
+          NotificationDetails(android: androidDetails),
+        );
+      }
+    });
+  }
+
+  static Widget buildUserAvatarWithStatus({
+    required String userId,
+    required Widget avatar,
+    double dotSize = 13,
+  }) {
+    return StreamBuilder<DocumentSnapshot>(
+      stream: FirebaseFirestore.instance.collection('users').doc(userId).snapshots(),
+      builder: (context, snapshot) {
+        final data = snapshot.data?.data() as Map<String, dynamic>?;
+        final isOnlineFlag = data?['isOnline'] == true;
+        final lastSeen = data?['lastSeen'] as Timestamp?;
+        final isRecent = lastSeen == null || DateTime.now().difference(lastSeen.toDate()).inSeconds < 90;
+        final isActive = isOnlineFlag && isRecent;
+
+        return Stack(
+          clipBehavior: Clip.none,
+          children: [
+            avatar,
+            if (isActive)
+              Positioned(
+                right: 0,
+                bottom: 0,
+                child: Container(
+                  width: dotSize,
+                  height: dotSize,
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF31A24C),
+                    shape: BoxShape.circle,
+                    border: Border.all(
+                      color: Theme.of(context).scaffoldBackgroundColor,
+                      width: 2,
+                    ),
+                  ),
+                ),
+              ),
+          ],
         );
       },
     );
@@ -184,7 +383,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(text)));
   }
 
-  // Change Name
   Future<void> _changeNameDialog() async {
     final ctrl = TextEditingController(text: _displayName);
     final newName = await showDialog<String>(
@@ -197,10 +395,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
         ),
         actions: [
           TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
-          ElevatedButton(
-            onPressed: () => Navigator.pop(ctx, ctrl.text.trim()),
-            child: const Text('Save'),
-          ),
+          ElevatedButton(onPressed: () => Navigator.pop(ctx, ctrl.text.trim()), child: const Text('Save')),
         ],
       ),
     );
@@ -209,9 +404,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     setState(() => _isBusy = true);
     try {
       await _user!.updateDisplayName(newName);
-      await FirebaseFirestore.instance.collection('users').doc(_user!.uid).set({
-        'name': newName,
-      }, SetOptions(merge: true));
+      await FirebaseFirestore.instance.collection('users').doc(_user!.uid).set({'name': newName}, SetOptions(merge: true));
       setState(() => _displayName = newName);
       _showMsg('Name updated successfully');
     } catch (e) {
@@ -221,7 +414,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
     }
   }
 
-  // Change Photo
   Future<void> _changeProfilePhoto() async {
     if (_user == null) return;
     final files = await FilePicker.pickFiles(type: FileType.image);
@@ -239,9 +431,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
           photoValue = await AppSettingsController.savePermanentImage(file.path!, 'profile');
         }
       }
-      await FirebaseFirestore.instance.collection('users').doc(_user!.uid).set({
-        'photoUrl': photoValue,
-      }, SetOptions(merge: true));
+      await FirebaseFirestore.instance.collection('users').doc(_user!.uid).set({'photoUrl': photoValue}, SetOptions(merge: true));
       setState(() => _photoUrl = photoValue);
       _showMsg('Profile photo updated');
     } catch (e) {
@@ -251,7 +441,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
     }
   }
 
-  // Change Password
   Future<void> _changePasswordDialog() async {
     final oldCtrl = TextEditingController();
     final newCtrl = TextEditingController();
@@ -262,17 +451,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
         content: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            TextField(
-              controller: oldCtrl,
-              obscureText: true,
-              decoration: const InputDecoration(labelText: 'Current Password', border: OutlineInputBorder()),
-            ),
+            TextField(controller: oldCtrl, obscureText: true, decoration: const InputDecoration(labelText: 'Current Password', border: OutlineInputBorder())),
             const SizedBox(height: 12),
-            TextField(
-              controller: newCtrl,
-              obscureText: true,
-              decoration: const InputDecoration(labelText: 'New Password (min 6 chars)', border: OutlineInputBorder()),
-            ),
+            TextField(controller: newCtrl, obscureText: true, decoration: const InputDecoration(labelText: 'New Password (min 6 chars)', border: OutlineInputBorder())),
           ],
         ),
         actions: [
@@ -303,7 +484,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
     }
   }
 
-  // Log Out
   Future<void> _logout() async {
     final confirm = await showDialog<bool>(
       context: context,
@@ -321,6 +501,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
       ),
     );
     if (confirm != true) return;
+    await NotificationAndPresenceService.setOfflineAndStop();
     await FirebaseAuth.instance.signOut();
     if (!mounted) return;
     if (widget.onLoggedOut != null) {
@@ -330,7 +511,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
     }
   }
 
-  // Change Theme (Chat Theme / App Theme)
   Future<void> _openThemePicker({required bool isChatTheme}) async {
     final colors = isChatTheme
         ? [
@@ -363,10 +543,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text(
-              isChatTheme ? 'Chat Theme' : 'App Theme',
-              style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
-            ),
+            Text(isChatTheme ? 'Chat Theme' : 'App Theme', style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
             const SizedBox(height: 14),
             Wrap(
               spacing: 12,
@@ -389,11 +566,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   child: Container(
                     width: 44,
                     height: 44,
-                    decoration: BoxDecoration(
-                      color: c,
-                      shape: BoxShape.circle,
-                      border: Border.all(color: Colors.grey.shade400, width: 1.5),
-                    ),
+                    decoration: BoxDecoration(color: c, shape: BoxShape.circle, border: Border.all(color: Colors.grey.shade400, width: 1.5)),
                   ),
                 );
               }).toList(),
@@ -451,14 +624,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
     );
   }
 
-  // Icon (Custom Photo Icon)
   Future<void> _pickCustomPhotoIcon() async {
     final files = await FilePicker.pickFiles(type: FileType.image);
     if (files.isNotEmpty && files.single.path != null) {
-      final savedPath = await AppSettingsController.savePermanentImage(
-        files.single.path!,
-        'custom_icon',
-      );
+      final savedPath = await AppSettingsController.savePermanentImage(files.single.path!, 'custom_icon');
       AppSettingsController.iconType.value = 'custom';
       AppSettingsController.customIconPath.value = savedPath;
       await AppSettingsController.save();
@@ -469,10 +638,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   ImageProvider? _buildAvatarProvider(String? src) {
     if (src == null || src.isEmpty) return null;
-    if (src.startsWith('data:image')) {
-      final b64 = src.split(',').last;
-      return MemoryImage(base64Decode(b64));
-    }
+    if (src.startsWith('data:image')) return MemoryImage(base64Decode(src.split(',').last));
     if (src.startsWith('http')) return NetworkImage(src);
     final f = File(src);
     if (f.existsSync()) return FileImage(f);
@@ -485,17 +651,12 @@ class _SettingsScreenState extends State<SettingsScreen> {
       valueListenable: AppSettingsController.appThemeColor,
       builder: (context, themeColor, _) {
         return Scaffold(
-          appBar: AppBar(
-            title: const Text('Settings'),
-            backgroundColor: themeColor,
-            foregroundColor: Colors.white,
-          ),
+          appBar: AppBar(title: const Text('Settings'), backgroundColor: themeColor, foregroundColor: Colors.white),
           body: Stack(
             children: [
               ListView(
                 padding: const EdgeInsets.all(12),
                 children: [
-                  // Account Info (প্রথমে বন্ধ অবস্থায় থাকবে)
                   Card(
                     child: ExpansionTile(
                       initiallyExpanded: false,
@@ -506,32 +667,14 @@ class _SettingsScreenState extends State<SettingsScreen> {
                       title: const Text('Account Info', style: TextStyle(fontWeight: FontWeight.bold)),
                       subtitle: Text(_displayName),
                       children: [
-                        ListTile(
-                          leading: const Icon(Icons.edit),
-                          title: const Text('Change name'),
-                          onTap: _changeNameDialog,
-                        ),
-                        ListTile(
-                          leading: const Icon(Icons.photo_camera),
-                          title: const Text('Change photo'),
-                          onTap: _changeProfilePhoto,
-                        ),
-                        ListTile(
-                          leading: const Icon(Icons.lock_reset),
-                          title: const Text('Change password'),
-                          onTap: _changePasswordDialog,
-                        ),
-                        ListTile(
-                          leading: const Icon(Icons.logout, color: Colors.red),
-                          title: const Text('Log out', style: TextStyle(color: Colors.red)),
-                          onTap: _logout,
-                        ),
+                        ListTile(leading: const Icon(Icons.edit), title: const Text('Change name'), onTap: _changeNameDialog),
+                        ListTile(leading: const Icon(Icons.photo_camera), title: const Text('Change photo'), onTap: _changeProfilePhoto),
+                        ListTile(leading: const Icon(Icons.lock_reset), title: const Text('Change password'), onTap: _changePasswordDialog),
+                        ListTile(leading: const Icon(Icons.logout, color: Colors.red), title: const Text('Log out', style: TextStyle(color: Colors.red)), onTap: _logout),
                       ],
                     ),
                   ),
                   const SizedBox(height: 8),
-
-                  // Change Theme
                   Card(
                     child: ExpansionTile(
                       leading: const Icon(Icons.color_lens),
@@ -545,10 +688,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                             children: [
                               ValueListenableBuilder<Color>(
                                 valueListenable: AppSettingsController.chatThemeColor,
-                                builder: (_, c, __) => CircleAvatar(
-                                  radius: 10,
-                                  backgroundColor: c,
-                                ),
+                                builder: (_, c, __) => CircleAvatar(radius: 10, backgroundColor: c),
                               ),
                               const SizedBox(width: 6),
                               const Icon(Icons.chevron_right),
@@ -562,10 +702,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                           trailing: Row(
                             mainAxisSize: MainAxisSize.min,
                             children: [
-                              CircleAvatar(
-                                radius: 10,
-                                backgroundColor: themeColor,
-                              ),
+                              CircleAvatar(radius: 10, backgroundColor: themeColor),
                               const SizedBox(width: 6),
                               const Icon(Icons.chevron_right),
                             ],
@@ -576,8 +713,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     ),
                   ),
                   const SizedBox(height: 8),
-
-                  // Day or Dark Mode
                   Card(
                     child: ValueListenableBuilder<ThemeMode>(
                       valueListenable: AppSettingsController.themeMode,
@@ -603,8 +738,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     ),
                   ),
                   const SizedBox(height: 8),
-
-                  // Notification
                   Card(
                     child: ExpansionTile(
                       leading: const Icon(Icons.notifications_active),
@@ -666,8 +799,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     ),
                   ),
                   const SizedBox(height: 8),
-
-                  // Icon
                   Card(
                     child: ExpansionTile(
                       leading: const Icon(Icons.app_shortcut),
@@ -678,10 +809,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                           builder: (_, type, __) => Column(
                             children: [
                               ListTile(
-                                leading: CircleAvatar(
-                                  backgroundColor: themeColor,
-                                  child: const Icon(Icons.forum_rounded, color: Colors.white),
-                                ),
+                                leading: CircleAvatar(backgroundColor: themeColor, child: const Icon(Icons.forum_rounded, color: Colors.white)),
                                 title: const Text('Default icon'),
                                 trailing: type == 'default' ? const Icon(Icons.check_circle, color: Colors.green) : null,
                                 onTap: () async {
@@ -693,14 +821,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                               ListTile(
                                 leading: const CircleAvatar(
                                   backgroundColor: Colors.white,
-                                  child: Text(
-                                    'G',
-                                    style: TextStyle(
-                                      fontWeight: FontWeight.bold,
-                                      fontSize: 20,
-                                      color: Color(0xFF4285F4),
-                                    ),
-                                  ),
+                                  child: Text('G', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 20, color: Color(0xFF4285F4))),
                                 ),
                                 title: const Text('Google icon'),
                                 trailing: type == 'google' ? const Icon(Icons.check_circle, color: Colors.green) : null,
@@ -713,9 +834,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                               ListTile(
                                 leading: CircleAvatar(
                                   backgroundImage: _buildAvatarProvider(AppSettingsController.customIconPath.value),
-                                  child: AppSettingsController.customIconPath.value == null
-                                      ? const Icon(Icons.add_a_photo)
-                                      : null,
+                                  child: AppSettingsController.customIconPath.value == null ? const Icon(Icons.add_a_photo) : null,
                                 ),
                                 title: const Text('Custom photo icon'),
                                 trailing: type == 'custom' ? const Icon(Icons.check_circle, color: Colors.green) : null,
@@ -730,10 +849,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 ],
               ),
               if (_isBusy)
-                Container(
-                  color: Colors.black38,
-                  child: const Center(child: CircularProgressIndicator()),
-                ),
+                Container(color: Colors.black38, child: const Center(child: CircularProgressIndicator())),
             ],
           ),
         );
