@@ -257,6 +257,31 @@ jobs:
           cat << 'PYEOF' > fix_plugins.py
           import json, os, re, urllib.parse
 
+          fp_ver = 0
+          if os.path.exists("pubspec.lock"):
+              with open("pubspec.lock", encoding="utf-8", errors="ignore") as f:
+                  lock_txt = f.read()
+              m_fp = re.search(r'(?m)^  file_picker:\n(?:    [^\n]+\n){1,12}    version:\s*["\']?(\d+)\.', lock_txt)
+              if m_fp:
+                  fp_ver = int(m_fp.group(1))
+          print("DETECTED file_picker MAJOR VERSION:", fp_ver)
+          if 0 < fp_ver < 11:
+              for droot, _, dfiles in os.walk("lib"):
+                  for df in dfiles:
+                      if df.endswith(".dart"):
+                          dp = os.path.join(droot, df)
+                          with open(dp, encoding="utf-8") as f:
+                              dtxt = f.read()
+                          new_dtxt = re.sub(
+                              r'await\s+FilePicker\.pickFiles\(([^;]*)\);',
+                              r'((await FilePicker.platform.pickFiles(\1))?.files ?? []);',
+                              dtxt,
+                          )
+                          if new_dtxt != dtxt:
+                              with open(dp, "w", encoding="utf-8") as f:
+                                  f.write(new_dtxt)
+                              print("AUTO-ADAPTED FilePicker API IN:", dp)
+
           proj_dir = os.path.realpath(".")
           flutter_root = os.path.realpath(os.environ["FLUTTER_ROOT"]) if os.environ.get("FLUTTER_ROOT") else ""
           roots = {os.path.realpath(os.environ.get("PUB_CACHE") or os.path.expanduser("~/.pub-cache"))}
