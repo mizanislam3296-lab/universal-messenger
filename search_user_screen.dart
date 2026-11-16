@@ -3,14 +3,14 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:universal_messenger/screens/chat_screen.dart';
 
-class SearchUserScreen extends StatefulWidget {
-  const SearchUserScreen({super.key});
+class SearchUsersScreen extends StatefulWidget {
+  const SearchUsersScreen({super.key});
 
   @override
-  State<SearchUserScreen> createState() => _SearchUserScreenState();
+  State<SearchUsersScreen> createState() => _SearchUsersScreenState();
 }
 
-class _SearchUserScreenState extends State<SearchUserScreen> {
+class _SearchUsersScreenState extends State<SearchUsersScreen> {
   final _searchController = TextEditingController();
   String _query = '';
 
@@ -38,7 +38,7 @@ class _SearchUserScreenState extends State<SearchUserScreen> {
               controller: _searchController,
               onChanged: (val) => setState(() => _query = val.trim().toLowerCase()),
               decoration: InputDecoration(
-                hintText: 'নাম বা জিমেইল দিয়ে খুঁজুন...',
+                hintText: 'সম্পূর্ণ নাম বা জিমেইল লিখুন...',
                 prefixIcon: const Icon(Icons.search),
                 suffixIcon: _query.isNotEmpty
                     ? IconButton(
@@ -56,71 +56,78 @@ class _SearchUserScreenState extends State<SearchUserScreen> {
             ),
           ),
           Expanded(
-            child: StreamBuilder<QuerySnapshot>(
-              stream: FirebaseFirestore.instance.collection('users').snapshots(),
-              builder: (context, snapshot) {
-                if (snapshot.connectionState == ConnectionState.waiting) {
-                  return const Center(child: CircularProgressIndicator());
-                }
+            child: _query.isEmpty
+                ? const Center(
+                    child: Text(
+                      'চ্যাট শুরু করতে সম্পূর্ণ ইউজার নাম বা জিমেইল লিখুন',
+                      style: TextStyle(color: Colors.grey),
+                    ),
+                  )
+                : StreamBuilder<QuerySnapshot>(
+                    stream: FirebaseFirestore.instance.collection('users').snapshots(),
+                    builder: (context, snapshot) {
+                      if (snapshot.connectionState == ConnectionState.waiting) {
+                        return const Center(child: CircularProgressIndicator());
+                      }
 
-                if (!snapshot.hasData || snapshot.data!.docs.isEmpty) {
-                  return const Center(child: Text('কোনো ইউজার পাওয়া যায়নি।'));
-                }
+                      if (!snapshot.hasData || snapshot.data!.docs.isEmpty) {
+                        return const Center(child: Text('কোনো ইউজার পাওয়া যায়নি'));
+                      }
 
-                final users = snapshot.data!.docs.where((doc) {
-                  final data = doc.data() as Map<String, dynamic>;
-                  final uid = data['uid'] ?? doc.id;
-                  if (uid == currentUser?.uid) return false;
+                      final users = snapshot.data!.docs.where((doc) {
+                        final data = doc.data() as Map<String, dynamic>;
+                        final uid = data['uid'] ?? doc.id;
+                        if (uid == currentUser?.uid) return false;
 
-                  final name = (data['name'] ?? '').toString().toLowerCase();
-                  final email = (data['email'] ?? '').toString().toLowerCase();
-                  return name.contains(_query) || email.contains(_query);
-                }).toList();
+                        final name = (data['name'] ?? '').toString().trim().toLowerCase();
+                        final email = (data['email'] ?? '').toString().trim().toLowerCase();
+                        return name == _query || email == _query;
+                      }).toList();
 
-                if (users.isEmpty) {
-                  return const Center(child: Text('এই নামে বা জিমেইলে কোনো ইউজার নেই।'));
-                }
+                      if (users.isEmpty) {
+                        return const Center(child: Text('এই নামে বা জিমেইলে কোনো ইউজার পাওয়া যায়নি'));
+                      }
 
-                return ListView.separated(
-                  itemCount: users.length,
-                  separatorBuilder: (_, __) => const Divider(height: 1),
-                  itemBuilder: (context, index) {
-                    final data = users[index].data() as Map<String, dynamic>;
-                    final uid = data['uid'] ?? users[index].id;
-                    final name = (data['name'] ?? 'User').toString();
-                    final email = (data['email'] ?? '').toString();
+                      return ListView.separated(
+                        itemCount: users.length,
+                        separatorBuilder: (_, __) => const Divider(height: 1),
+                        itemBuilder: (context, index) {
+                          final data = users[index].data() as Map<String, dynamic>;
+                          final uid = data['uid'] ?? users[index].id;
+                          final name = (data['name'] ?? 'User').toString();
+                          final email = (data['email'] ?? '').toString();
 
-                    return ListTile(
-                      leading: CircleAvatar(
-                        backgroundColor: const Color(0xFF008069),
-                        child: Text(
-                          name.isNotEmpty ? name[0].toUpperCase() : 'U',
-                          style: const TextStyle(color: Colors.white),
-                        ),
-                      ),
-                      title: Text(
-                        name,
-                        style: const TextStyle(fontWeight: FontWeight.bold),
-                      ),
-                      subtitle: Text(email),
-                      trailing: const Icon(Icons.chat_bubble_outline, color: Color(0xFF008069)),
-                      onTap: () {
-                        Navigator.pushReplacement(
-                          context,
-                          MaterialPageRoute(
-                            builder: (_) => ChatScreen(
-                              receiverId: uid,
-                              receiverName: name,
-                              receiverEmail: email,
+                          return ListTile(
+                            leading: CircleAvatar(
+                              backgroundColor: const Color(0xFF008069),
+                              child: Text(
+                                name.isNotEmpty ? name[0].toUpperCase() : '?',
+                                style: const TextStyle(color: Colors.white),
+                              ),
                             ),
-                          ),
-                        );
-                      },
-                    );
-                  },
-                );
-              },
-            ),
+                            title: Text(
+                              name,
+                              style: const TextStyle(fontWeight: FontWeight.bold),
+                            ),
+                            subtitle: Text(email),
+                            trailing: const Icon(Icons.chat_bubble_outline),
+                            onTap: () {
+                              Navigator.pushReplacement(
+                                context,
+                                MaterialPageRoute(
+                                  builder: (_) => ChatScreen(
+                                    receiverId: uid,
+                                    receiverName: name,
+                                    receiverEmail: email,
+                                  ),
+                                ),
+                              );
+                            },
+                          );
+                        },
+                      );
+                    },
+                  ),
           ),
         ],
       ),
