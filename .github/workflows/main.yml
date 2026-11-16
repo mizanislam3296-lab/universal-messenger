@@ -95,7 +95,7 @@ jobs:
           fi
 
           cat << 'PYEOF' > configure_android.py
-          import os, re, shutil, xml.etree.ElementTree as ET
+          import os, re, shutil, struct, zlib, xml.etree.ElementTree as ET
 
           run_num = os.environ.get("RUN_NUM", "100")
 
@@ -104,7 +104,128 @@ jobs:
           tdir = "android/app/src/main/kotlin/com/universal/messenger"
           os.makedirs(tdir, exist_ok=True)
           with open(f"{tdir}/MainActivity.kt", "w") as f:
-              f.write("package com.universal.messenger\nimport io.flutter.embedding.android.FlutterActivity\nclass MainActivity : FlutterActivity()\n")
+              f.write('''package com.universal.messenger
+
+          import android.content.ComponentName
+          import android.content.Intent
+          import android.content.pm.PackageManager
+          import android.content.pm.ShortcutInfo
+          import android.content.pm.ShortcutManager
+          import android.graphics.BitmapFactory
+          import android.graphics.drawable.Icon
+          import android.os.Build
+          import io.flutter.embedding.android.FlutterActivity
+          import io.flutter.embedding.engine.FlutterEngine
+          import io.flutter.plugin.common.MethodChannel
+
+          class MainActivity : FlutterActivity() {
+              private val CHANNEL = "com.universal.messenger/icon"
+
+              override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
+                  super.configureFlutterEngine(flutterEngine)
+                  MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL).setMethodCallHandler { call, result ->
+                      when (call.method) {
+                          "setAppIcon" -> {
+                              val iconType = call.argument<String>("type") ?: "default"
+                              try {
+                                  val pm = applicationContext.packageManager
+                                  val defaultComp = ComponentName(applicationContext, "com.universal.messenger.MainActivityDefault")
+                                  val googleComp = ComponentName(applicationContext, "com.universal.messenger.MainActivityGoogle")
+                                  if (iconType == "google") {
+                                      pm.setComponentEnabledSetting(googleComp, PackageManager.COMPONENT_ENABLED_STATE_ENABLED, PackageManager.DONT_KILL_APP)
+                                      pm.setComponentEnabledSetting(defaultComp, PackageManager.COMPONENT_ENABLED_STATE_DISABLED, PackageManager.DONT_KILL_APP)
+                                  } else {
+                                      pm.setComponentEnabledSetting(defaultComp, PackageManager.COMPONENT_ENABLED_STATE_ENABLED, PackageManager.DONT_KILL_APP)
+                                      pm.setComponentEnabledSetting(googleComp, PackageManager.COMPONENT_ENABLED_STATE_DISABLED, PackageManager.DONT_KILL_APP)
+                                  }
+                                  result.success(true)
+                              } catch (e: Exception) {
+                                  result.error("ICON_ERROR", e.message, null)
+                              }
+                          }
+                          "pinCustomShortcut" -> {
+                              val path = call.argument<String>("path")
+                              if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && path != null) {
+                                  try {
+                                      val sm = getSystemService(ShortcutManager::class.java)
+                                      if (sm != null && sm.isRequestPinShortcutSupported) {
+                                          val bmp = BitmapFactory.decodeFile(path)
+                                          if (bmp != null) {
+                                              val launchIntent = Intent(applicationContext, MainActivity::class.java).apply {
+                                                  action = Intent.ACTION_VIEW
+                                                  addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+                                              }
+                                              val shortcut = ShortcutInfo.Builder(applicationContext, "custom_messenger_${System.currentTimeMillis()}")
+                                                  .setShortLabel("Universal Messenger")
+                                                  .setIcon(Icon.createWithBitmap(bmp))
+                                                  .setIntent(launchIntent)
+                                                  .build()
+                                              sm.requestPinShortcut(shortcut, null)
+                                              result.success(true)
+                                          } else {
+                                              result.success(false)
+                                          }
+                                      } else {
+                                          result.success(false)
+                                      }
+                                  } catch (e: Exception) {
+                                      result.error("SHORTCUT_ERROR", e.message, null)
+                                  }
+                              } else {
+                                  result.success(false)
+                              }
+                          }
+                          else -> result.notImplemented()
+                      }
+                  }
+              }
+          }
+          ''')
+
+          def make_png(w, h, fn):
+              raw = bytearray()
+              for y in range(h):
+                  raw.append(0)
+                  for x in range(w):
+                      raw.extend(fn(x, y, w, h))
+              def chunk(tag, data):
+                  return struct.pack(">I", len(data)) + tag + data + struct.pack(">I", zlib.crc32(tag + data) & 0xffffffff)
+              ihdr = struct.pack(">IIBBBBB", w, h, 8, 6, 0, 0, 0)
+              return b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr) + chunk(b"IDAT", zlib.compress(bytes(raw), 9)) + chunk(b"IEND", b"")
+
+          def default_px(x, y, w, h):
+              in_bubble = (0.22 * w <= x <= 0.78 * w) and (0.25 * h <= y <= 0.65 * h)
+              in_tail = (0.28 * w <= x <= 0.44 * w) and (0.65 * h <= y <= 0.76 * h) and ((x - 0.28 * w) <= (0.76 * h - y) * 1.4)
+              if in_bubble or in_tail:
+                  return (255, 255, 255, 255)
+              return (0, 128, 105, 255)
+
+          def google_px(x, y, w, h):
+              cx, cy = w * 0.5, h * 0.5
+              dx, dy = x - cx, y - cy
+              d2 = dx * dx + dy * dy
+              ro, ri = w * 0.31, w * 0.18
+              in_ring = (ri * ri <= d2 <= ro * ro) and not (dx > 0 and -ro * 0.42 < dy < 0)
+              in_bar = (0 <= dx <= ro) and (0 <= dy <= ro * 0.36)
+              if in_bar or (in_ring and dx > 0 and dy >= 0):
+                  return (66, 133, 244, 255)
+              if in_ring:
+                  if dy < -abs(dx) * 0.45:
+                      return (234, 67, 53, 255)
+                  if dx < 0 and dy <= abs(dx) * 0.45:
+                      return (251, 188, 5, 255)
+                  return (52, 168, 83, 255)
+              return (255, 255, 255, 255)
+
+          res_dir = "android/app/src/main/res"
+          shutil.rmtree(f"{res_dir}/mipmap-anydpi-v26", ignore_errors=True)
+          for density, size in [("mipmap-mdpi", 48), ("mipmap-hdpi", 72), ("mipmap-xhdpi", 96), ("mipmap-xxhdpi", 144), ("mipmap-xxxhdpi", 192)]:
+              ddir = f"{res_dir}/{density}"
+              os.makedirs(ddir, exist_ok=True)
+              with open(f"{ddir}/ic_launcher.png", "wb") as f:
+                  f.write(make_png(size, size, default_px))
+              with open(f"{ddir}/ic_launcher_google.png", "wb") as f:
+                  f.write(make_png(size, size, google_px))
 
           if os.path.exists("android/gradle.properties"):
               with open("android/gradle.properties", "r") as f:
@@ -200,7 +321,7 @@ jobs:
                   minSdk = 23
                   targetSdk = 34
                   versionCode = {run_num}
-                  versionName = "4.0.{run_num}"
+                  versionName = "5.0.{run_num}"
               }}
               signingConfigs {{
                   maybeCreate("release").apply {{
@@ -235,14 +356,48 @@ jobs:
               with open(mp, "r", encoding="utf-8") as f:
                   m_xml = f.read()
               m_xml = re.sub(r'\s*android:extractNativeLibs="[^"]*"', '', m_xml)
+              m_xml = m_xml.replace('android:label="universal_messenger"', 'android:label="Universal Messenger"')
               perms = ''.join(f'    <uses-permission android:name="android.permission.{p}"/>\n' for p in [
                   "INTERNET","CAMERA","RECORD_AUDIO","MODIFY_AUDIO_SETTINGS",
                   "ACCESS_NETWORK_STATE","ACCESS_WIFI_STATE","BLUETOOTH",
                   "BLUETOOTH_CONNECT","WAKE_LOCK","POST_NOTIFICATIONS",
-                  "VIBRATE","USE_FULL_SCREEN_INTENT"
+                  "VIBRATE","USE_FULL_SCREEN_INTENT","INSTALL_SHORTCUT"
               ])
               perms += '    <queries><intent><action android:name="android.intent.action.VIEW"/><data android:scheme="https"/></intent></queries>\n    <application android:extractNativeLibs="true"'
               m_xml = m_xml.replace("<application", perms, 1)
+              m_xml = re.sub(
+                  r'<intent-filter>\s*<action android:name="android\.intent\.action\.MAIN"\s*/>\s*<category android:name="android\.intent\.category\.LAUNCHER"\s*/>\s*</intent-filter>',
+                  '',
+                  m_xml,
+                  count=1
+              )
+              aliases = '''
+                  <activity-alias
+                      android:name=".MainActivityDefault"
+                      android:enabled="true"
+                      android:exported="true"
+                      android:icon="@mipmap/ic_launcher"
+                      android:label="Universal Messenger"
+                      android:targetActivity=".MainActivity">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN"/>
+                          <category android:name="android.intent.category.LAUNCHER"/>
+                      </intent-filter>
+                  </activity-alias>
+                  <activity-alias
+                      android:name=".MainActivityGoogle"
+                      android:enabled="false"
+                      android:exported="true"
+                      android:icon="@mipmap/ic_launcher_google"
+                      android:label="Google"
+                      android:targetActivity=".MainActivity">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN"/>
+                          <category android:name="android.intent.category.LAUNCHER"/>
+                      </intent-filter>
+                  </activity-alias>
+              </application>'''
+              m_xml = m_xml.replace("</application>", aliases, 1)
               ET.fromstring(m_xml)
               with open(mp, "w", encoding="utf-8") as f:
                   f.write(m_xml)
@@ -372,4 +527,4 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release create "v4.0.${{ github.run_number }}-${{ github.run_attempt }}" "build/app/outputs/flutter-apk/app-release.apk#Universal-Messenger.apk" --target "${{ github.ref_name }}" --title "Universal Messenger v4.0.${{ github.run_number }}" --notes "Universal Messenger with Pop-up Notifications, Unread Status & Active Status" || true
+          gh release create "v5.0.${{ github.run_number }}-${{ github.run_attempt }}" "build/app/outputs/flutter-apk/app-release.apk#Universal-Messenger.apk" --target "${{ github.ref_name }}" --title "Universal Messenger v5.0.${{ github.run_number }}" --notes "Universal Messenger v5.0 with Home Screen Icon Switcher & Real-Time Presence" || true
