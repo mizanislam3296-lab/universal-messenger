@@ -137,7 +137,7 @@ class HomeScreen extends StatelessWidget {
             onPressed: () {
               Navigator.push(
                 context,
-                MaterialPageRoute(builder: (_) => const SearchUserScreen()),
+                MaterialPageRoute(builder: (_) =>  SearchUserScreen()),
               );
             },
           ),
@@ -288,7 +288,7 @@ class HomeScreen extends StatelessWidget {
         onPressed: () {
           Navigator.push(
             context,
-            MaterialPageRoute(builder: (_) => const SearchUserScreen()),
+            MaterialPageRoute(builder: (_) =>  SearchUserScreen()),
           );
         },
         child: const Icon(Icons.message),
