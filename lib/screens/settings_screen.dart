@@ -158,12 +158,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
     try {
       final file = files.first;
       String photoValue = file.path ?? '';
-      List<int>? bytes = file.bytes;
-      if (bytes == null && file.path != null) {
-        bytes = await File(file.path!).readAsBytes();
-      }
-      if (bytes != null && bytes.length <= 500 * 1024) {
-        photoValue = 'data:image/jpeg;base64,${base64Encode(bytes)}';
+      if (file.path != null) {
+        final bytes = await File(file.path!).readAsBytes();
+        if (bytes.length <= 500 * 1024) {
+          photoValue = 'data:image/jpeg;base64,${base64Encode(bytes)}';
+        }
       }
       await FirebaseFirestore.instance.collection('users').doc(_user!.uid).set({
         'photoUrl': photoValue,
