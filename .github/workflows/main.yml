@@ -11,7 +11,7 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 50
 
     steps:
       - name: Free Disk Space
@@ -30,6 +30,17 @@ jobs:
         uses: subosito/flutter-action@v2
         with:
           channel: 'stable'
+          cache: true
+
+      - name: Cache Gradle & Build Files
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
+          restore-keys: |
+            ${{ runner.os }}-gradle-
 
       - name: Auto-Fix & Organize Dart Files
         run: |
@@ -172,7 +183,7 @@ jobs:
               sign = '    lint { checkReleaseBuilds = false; abortOnError = false }\n    signingConfigs { create("release") { storeFile = file("release.jks"); storePassword = "Messenger@2026"; keyAlias = "messenger_key"; keyPassword = "Messenger@2026" } }\n    buildTypes {'
               c = c.replace("    buildTypes {", sign, 1)
               c = c.replace('signingConfigs.getByName("debug")', 'signingConfigs.getByName("release")\n            isMinifyEnabled = false\n            isShrinkResources = false')
-              c += '\nandroid {\n    compileSdk = 36\n    defaultConfig {\n        targetSdk = 34\n        minSdk = 23\n    }\n}\n'
+              c += '\nandroid {\n    compileSdk = 36\n    defaultConfig {\n        targetSdk = 34\n        minSdk = 23\n    }\n    packaging {\n        jniLibs {\n            useLegacyPackaging = true\n        }\n    }\n}\n'
               with open("android/app/build.gradle.kts", "w") as f:
                   f.write(c)
 
@@ -180,8 +191,9 @@ jobs:
           if os.path.exists(mp):
               with open(mp, "r", encoding="utf-8") as f:
                   m_xml = f.read()
+              m_xml = re.sub(r'\s*android:extractNativeLibs="[^"]*"', '', m_xml)
               perms = ''.join(f'    <uses-permission android:name="android.permission.{p}"/>\n' for p in ["INTERNET","CAMERA","RECORD_AUDIO","MODIFY_AUDIO_SETTINGS","ACCESS_NETWORK_STATE","ACCESS_WIFI_STATE","BLUETOOTH","BLUETOOTH_CONNECT","WAKE_LOCK"])
-              perms += '    <queries><intent><action android:name="android.intent.action.VIEW"/><data android:scheme="https"/></intent></queries>\n    <application'
+              perms += '    <queries><intent><action android:name="android.intent.action.VIEW"/><data android:scheme="https"/></intent></queries>\n    <application android:extractNativeLibs="true"'
               m_xml = m_xml.replace("<application", perms, 1)
               ET.fromstring(m_xml)
               with open(mp, "w", encoding="utf-8") as f:
@@ -267,7 +279,7 @@ jobs:
           python3 fix_plugins.py && rm -f fix_plugins.py
 
       - name: Build Release APK
-        timeout-minutes: 25
+        timeout-minutes: 45
         run: |
           flutter build apk --release --no-pub --target-platform android-arm64
           rm -rf build/app/intermediates
@@ -283,4 +295,4 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release create "v4.0.${{ github.run_number }}-${{ github.run_attempt }}" "build/app/outputs/flutter-apk/app-release.apk#Universal-Messenger.apk" --target "${{ github.ref_name }}" --title "Universal Messenger v4.0.${{ github.run_number }}" --notes "Universal Messenger with Settings" || true
+          gh release create "v4.0.${{ github.run_number }}-${{ github.run_attempt }}" "build/app/outputs/flutter-apk/app-release.apk#Universal-Messenger.apk" --target "${{ github.ref_name }}" --title "Universal Messenger v4.0.${{ github.run_number }}" --notes "Universal Messenger with Search & Typing Indicator" || true
