@@ -137,11 +137,11 @@ class HomeScreen extends StatelessWidget {
             onPressed: () {
               Navigator.push(
                 context,
-                MaterialPageRoute(builder: (_) =>  SearchUsersScreen()),
+                MaterialPageRoute(builder: (_) => const SearchUsersScreen()),
               );
             },
           ),
-                    IconButton(
+          IconButton(
             icon: const Icon(Icons.settings),
             tooltip: 'Settings',
             onPressed: () {
@@ -152,7 +152,6 @@ class HomeScreen extends StatelessWidget {
             },
           ),
         ],
-
       ),
       body: Column(
         children: [
@@ -190,7 +189,7 @@ class HomeScreen extends StatelessWidget {
                           ),
                           const SizedBox(height: 8),
                           Text(
-                            'নিচের বাটনে ট্যাপ করে জিমেইল দিয়ে বন্ধুদের খুঁজে বের করুন এবং মেসেজ বা কল করুন।',
+                            'নিচের বাটনে ট্যাপ করে নাম বা জিমেইল দিয়ে বন্ধুদের খুঁজে বের করুন এবং মেসেজ বা কল করুন।',
                             textAlign: TextAlign.center,
                             style: TextStyle(color: Colors.grey.shade600),
                           ),
@@ -288,7 +287,7 @@ class HomeScreen extends StatelessWidget {
         onPressed: () {
           Navigator.push(
             context,
-            MaterialPageRoute(builder: (_) =>  SearchUserScreen()),
+            MaterialPageRoute(builder: (_) => const SearchUsersScreen()),
           );
         },
         child: const Icon(Icons.message),
