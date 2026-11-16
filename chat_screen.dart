@@ -8,6 +8,7 @@ import 'package:dio/dio.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:universal_messenger/screens/call_screen.dart';
+import 'package:universal_messenger/screens/settings_screen.dart';
 
 class ChatScreen extends StatefulWidget {
   final String receiverId;
@@ -299,10 +300,10 @@ class _ChatScreenState extends State<ChatScreen> {
     final hour = dt.hour % 12 == 0 ? 12 : dt.hour % 12;
     final min = dt.minute.toString().padLeft(2, '0');
     final period = dt.hour >= 12 ? 'PM' : 'AM';
-    return '$hour:$min $period';
+    return '$hour:$min$period';
   }
 
-  Widget _buildMessageContent(Map<String, dynamic> data) {
+  Widget _buildMessageContent(Map<String, dynamic> data, Color accentColor) {
     final type = (data['type'] ?? 'text').toString();
     final text = (data['text'] ?? '').toString();
     final fileUrl = (data['fileUrl'] ?? '').toString();
@@ -357,7 +358,7 @@ class _ChatScreenState extends State<ChatScreen> {
     }
 
     IconData iconData = Icons.insert_drive_file;
-    Color iconColor = const Color(0xFF008069);
+    Color iconColor = accentColor;
     if (type == 'pdf') {
       iconData = Icons.picture_as_pdf;
       iconColor = Colors.red.shade700;
@@ -415,351 +416,156 @@ class _ChatScreenState extends State<ChatScreen> {
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(
-        backgroundColor: const Color(0xFF008069),
-        foregroundColor: Colors.white,
-        titleSpacing: 0,
-        title: Row(
-          children: [
-            CircleAvatar(
-              radius: 18,
-              backgroundColor: Colors.white24,
-              child: Text(
-                widget.receiverName.isNotEmpty
-                    ? widget.receiverName[0].toUpperCase()
-                    : 'U',
-                style: const TextStyle(color: Colors.white),
-              ),
-            ),
-            const SizedBox(width: 10),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    widget.receiverName,
-                    style: const TextStyle(
-                        fontSize: 16, fontWeight: FontWeight.bold),
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                  Text(
-                    widget.receiverEmail,
-                    style:
-                        const TextStyle(fontSize: 11, color: Colors.white70),
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                ],
-              ),
-            ),
-          ],
-        ),
-        actions: [
-          IconButton(
-            icon: const Icon(Icons.call),
-            tooltip: 'অডিও কল',
-            onPressed: () => _startCall(false),
-          ),
-          IconButton(
-            icon: const Icon(Icons.videocam),
-            tooltip: 'ভিডিও কল',
-            onPressed: () => _startCall(true),
-          ),
-        ],
-      ),
-      body: Column(
-        children: [
-          if (_isUploading)
-            Container(
-              color: Colors.teal.shade50,
-              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                    children: [
-                      Expanded(
-                        child: Text(
-                          'আপলোড হচ্ছে: $_uploadingFileName',
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: const TextStyle(
-                            fontSize: 12,
-                            fontWeight: FontWeight.w600,
-                          ),
-                        ),
-                      ),
-                      Text(
-                        '${(_uploadProgress * 100).toStringAsFixed(0)}%',
-                        style: const TextStyle(
-                          fontSize: 12,
-                          fontWeight: FontWeight.bold,
-                          color: Color(0xFF008069),
-                        ),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 6),
-                  LinearProgressIndicator(
-                    value: _uploadProgress > 0 ? _uploadProgress : null,
-                    backgroundColor: Colors.teal.shade100,
-                    color: const Color(0xFF008069),
-                  ),
-                ],
-              ),
-            ),
-          Expanded(
-            child: StreamBuilder<QuerySnapshot>(
-              stream: FirebaseFirestore.instance
-                  .collection('chats')
-                  .doc(_chatId)
-                  .collection('messages')
-                  .orderBy('timestamp', descending: true)
-                  .snapshots(),
-              builder: (context, snapshot) {
-                if (snapshot.connectionState == ConnectionState.waiting) {
-                  return const Center(child: CircularProgressIndicator());
-                }
+    return ValueListenableBuilder<Color>(
+      valueListenable: AppSettingsController.chatThemeColor,
+      builder: (context, chatColor, _) {
+        return ValueListenableBuilder<String?>(
+          valueListenable: AppSettingsController.chatThemeImage,
+          builder: (context, chatImagePath, _) {
+            final isDefaultBg =
+                chatColor.value == AppSettingsController.defaultChatBgColor.value;
+            final barColor = isDefaultBg
+                ? AppSettingsController.appThemeColor.value
+                : chatColor;
+            final hasChatBgImage =
+                chatImagePath != null && File(chatImagePath).existsSync();
+            final isDark = Theme.of(context).brightness == Brightness.dark;
 
-                if (!snapshot.hasData || snapshot.data!.docs.isEmpty) {
-                  return const Center(
-                    child: Text(
-                      'এখনো কোনো মেসেজ নেই।\nনিচে লিখে কথোপকথন শুরু করুন!',
-                      textAlign: TextAlign.center,
-                      style: TextStyle(color: Colors.grey),
+            return Scaffold(
+              appBar: AppBar(
+                backgroundColor: barColor,
+                foregroundColor: Colors.white,
+                titleSpacing: 0,
+                title: Row(
+                  children: [
+                    CircleAvatar(
+                      radius: 18,
+                      backgroundColor: Colors.white24,
+                      child: Text(
+                        widget.receiverName.isNotEmpty
+                            ? widget.receiverName[0].toUpperCase()
+                            : 'U',
+                        style: const TextStyle(color: Colors.white),
+                      ),
                     ),
-                  );
-                }
-
-                final messages = snapshot.data!.docs;
-
-                return ListView.builder(
-                  controller: _scrollController,
-                  reverse: true,
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 12, vertical: 16),
-                  itemCount: messages.length,
-                  itemBuilder: (context, index) {
-                    final data =
-                        messages[index].data() as Map<String, dynamic>;
-                    final isMe = data['senderId'] == _currentUser.uid;
-                    final time = _formatTime(data['timestamp'] as Timestamp?);
-
-                    return Align(
-                      alignment:
-                          isMe ? Alignment.centerRight : Alignment.centerLeft,
-                      child: Container(
-                        margin: const EdgeInsets.symmetric(vertical: 4),
-                        padding: const EdgeInsets.symmetric(
-                            horizontal: 12, vertical: 8),
-                        constraints: BoxConstraints(
-                          maxWidth: MediaQuery.of(context).size.width * 0.78,
-                        ),
-                        decoration: BoxDecoration(
-                          color: isMe ? const Color(0xFFD9FDD3) : Colors.white,
-                          borderRadius: BorderRadius.only(
-                            topLeft: const Radius.circular(14),
-                            topRight: const Radius.circular(14),
-                            bottomLeft: Radius.circular(isMe ? 14 : 2),
-                            bottomRight: Radius.circular(isMe ? 2 : 14),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            widget.receiverName,
+                            style: const TextStyle(
+                                fontSize: 16, fontWeight: FontWeight.bold),
+                            overflow: TextOverflow.ellipsis,
                           ),
-                          boxShadow: [
-                            BoxShadow(
-                              color: Colors.black.withOpacity(0.06),
-                              blurRadius: 3,
-                              offset: const Offset(0, 1),
-                            ),
-                          ],
-                        ),
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.end,
-                          children: [
-                            _buildMessageContent(data),
-                            const SizedBox(height: 4),
-                            Text(
-                              time,
-                              style: TextStyle(
-                                  fontSize: 10, color: Colors.grey.shade600),
-                            ),
-                          ],
-                        ),
+                          Text(
+                            widget.receiverEmail,
+                            style: const TextStyle(
+                                fontSize: 11, color: Colors.white70),
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ],
                       ),
-                    );
-                  },
-                );
-              },
-            ),
-          ),
-          // রিয়েল-টাইম টাইপিং ইনডিকেটর (wait...)
-          StreamBuilder<DocumentSnapshot>(
-            stream: FirebaseFirestore.instance
-                .collection('chats')
-                .doc(_chatId)
-                .snapshots(),
-            builder: (context, snapshot) {
-              final chatData =
-                  snapshot.data?.data() as Map<String, dynamic>?;
-              final typingMap =
-                  chatData?['typing'] as Map<String, dynamic>?;
-              final isReceiverTyping =
-                  typingMap?[widget.receiverId] == true;
-
-              if (!isReceiverTyping) return const SizedBox.shrink();
-
-              return Align(
-                alignment: Alignment.centerLeft,
-                child: Container(
-                  margin: const EdgeInsets.only(left: 14, bottom: 6, top: 2),
-                  padding: const EdgeInsets.symmetric(
-                      horizontal: 14, vertical: 8),
-                  decoration: BoxDecoration(
-                    color: Colors.white,
-                    borderRadius: const BorderRadius.only(
-                      topLeft: Radius.circular(14),
-                      topRight: Radius.circular(14),
-                      bottomLeft: Radius.circular(2),
-                      bottomRight: Radius.circular(14),
                     ),
-                    boxShadow: [
-                      BoxShadow(
-                        color: Colors.black.withOpacity(0.08),
-                        blurRadius: 4,
-                        offset: const Offset(0, 1),
-                      ),
-                    ],
-                  ),
-                  child: const _AnimatedWaitIndicator(),
+                  ],
                 ),
-              );
-            },
-          ),
-          SafeArea(
-            child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
-              color: Colors.grey.shade100,
-              child: Row(
-                children: [
+                actions: [
                   IconButton(
-                    icon: const Icon(Icons.attach_file,
-                        color: Color(0xFF008069)),
-                    tooltip: 'ফাইল, ভিডিও বা PDF পাঠান',
-                    onPressed: _isUploading ? null : _pickAndSendFile,
+                    icon: const Icon(Icons.call),
+                    tooltip: 'অডিও কল',
+                    onPressed: () => _startCall(false),
                   ),
-                  Expanded(
-                    child: TextField(
-                      controller: _messageController,
-                      onChanged: _onTextChanged,
-                      textCapitalization: TextCapitalization.sentences,
-                      minLines: 1,
-                      maxLines: 4,
-                      decoration: InputDecoration(
-                        hintText: 'মেসেজ লিখুন...',
-                        filled: true,
-                        fillColor: Colors.white,
-                        contentPadding: const EdgeInsets.symmetric(
-                          horizontal: 16,
-                          vertical: 10,
-                        ),
-                        border: OutlineInputBorder(
-                          borderRadius: BorderRadius.circular(24),
-                          borderSide: BorderSide.none,
-                        ),
-                      ),
-                    ),
-                  ),
-                  const SizedBox(width: 6),
-                  CircleAvatar(
-                    backgroundColor: const Color(0xFF008069),
-                    radius: 23,
-                    child: IconButton(
-                      icon:
-                          const Icon(Icons.send, color: Colors.white, size: 20),
-                      onPressed: _sendMessage,
-                    ),
+                  IconButton(
+                    icon: const Icon(Icons.videocam),
+                    tooltip: 'ভিডিও কল',
+                    onPressed: () => _startCall(true),
                   ),
                 ],
               ),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _AnimatedWaitIndicator extends StatefulWidget {
-  const _AnimatedWaitIndicator();
-
-  @override
-  State<_AnimatedWaitIndicator> createState() => _AnimatedWaitIndicatorState();
-}
-
-class _AnimatedWaitIndicatorState extends State<_AnimatedWaitIndicator>
-    with SingleTickerProviderStateMixin {
-  late final AnimationController _controller;
-
-  @override
-  void initState() {
-    super.initState();
-    _controller = AnimationController(
-      vsync: this,
-      duration: const Duration(milliseconds: 1100),
-    )..repeat();
-  }
-
-  @override
-  void dispose() {
-    _controller.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return AnimatedBuilder(
-      animation: _controller,
-      builder: (context, _) {
-        return Row(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.end,
-          children: [
-            const Text(
-              'wait',
-              style: TextStyle(
-                fontSize: 14,
-                fontWeight: FontWeight.w600,
-                color: Color(0xFF008069),
-              ),
-            ),
-            const SizedBox(width: 2),
-            ...List.generate(3, (index) {
-              final phase = (_controller.value * 2 * math.pi) - (index * 0.9);
-              final wave = math.sin(phase);
-              final offsetY = wave > 0 ? -wave * 4.5 : 0.0;
-              final opacity = 0.35 + (0.65 * ((wave + 1) / 2));
-
-              return Transform.translate(
-                offset: Offset(0, offsetY),
-                child: Opacity(
-                  opacity: opacity,
-                  child: const Padding(
-                    padding: EdgeInsets.symmetric(horizontal: 1),
-                    child: Text(
-                      '.',
-                      style: TextStyle(
-                        fontSize: 18,
-                        fontWeight: FontWeight.bold,
-                        height: 0.9,
-                        color: Color(0xFF008069),
+              body: Container(
+                decoration: hasChatBgImage
+                    ? BoxDecoration(
+                        image: DecorationImage(
+                          image: FileImage(File(chatImagePath)),
+                          fit: BoxFit.cover,
+                        ),
+                      )
+                    : BoxDecoration(
+                        color: isDark
+                            ? (isDefaultBg
+                                ? const Color(0xFF0B141A)
+                                : chatColor.withOpacity(0.25))
+                            : (isDefaultBg
+                                ? const Color(0xFFECE5DD)
+                                : chatColor.withOpacity(0.18)),
                       ),
-                    ),
-                  ),
-                ),
-              );
-            }),
-          ],
-        );
-      },
-    );
-  }
-}
+                child: Column(
+                  children: [
+                    if (_isUploading)
+                      Container(
+                        color: Colors.teal.shade50,
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 16, vertical: 8),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Row(
+                              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                              children: [
+                                Expanded(
+                                  child: Text(
+                                    'আপলোড হচ্ছে: $_uploadingFileName',
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: const TextStyle(
+                                      fontSize: 12,
+                                      fontWeight: FontWeight.w600,
+                                      color: Colors.black87,
+                                    ),
+                                  ),
+                                ),
+                                Text(
+                                  '${(_uploadProgress * 100).toStringAsFixed(0)}%',
+                                  style: TextStyle(
+                                    fontSize: 12,
+                                    fontWeight: FontWeight.bold,
+                                    color: barColor,
+                                  ),
+                                ),
+                              ],
+                            ),
+                            const SizedBox(height: 6),
+                            LinearProgressIndicator(
+                              value:
+                                  _uploadProgress > 0 ? _uploadProgress : null,
+                              backgroundColor: Colors.teal.shade100,
+                              color: barColor,
+                            ),
+                          ],
+                        ),
+                      ),
+                    Expanded(
+                      child: StreamBuilder<QuerySnapshot>(
+                        stream: FirebaseFirestore.instance
+                            .collection('chats')
+                            .doc(_chatId)
+                            .collection('messages')
+                            .orderBy('timestamp', descending: true)
+                            .snapshots(),
+                        builder: (context, snapshot) {
+                          if (snapshot.connectionState ==
+                              ConnectionState.waiting) {
+                            return const Center(
+                                child: CircularProgressIndicator());
+                          }
+
+                          if (!snapshot.hasData ||
+                              snapshot.data!.docs.isEmpty) {
+                            return Center(
+                              child: Container(
+                                padding: const EdgeInsets.symmetric(
+                                    horizontal: 16, vertical: 10),
+                                decoration: BoxDecoration(
+                                  color: Colors.black45,
+                                  borderRadius: BorderRadius.circular(12),
