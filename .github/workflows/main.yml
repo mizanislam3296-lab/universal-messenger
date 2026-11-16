@@ -271,14 +271,6 @@ jobs:
         timeout-minutes: 25
         run: |
           flutter build apk --release --no-pub --target-platform android-arm,android-arm64
-          APK_FILE="build/app/outputs/flutter-apk/app-release.apk"
-          BUILD_TOOLS=$(find "$ANDROID_HOME/build-tools" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sort -V | tail -n 1)
-          if [ -x "$BUILD_TOOLS/zipalign" ] && [ -x "$BUILD_TOOLS/apksigner" ]; then
-            "$BUILD_TOOLS/zipalign" -p -f 4 "$APK_FILE" "${APK_FILE}.aligned"
-            mv "${APK_FILE}.aligned" "$APK_FILE"
-            "$BUILD_TOOLS/apksigner" sign --ks android/app/release.jks --ks-pass pass:Messenger@2026 --ks-key-alias messenger_key --key-pass pass:Messenger@2026 "$APK_FILE"
-            "$BUILD_TOOLS/apksigner" verify --verbose "$APK_FILE"
-          fi
           rm -rf build/app/intermediates
 
       - name: Upload APK Artifact
@@ -292,4 +284,4 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release create "v4.0.${{ github.run_number }}-${{ github.run_attempt }}" "build/app/outputs/flutter-apk/app-release.apk#Universal-Messenger.apk" --target "${{ github.ref_name }}" --title "Universal Messenger v4.0.${{ github.run_number }}" --notes "Phase 3B: Audio & Video Calling Complete" || true
+          gh release create "v4.0.${{ github.run_number }}-${{ github.run_attempt }}" "build/app/outputs/flutter-apk/app-release.apk#Universal-Messenger.apk" --target "${{ github.ref_name }}" --title "Universal Messenger v4.0.${{ github.run_number }}" --notes "Universal Messenger with Settings" || true
