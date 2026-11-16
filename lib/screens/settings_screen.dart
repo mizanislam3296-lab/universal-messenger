@@ -151,7 +151,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   // ১. Change Photo
   Future<void> _changeProfilePhoto() async {
     if (_user == null) return;
-    final res = await FilePicker.platform.pickFiles(type: FileType.image, withData: true);
+    final res = await FilePicker.pickFiles(type: FileType.image, withData: true);
     if (res == null || res.files.isEmpty) return;
 
     setState(() => _isBusy = true);
@@ -305,7 +305,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 icon: const Icon(Icons.image),
                 label: const Text('Choose File Image from Gallery'),
                 onPressed: () async {
-                  final res = await FilePicker.platform.pickFiles(type: FileType.image);
+                  final res = await FilePicker.pickFiles(type: FileType.image);
                   if (res != null && res.files.single.path != null) {
                     final path = res.files.single.path!;
                     if (isChatTheme) {
@@ -328,7 +328,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   // ৫. Icon (Google Icon & Custom Photo Icon)
   Future<void> _pickCustomPhotoIcon() async {
-    final res = await FilePicker.platform.pickFiles(type: FileType.image);
+    final res = await FilePicker.pickFiles(type: FileType.image);
     if (res != null && res.files.single.path != null) {
       AppSettingsController.iconType.value = 'custom';
       AppSettingsController.customIconPath.value = res.files.single.path!;
