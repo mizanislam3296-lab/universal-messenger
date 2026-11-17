@@ -24,15 +24,25 @@ class CallScreen extends StatefulWidget {
 }
 
 class _CallScreenState extends State<CallScreen> {
-  @override
-  void dispose() {
+  bool _allowPop = false;
+
+  void _cleanupCallStatus() {
     if (widget.receiverIdForCleanup != null) {
       FirebaseFirestore.instance
           .collection('calls')
           .doc(widget.receiverIdForCleanup)
           .set({'status': 'ended'}, SetOptions(merge: true));
     }
-    super.dispose();
+  }
+
+  void _minimizeCall() {
+    if (_allowPop) return;
+    setState(() => _allowPop = true);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) {
+        ZegoUIKitPrebuiltCallController().minimize.minimize(context);
+      }
+    });
   }
 
   @override
@@ -41,15 +51,42 @@ class _CallScreenState extends State<CallScreen> {
     final userName =
         currentUser.displayName ?? currentUser.email?.split('@').first ?? 'User';
 
-    return ZegoUIKitPrebuiltCall(
-      appID: CallScreen.zegoAppID,
-      appSign: CallScreen.zegoAppSign,
-      userID: currentUser.uid,
-      userName: userName,
-      callID: widget.callID,
-      config: widget.isVideoCall
-          ? ZegoUIKitPrebuiltCallConfig.oneOnOneVideoCall()
-          : ZegoUIKitPrebuiltCallConfig.oneOnOneVoiceCall(),
+    final config = widget.isVideoCall
+        ? ZegoUIKitPrebuiltCallConfig.oneOnOneVideoCall()
+        : ZegoUIKitPrebuiltCallConfig.oneOnOneVoiceCall();
+
+    config.topMenuBar.isVisible = true;
+    config.topMenuBar.buttons = [
+      ZegoCallMenuBarButtonName.minimizingButton,
+      ZegoCallMenuBarButtonName.showMemberListButton,
+    ];
+
+    config.pip.enableWhenBackground = true;
+
+    return PopScope(
+      canPop: _allowPop,
+      onPopInvokedWithResult: (didPop, _) {
+        if (!didPop) {
+          _minimizeCall();
+        }
+      },
+      child: ZegoUIKitPrebuiltCall(
+        appID: CallScreen.zegoAppID,
+        appSign: CallScreen.zegoAppSign,
+        userID: currentUser.uid,
+        userName: userName,
+        callID: widget.callID,
+        config: config,
+        events: ZegoUIKitPrebuiltCallEvents(
+          onCallEnd: (event, defaultAction) {
+            setState(() => _allowPop = true);
+            _cleanupCallStatus();
+            WidgetsBinding.instance.addPostFrameCallback((_) {
+              defaultAction.call();
+            });
+          },
+        ),
+      ),
     );
   }
 }
