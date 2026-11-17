@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:firebase_auth/firebase_auth.dart';
@@ -24,7 +25,6 @@ class AppSettingsController {
   static final ValueNotifier<bool> audioCallSounds = ValueNotifier(true);
   static final ValueNotifier<bool> vibrate = ValueNotifier(true);
 
-  /// শুধুমাত্র ফোনের হোম স্ক্রিনের লোগো নিয়ন্ত্রণ করে ('default' | 'google' | 'aqua' | 'dark' | 'sunset' | 'custom')
   static final ValueNotifier<String> iconType = ValueNotifier('default');
   static final ValueNotifier<String?> customIconPath = ValueNotifier(null);
 
@@ -53,7 +53,6 @@ class AppSettingsController {
     }
   }
 
-  /// ফোনের হোম স্ক্রিনের অ্যাপ লোগো পরিবর্তন করে (অ্যাপের ভেতরের কোনো আইকন নয়)
   static Future<void> applyLauncherIcon(String type, {String? customPath}) async {
     try {
       await _nativeChannel.invokeMethod('setAppIcon', {'type': type});
@@ -63,7 +62,6 @@ class AppSettingsController {
     } catch (_) {}
   }
 
-  /// অ্যাপের ভেতরে লোগো পরিবর্তন না করার জন্য খালি রাখা হয়েছে
   static Widget buildAppIcon({double radius = 16}) => const SizedBox.shrink();
 
   static Future<void> load() async {
@@ -109,7 +107,11 @@ class NotificationAndPresenceService {
   static const MethodChannel _nativeChannel = MethodChannel('com.universal.messenger/icon');
   static final FlutterLocalNotificationsPlugin _notifications = FlutterLocalNotificationsPlugin();
 
+  static const String _callChannelId = 'incoming_calls_ring_v3';
+  static const String _msgChannelId = 'chat_messages_sound_v3';
+
   static bool _initialized = false;
+  static bool isAppInForeground = true;
   static String? activeChatId;
   static String? _lastNotifiedCallId;
   static bool _initialChatsLoaded = false;
@@ -118,6 +120,7 @@ class NotificationAndPresenceService {
   static StreamSubscription<DocumentSnapshot>? _callSub;
   static StreamSubscription<QuerySnapshot>? _chatSub;
   static Timer? _heartbeatTimer;
+  static Timer? _ringtoneFallbackTimer;
 
   static Future<void> start() async {
     final user = FirebaseAuth.instance.currentUser;
@@ -129,20 +132,58 @@ class NotificationAndPresenceService {
       const initSettings = InitializationSettings(android: androidInit);
       await _notifications.initialize(initSettings);
 
-      await _notifications
-          .resolvePlatformSpecificImplementation<AndroidFlutterLocalNotificationsPlugin>()
-          ?.requestNotificationsPermission();
+      final callChannel = AndroidNotificationChannel(
+        _callChannelId,
+        'Incoming Calls (Ringtone)',
+        description: 'Ringtone & heads-up pop-up for incoming calls',
+        importance: Importance.max,
+        playSound: true,
+        sound: const UriAndroidNotificationSound('content://settings/system/ringtone'),
+        audioAttributesUsage: AudioAttributesUsage.notificationRingtone,
+        enableVibration: true,
+        vibrationPattern: Int64List.fromList([0, 1000, 500, 1000]),
+        enableLights: true,
+        showBadge: true,
+      );
+
+      final msgChannel = AndroidNotificationChannel(
+        _msgChannelId,
+        'Chat Messages (Sound)',
+        description: 'Notification sound & pop-up for new messages',
+        importance: Importance.max,
+        playSound: true,
+        sound: const UriAndroidNotificationSound('content://settings/system/notification_sound'),
+        audioAttributesUsage: AudioAttributesUsage.notification,
+        enableVibration: true,
+        vibrationPattern: Int64List.fromList([0, 300, 200, 300]),
+        enableLights: true,
+        showBadge: true,
+      );
+
+      final androidPlugin = _notifications
+          .resolvePlatformSpecificImplementation<AndroidFlutterLocalNotificationsPlugin>();
+      await androidPlugin?.createNotificationChannel(callChannel);
+      await androidPlugin?.createNotificationChannel(msgChannel);
+      await androidPlugin?.requestNotificationsPermission();
     }
 
     await setOnlineStatus(true);
     _heartbeatTimer?.cancel();
-    _heartbeatTimer = Timer.periodic(const Duration(seconds: 10), (_) => setOnlineStatus(true));
+    _heartbeatTimer = Timer.periodic(const Duration(seconds: 10), (_) {
+      if (isAppInForeground) {
+        setOnlineStatus(true);
+      }
+    });
 
     _listenIncomingCalls(user.uid);
     _listenIncomingMessages(user.uid);
   }
 
-  /// মোবাইলে Wi-Fi বা Mobile Data চালু এবং ইন্টারনেট সক্রিয় আছে কি না তা যাচাই করে
+  static void setAppForeground(bool inForeground) {
+    isAppInForeground = inForeground;
+    setOnlineStatus(inForeground);
+  }
+
   static Future<bool> isDataOrWifiActive() async {
     try {
       final nativeConnected = await _nativeChannel.invokeMethod<bool>('isNetworkConnected');
@@ -168,6 +209,7 @@ class NotificationAndPresenceService {
   }
 
   static Future<void> setOfflineAndStop() async {
+    _stopCallRing();
     await setOnlineStatus(false);
     _heartbeatTimer?.cancel();
     await _callSub?.cancel();
@@ -178,7 +220,15 @@ class NotificationAndPresenceService {
     _lastChatMsgMillis.clear();
   }
 
-  /// শুধুমাত্র ডাটা/ওয়াইফাই চালু রেখে অ্যাপে সক্রিয় থাকলে Active দেখাবে (২৫ সেকেন্ডের মধ্যে হার্টবিট থাকলে)
+  static void _stopCallRing() {
+    _ringtoneFallbackTimer?.cancel();
+    _ringtoneFallbackTimer = null;
+    if (_lastNotifiedCallId != null) {
+      _notifications.cancel(_lastNotifiedCallId.hashCode);
+      _lastNotifiedCallId = null;
+    }
+  }
+
   static bool isUserActive(Map<String, dynamic>? data) {
     if (data == null) return false;
     if (data['isOnline'] != true) return false;
@@ -188,7 +238,6 @@ class NotificationAndPresenceService {
     return diffSeconds >= -20 && diffSeconds <= 25;
   }
 
-  /// অ্যাপ থেকে কত সময় আগে বের হয়েছেন তা দেখায় (যেমন: Active 5m ago, Active 2h ago)
   static String formatLastSeen(Map<String, dynamic>? data) {
     if (isUserActive(data)) return 'Active now';
     if (data == null || data['lastSeen'] is! Timestamp) return 'Offline';
@@ -201,7 +250,6 @@ class NotificationAndPresenceService {
     return 'Offline';
   }
 
-  /// প্রোফাইল ছবির পাশে সংক্ষিপ্ত সময় (যেমন: 5m, 2h, 1d) দেখায়
   static String formatLastSeenShort(Map<String, dynamic>? data) {
     if (isUserActive(data) || data == null || data['lastSeen'] is! Timestamp) return '';
     final lastSeen = (data['lastSeen'] as Timestamp).toDate();
@@ -216,12 +264,26 @@ class NotificationAndPresenceService {
   static void _listenIncomingCalls(String uid) {
     _callSub?.cancel();
     _callSub = FirebaseFirestore.instance.collection('calls').doc(uid).snapshots().listen((snap) async {
-      if (!snap.exists) return;
+      if (!snap.exists) {
+        _stopCallRing();
+        return;
+      }
       final data = snap.data();
-      if (data == null || data['status'] != 'ringing') return;
+      if (data == null) {
+        _stopCallRing();
+        return;
+      }
 
+      final status = (data['status'] ?? '').toString();
       final callId = (data['callId'] ?? '').toString();
+
+      if (status != 'ringing') {
+        _stopCallRing();
+        return;
+      }
+
       if (callId.isEmpty || callId == _lastNotifiedCallId) return;
+      _stopCallRing();
       _lastNotifiedCallId = callId;
 
       final callerName = (data['callerName'] ?? 'কেউ একজন').toString();
@@ -229,17 +291,34 @@ class NotificationAndPresenceService {
       final playSound = isVideo
           ? AppSettingsController.videoCallSounds.value
           : AppSettingsController.audioCallSounds.value;
+      final shouldVibrate = AppSettingsController.vibrate.value;
+
+      // অ্যাপের ভেতরে বা বাইরে কল আসলে প্রতি ২ সেকেন্ড পরপর রিং ও ভাইব্রেশন চালু রাখা
+      if (playSound) SystemSound.play(SystemSoundType.alert);
+      if (shouldVibrate) HapticFeedback.heavyImpact();
+      _ringtoneFallbackTimer = Timer.periodic(const Duration(seconds: 2), (_) {
+        if (playSound) SystemSound.play(SystemSoundType.alert);
+        if (shouldVibrate) HapticFeedback.heavyImpact();
+      });
 
       final androidDetails = AndroidNotificationDetails(
-        'incoming_calls_high_v1',
-        'Incoming Calls',
-        channelDescription: 'Heads-up pop-up notifications for incoming calls',
+        _callChannelId,
+        'Incoming Calls (Ringtone)',
+        channelDescription: 'Ringtone & heads-up pop-up for incoming calls',
         importance: Importance.max,
         priority: Priority.max,
+        ticker: 'Incoming call from $callerName',
         category: AndroidNotificationCategory.call,
         fullScreenIntent: true,
+        ongoing: true,
+        autoCancel: false,
         playSound: playSound,
-        enableVibration: AppSettingsController.vibrate.value,
+        sound: playSound ? const UriAndroidNotificationSound('content://settings/system/ringtone') : null,
+        audioAttributesUsage: AudioAttributesUsage.notificationRingtone,
+        enableVibration: shouldVibrate,
+        vibrationPattern: shouldVibrate ? Int64List.fromList([0, 1000, 500, 1000]) : null,
+        additionalFlags: playSound ? Int32List.fromList([4]) : null,
+        channelShowBadge: true,
         visibility: NotificationVisibility.public,
       );
 
@@ -285,7 +364,7 @@ class NotificationAndPresenceService {
         if (millis <= prevMillis) continue;
         _lastChatMsgMillis[doc.id] = millis;
 
-        if (activeChatId == doc.id) continue;
+        if (isAppInForeground && activeChatId == doc.id) continue;
 
         final lastSenderId = (data['lastSenderId'] ?? '').toString();
         if (lastSenderId == uid) continue;
@@ -301,15 +380,26 @@ class NotificationAndPresenceService {
         final senderName = (senderInfo['name'] ?? 'নতুন মেসেজ').toString();
         final lastMsg = (data['lastMessage'] ?? 'নতুন মেসেজ এসেছে').toString();
 
+        final playSound = AppSettingsController.chatSounds.value;
+        final shouldVibrate = AppSettingsController.vibrate.value;
+
+        if (playSound) SystemSound.play(SystemSoundType.alert);
+        if (shouldVibrate) HapticFeedback.mediumImpact();
+
         final androidDetails = AndroidNotificationDetails(
-          'chat_messages_high_v1',
-          'Chat Messages',
-          channelDescription: 'Heads-up pop-up notifications for new messages',
+          _msgChannelId,
+          'Chat Messages (Sound)',
+          channelDescription: 'Notification sound & pop-up for new messages',
           importance: Importance.max,
-          priority: Priority.high,
+          priority: Priority.max,
+          ticker: '$senderName: $lastMsg',
           category: AndroidNotificationCategory.message,
-          playSound: AppSettingsController.chatSounds.value,
-          enableVibration: AppSettingsController.vibrate.value,
+          playSound: playSound,
+          sound: playSound ? const UriAndroidNotificationSound('content://settings/system/notification_sound') : null,
+          audioAttributesUsage: AudioAttributesUsage.notification,
+          enableVibration: shouldVibrate,
+          vibrationPattern: shouldVibrate ? Int64List.fromList([0, 300, 200, 300]) : null,
+          channelShowBadge: true,
           visibility: NotificationVisibility.public,
         );
 
@@ -330,7 +420,7 @@ class NotificationAndPresenceService {
     bool showOfflineTime = true,
   }) {
     return StreamBuilder<int>(
-      stream: Stream.periodic(const Duration(seconds: 8), (i) => i),
+      stream: Stream.periodic(const Duration(seconds: 6), (i) => i),
       builder: (context, _) {
         return StreamBuilder<DocumentSnapshot>(
           stream: FirebaseFirestore.instance.collection('users').doc(userId).snapshots(),
@@ -862,7 +952,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                             value: val,
                             onChanged: (v) {
                               AppSettingsController.chatSounds.value = v;
-                              if (v) SystemSound.play(SystemSoundType.click);
+                              if (v) SystemSound.play(SystemSoundType.alert);
                               AppSettingsController.save();
                             },
                           ),
@@ -875,7 +965,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                             value: val,
                             onChanged: (v) {
                               AppSettingsController.videoCallSounds.value = v;
-                              if (v) SystemSound.play(SystemSoundType.click);
+                              if (v) SystemSound.play(SystemSoundType.alert);
                               AppSettingsController.save();
                             },
                           ),
@@ -888,7 +978,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                             value: val,
                             onChanged: (v) {
                               AppSettingsController.audioCallSounds.value = v;
-                              if (v) SystemSound.play(SystemSoundType.click);
+                              if (v) SystemSound.play(SystemSoundType.alert);
                               AppSettingsController.save();
                             },
                           ),
@@ -910,8 +1000,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     ),
                   ),
                   const SizedBox(height: 8),
-
-                  // ফোনের হোম স্ক্রিনের লোগো পরিবর্তনের কার্ড
                   Card(
                     child: Padding(
                       padding: const EdgeInsets.fromLTRB(16, 14, 16, 16),
