@@ -358,6 +358,7 @@ class _ChatScreenState extends State<ChatScreen> {
                     NotificationAndPresenceService.buildUserAvatarWithStatus(
                       userId: widget.receiverId,
                       dotSize: 11,
+                      showOfflineTime: false,
                       avatar: CircleAvatar(
                         radius: 18,
                         backgroundColor: Colors.white24,
@@ -366,24 +367,32 @@ class _ChatScreenState extends State<ChatScreen> {
                     ),
                     const SizedBox(width: 10),
                     Expanded(
-                      child: StreamBuilder<DocumentSnapshot>(
-                        stream: FirebaseFirestore.instance.collection('users').doc(widget.receiverId).snapshots(),
-                        builder: (context, snap) {
-                          final uData = snap.data?.data() as Map<String, dynamic>?;
-                          final isOnline = uData?['isOnline'] == true;
-                          final lastSeen = uData?['lastSeen'] as Timestamp?;
-                          final activeNow = isOnline && (lastSeen == null || DateTime.now().difference(lastSeen.toDate()).inSeconds < 90);
+                      child: StreamBuilder<int>(
+                        stream: Stream.periodic(const Duration(seconds: 5), (i) => i),
+                        builder: (context, _) {
+                          return StreamBuilder<DocumentSnapshot>(
+                            stream: FirebaseFirestore.instance.collection('users').doc(widget.receiverId).snapshots(),
+                            builder: (context, snap) {
+                              final uData = snap.data?.data() as Map<String, dynamic>?;
+                              final activeNow = NotificationAndPresenceService.isUserActive(uData);
+                              final statusText = NotificationAndPresenceService.formatLastSeen(uData);
 
-                          return Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Text(widget.receiverName, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold), overflow: TextOverflow.ellipsis),
-                              Text(
-                                activeNow ? 'Active now' : widget.receiverEmail,
-                                style: TextStyle(fontSize: 11, color: activeNow ? Colors.lightGreenAccent : Colors.white70, fontWeight: activeNow ? FontWeight.w600 : FontWeight.normal),
-                                overflow: TextOverflow.ellipsis,
-                              ),
-                            ],
+                              return Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Text(widget.receiverName, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold), overflow: TextOverflow.ellipsis),
+                                  Text(
+                                    statusText,
+                                    style: TextStyle(
+                                      fontSize: 11,
+                                      color: activeNow ? Colors.lightGreenAccent : Colors.white70,
+                                      fontWeight: activeNow ? FontWeight.w600 : FontWeight.normal,
+                                    ),
+                                    overflow: TextOverflow.ellipsis,
+                                  ),
+                                ],
+                              );
+                            },
                           );
                         },
                       ),
