@@ -1,6 +1,8 @@
 import 'dart:async';
 import 'dart:io';
+import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:url_launcher/url_launcher.dart';
@@ -12,10 +14,10 @@ import 'package:universal_messenger/screens/settings_screen.dart';
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
 
-  static const int currentAppVersionCode = 7;
-  static const String currentAppVersionName = '7.0.0';
-  static const String defaultReleaseUrl =
-      'https://github.com/mizanislam3296-lab/universal-messenger/releases/latest';
+  static const int currentAppVersionCode = 10;
+  static const String currentAppVersionName = '10.0.0';
+  static const String defaultDirectApkUrl =
+      'https://github.com/mizanislam3296-lab/universal-messenger/releases/latest/download/Universal-Messenger.apk';
 
   @override
   State<HomeScreen> createState() => _HomeScreenState();
@@ -30,6 +32,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     AppSettingsController.load();
+    NotificationAndPresenceService.setAppForeground(true);
     NotificationAndPresenceService.start();
     _listenForAppUpdates();
   }
@@ -44,12 +47,12 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
-      NotificationAndPresenceService.setOnlineStatus(true);
+      NotificationAndPresenceService.setAppForeground(true);
     } else if (state == AppLifecycleState.paused ||
         state == AppLifecycleState.inactive ||
         state == AppLifecycleState.detached ||
         state == AppLifecycleState.hidden) {
-      NotificationAndPresenceService.setOnlineStatus(false);
+      NotificationAndPresenceService.setAppForeground(false);
     }
   }
 
@@ -63,7 +66,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
           await docRef.set({
             'latestVersionCode': HomeScreen.currentAppVersionCode,
             'latestVersionName': HomeScreen.currentAppVersionName,
-            'apkUrl': HomeScreen.defaultReleaseUrl,
+            'apkUrl': HomeScreen.defaultDirectApkUrl,
             'forceUpdate': false,
             'releaseNotes': 'নতুন ফিচার ও পারফরম্যান্স উন্নতি যুক্ত করা হয়েছে।',
           }, SetOptions(merge: true));
@@ -80,58 +83,27 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
 
       final latestName =
           (data['latestVersionName'] ?? 'New Version').toString();
-      final apkUrl =
-          (data['apkUrl'] ?? HomeScreen.defaultReleaseUrl).toString();
+      var apkUrl =
+          (data['apkUrl'] ?? HomeScreen.defaultDirectApkUrl).toString().trim();
+      if (apkUrl.isEmpty ||
+          apkUrl.endsWith('/releases/latest') ||
+          apkUrl.endsWith('/releases/latest/')) {
+        apkUrl = HomeScreen.defaultDirectApkUrl;
+      }
       final forceUpdate = data['forceUpdate'] == true;
       final notes = (data['releaseNotes'] ??
-              'অ্যাপটির নতুন ভার্সন এসেছে। সব ফিচার ঠিকভাবে ব্যবহার করতে এখনই আপডেট করুন।')
+              'অ্যাপটির নতুন ভার্সন এসেছে। আনইন্সটল না করেই এখান থেকে সরাসরি আপডেট দিন।')
           .toString();
 
       _isUpdateDialogShowing = true;
       await showDialog<void>(
         context: context,
         barrierDismissible: !forceUpdate,
-        builder: (ctx) => PopScope(
-          canPop: !forceUpdate,
-          child: AlertDialog(
-            shape:
-                RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
-            title: Row(
-              children: [
-                const Icon(Icons.system_update, color: Color(0xFF008069)),
-                const SizedBox(width: 10),
-                Expanded(
-                  child: Text(
-                    'নতুন আপডেট ($latestName)',
-                    style: const TextStyle(
-                        fontSize: 18, fontWeight: FontWeight.bold),
-                  ),
-                ),
-              ],
-            ),
-            content: Text(notes),
-            actions: [
-              if (!forceUpdate)
-                TextButton(
-                  onPressed: () => Navigator.pop(ctx),
-                  child: const Text('পরে'),
-                ),
-              ElevatedButton.icon(
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: const Color(0xFF008069),
-                  foregroundColor: Colors.white,
-                ),
-                icon: const Icon(Icons.download),
-                label: const Text('Update Now'),
-                onPressed: () async {
-                  final uri = Uri.tryParse(apkUrl);
-                  if (uri != null) {
-                    await launchUrl(uri, mode: LaunchMode.externalApplication);
-                  }
-                },
-              ),
-            ],
-          ),
+        builder: (ctx) => _InAppUpdateDialog(
+          latestName: latestName,
+          apkUrl: apkUrl,
+          forceUpdate: forceUpdate,
+          notes: notes,
         ),
       );
       _isUpdateDialogShowing = false;
@@ -410,6 +382,11 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                                       0;
                               final hasUnread = unreadCount > 0;
 
+                              final typingMap =
+                                  (data['typing'] as Map<String, dynamic>?) ??
+                                      {};
+                              final isOtherTyping = typingMap[otherId] == true;
+
                               return ListTile(
                                 leading: NotificationAndPresenceService
                                     .buildUserAvatarWithStatus(
@@ -437,25 +414,33 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                                     fontSize: 16,
                                   ),
                                 ),
-                                subtitle: Text(
-                                  hasUnread
-                                      ? (unreadCount == 1
-                                          ? '1 new message'
-                                          : '$unreadCount new messages')
-                                      : lastMsg,
-                                  maxLines: 1,
-                                  overflow: TextOverflow.ellipsis,
-                                  style: TextStyle(
-                                    fontWeight: hasUnread
-                                        ? FontWeight.bold
-                                        : FontWeight.normal,
-                                    color: hasUnread
-                                        ? (isDark
-                                            ? Colors.white
-                                            : Colors.black87)
-                                        : Colors.grey.shade600,
-                                  ),
-                                ),
+                                subtitle: isOtherTyping
+                                    ? Text(
+                                        'wait...',
+                                        style: TextStyle(
+                                          fontWeight: FontWeight.bold,
+                                          color: themeColor,
+                                        ),
+                                      )
+                                    : Text(
+                                        hasUnread
+                                            ? (unreadCount == 1
+                                                ? '1 new message • $lastMsg'
+                                                : '$unreadCount new messages • $lastMsg')
+                                            : lastMsg,
+                                        maxLines: 1,
+                                        overflow: TextOverflow.ellipsis,
+                                        style: TextStyle(
+                                          fontWeight: hasUnread
+                                              ? FontWeight.bold
+                                              : FontWeight.normal,
+                                          color: hasUnread
+                                              ? (isDark
+                                                  ? Colors.white
+                                                  : Colors.black87)
+                                              : Colors.grey.shade600,
+                                        ),
+                                      ),
                                 trailing: Column(
                                   mainAxisAlignment: MainAxisAlignment.center,
                                   crossAxisAlignment: CrossAxisAlignment.end,
@@ -473,13 +458,22 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                                       ),
                                     ),
                                     if (hasUnread) ...[
-                                      const SizedBox(height: 6),
+                                      const SizedBox(height: 5),
                                       Container(
-                                        width: 11,
-                                        height: 11,
-                                        decoration: const BoxDecoration(
-                                          color: Color(0xFF1A73E8),
-                                          shape: BoxShape.circle,
+                                        padding: const EdgeInsets.symmetric(
+                                            horizontal: 7, vertical: 2),
+                                        decoration: BoxDecoration(
+                                          color: const Color(0xFF1A73E8),
+                                          borderRadius:
+                                              BorderRadius.circular(12),
+                                        ),
+                                        child: Text(
+                                          '$unreadCount',
+                                          style: const TextStyle(
+                                            color: Colors.white,
+                                            fontSize: 11,
+                                            fontWeight: FontWeight.bold,
+                                          ),
                                         ),
                                       ),
                                     ],
@@ -523,6 +517,234 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
           },
         );
       },
+    );
+  }
+}
+
+class _InAppUpdateDialog extends StatefulWidget {
+  final String latestName;
+  final String apkUrl;
+  final bool forceUpdate;
+  final String notes;
+
+  const _InAppUpdateDialog({
+    required this.latestName,
+    required this.apkUrl,
+    required this.forceUpdate,
+    required this.notes,
+  });
+
+  @override
+  State<_InAppUpdateDialog> createState() => _InAppUpdateDialogState();
+}
+
+class _InAppUpdateDialogState extends State<_InAppUpdateDialog> {
+  static const MethodChannel _nativeChannel =
+      MethodChannel('com.universal.messenger/icon');
+
+  bool _isDownloading = false;
+  double _progress = 0.0;
+  String _sizeText = '';
+  String? _downloadedApkPath;
+  String? _statusMessage;
+  bool _hasError = false;
+
+  String get _targetApkPath {
+    final dir = Directory('/data/user/0/com.universal.messenger/files');
+    try {
+      if (!dir.existsSync()) dir.createSync(recursive: true);
+      return '${dir.path}/universal_messenger_update.apk';
+    } catch (_) {
+      return '${Directory.systemTemp.path}/universal_messenger_update.apk';
+    }
+  }
+
+  Future<void> _downloadAndInstall() async {
+    if (_isDownloading) return;
+
+    if (_downloadedApkPath != null && File(_downloadedApkPath!).existsSync()) {
+      await _triggerInstall(_downloadedApkPath!);
+      return;
+    }
+
+    setState(() {
+      _isDownloading = true;
+      _hasError = false;
+      _progress = 0.0;
+      _sizeText = '';
+      _statusMessage = 'আপডেট ফাইল ডাউনলোড হচ্ছে...';
+    });
+
+    try {
+      final savePath = _targetApkPath;
+      final file = File(savePath);
+      if (await file.exists()) await file.delete();
+
+      await Dio().download(
+        widget.apkUrl,
+        savePath,
+        options: Options(followRedirects: true, maxRedirects: 8),
+        onReceiveProgress: (received, total) {
+          if (!mounted) return;
+          final recMb = (received / (1024 * 1024)).toStringAsFixed(1);
+          if (total > 0) {
+            final totMb = (total / (1024 * 1024)).toStringAsFixed(1);
+            setState(() {
+              _progress = received / total;
+              _sizeText = '$recMb MB / $totMb MB';
+            });
+          } else {
+            setState(() {
+              _sizeText = '$recMb MB';
+            });
+          }
+        },
+      );
+
+      if (!mounted) return;
+      setState(() {
+        _isDownloading = false;
+        _downloadedApkPath = savePath;
+        _statusMessage = 'ডাউনলোড সম্পন্ন হয়েছে! ইনস্টল শুরু হচ্ছে...';
+      });
+
+      await _triggerInstall(savePath);
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _isDownloading = false;
+        _hasError = true;
+        _statusMessage =
+            'সরাসরি ডাউনলোডে সমস্যা হয়েছে। নিচের বাটন থেকে আবার চেষ্টা করুন।';
+      });
+    }
+  }
+
+  Future<void> _triggerInstall(String path) async {
+    try {
+      final res =
+          await _nativeChannel.invokeMethod<String>('installApk', {'path': path});
+      if (!mounted) return;
+      if (res == 'PERMISSION_REQUIRED') {
+        setState(() {
+          _statusMessage =
+              'অনুগ্রহ করে সেটিংস থেকে "Allow from this source" চালু করে ফিরে আসুন, তারপর নিচের Install Now বাটনে চাপুন।';
+        });
+      } else {
+        setState(() {
+          _statusMessage = 'পপ-আপে "Update" বাটনে চাপ দিয়ে ইনস্টল সম্পন্ন করুন।';
+        });
+      }
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _hasError = true;
+        _statusMessage = 'ইনস্টলার চালু করা যায়নি: $e';
+      });
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final readyToInstall =
+        _downloadedApkPath != null && File(_downloadedApkPath!).existsSync();
+
+    return PopScope(
+      canPop: !widget.forceUpdate && !_isDownloading,
+      child: AlertDialog(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
+        title: Row(
+          children: [
+            const Icon(Icons.system_update, color: Color(0xFF008069)),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Text(
+                'নতুন আপডেট (${widget.latestName})',
+                style:
+                    const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+              ),
+            ),
+          ],
+        ),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(widget.notes),
+            if (_isDownloading || _statusMessage != null) ...[
+              const SizedBox(height: 16),
+              if (_isDownloading) ...[
+                LinearProgressIndicator(
+                  value: _progress > 0 ? _progress : null,
+                  color: const Color(0xFF008069),
+                  minHeight: 7,
+                  borderRadius: BorderRadius.circular(6),
+                ),
+                const SizedBox(height: 8),
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    Text(
+                      _progress > 0
+                          ? '${(_progress * 100).toStringAsFixed(0)}%'
+                          : 'ডাউনলোড হচ্ছে...',
+                      style: const TextStyle(
+                          fontWeight: FontWeight.bold, fontSize: 13),
+                    ),
+                    Text(
+                      _sizeText,
+                      style:
+                          TextStyle(fontSize: 12, color: Colors.grey.shade600),
+                    ),
+                  ],
+                ),
+              ],
+              if (_statusMessage != null) ...[
+                const SizedBox(height: 8),
+                Text(
+                  _statusMessage!,
+                  style: TextStyle(
+                    fontSize: 12.5,
+                    color: _hasError
+                        ? Colors.red.shade700
+                        : const Color(0xFF008069),
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ],
+            ],
+          ],
+        ),
+        actions: [
+          if (!widget.forceUpdate && !_isDownloading)
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('পরে'),
+            ),
+          if (_hasError)
+            TextButton(
+              onPressed: () async {
+                final uri = Uri.tryParse(widget.apkUrl);
+                if (uri != null) {
+                  await launchUrl(uri, mode: LaunchMode.externalApplication);
+                }
+              },
+              child: const Text('ব্রাউজারে খুলুন'),
+            ),
+          if (!_isDownloading)
+            ElevatedButton.icon(
+              style: ElevatedButton.styleFrom(
+                backgroundColor: const Color(0xFF008069),
+                foregroundColor: Colors.white,
+              ),
+              icon: Icon(readyToInstall ? Icons.install_mobile : Icons.download),
+              label: Text(readyToInstall
+                  ? 'Install Now'
+                  : (_hasError ? 'আবার চেষ্টা করুন' : 'Update Now')),
+              onPressed: _downloadAndInstall,
+            ),
+        ],
+      ),
     );
   }
 }
