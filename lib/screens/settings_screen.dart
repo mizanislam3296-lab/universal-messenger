@@ -20,6 +20,8 @@ class AppSettingsController {
   static final ValueNotifier<Color> chatThemeColor = ValueNotifier(defaultChatBgColor);
   static final ValueNotifier<String?> chatThemeImage = ValueNotifier(null);
 
+  static final ValueNotifier<bool> notificationsEnabled = ValueNotifier(true);
+  static final ValueNotifier<bool> headsUpPopup = ValueNotifier(false);
   static final ValueNotifier<bool> chatSounds = ValueNotifier(true);
   static final ValueNotifier<bool> videoCallSounds = ValueNotifier(true);
   static final ValueNotifier<bool> audioCallSounds = ValueNotifier(true);
@@ -92,6 +94,8 @@ class AppSettingsController {
       appThemeImage.value = data['appThemeImage'];
       if (data['chatThemeColor'] != null) chatThemeColor.value = Color(data['chatThemeColor']);
       chatThemeImage.value = data['chatThemeImage'];
+      notificationsEnabled.value = data['notificationsEnabled'] ?? true;
+      headsUpPopup.value = data['headsUpPopup'] ?? false;
       chatSounds.value = data['chatSounds'] ?? true;
       videoCallSounds.value = data['videoCallSounds'] ?? true;
       audioCallSounds.value = data['audioCallSounds'] ?? true;
@@ -113,6 +117,8 @@ class AppSettingsController {
         'appThemeImage': appThemeImage.value,
         'chatThemeColor': chatThemeColor.value.value,
         'chatThemeImage': chatThemeImage.value,
+        'notificationsEnabled': notificationsEnabled.value,
+        'headsUpPopup': headsUpPopup.value,
         'chatSounds': chatSounds.value,
         'videoCallSounds': videoCallSounds.value,
         'audioCallSounds': audioCallSounds.value,
@@ -133,9 +139,6 @@ class NotificationAndPresenceService {
   static const MethodChannel _nativeChannel = MethodChannel('com.universal.messenger/icon');
   static final FlutterLocalNotificationsPlugin _notifications = FlutterLocalNotificationsPlugin();
 
-  static String _callChannelId = 'incoming_calls_ring_v4';
-  static String _msgChannelId = 'chat_messages_sound_v4';
-
   static bool _initialized = false;
   static bool isAppInForeground = true;
   static String? activeChatId;
@@ -147,66 +150,99 @@ class NotificationAndPresenceService {
   static StreamSubscription<QuerySnapshot>? _chatSub;
   static Timer? _heartbeatTimer;
 
-  static Future<void> rebuildNotificationChannels() async {
-    final androidPlugin = _notifications
-        .resolvePlatformSpecificImplementation<AndroidFlutterLocalNotificationsPlugin>();
-    if (androidPlugin == null) return;
-
+  static Future<String> _resolveCallSoundUri() async {
     final callPath = AppSettingsController.customCallRingtonePath.value;
-    String callSoundUri = 'content://settings/system/ringtone';
     if (callPath != null && File(callPath).existsSync()) {
       try {
         final contentUri = await _nativeChannel.invokeMethod<String>('getContentUri', {'path': callPath});
-        if (contentUri != null && contentUri.isNotEmpty) {
-          callSoundUri = contentUri;
-        }
+        if (contentUri != null && contentUri.isNotEmpty) return contentUri;
       } catch (_) {}
     }
+    return 'content://settings/system/ringtone';
+  }
 
+  static Future<String> _resolveMsgSoundUri() async {
     final msgPath = AppSettingsController.customMsgSoundPath.value;
-    String msgSoundUri = 'content://settings/system/notification_sound';
     if (msgPath != null && File(msgPath).existsSync()) {
       try {
         final contentUri = await _nativeChannel.invokeMethod<String>('getContentUri', {'path': msgPath});
-        if (contentUri != null && contentUri.isNotEmpty) {
-          msgSoundUri = contentUri;
-        }
+        if (contentUri != null && contentUri.isNotEmpty) return contentUri;
       } catch (_) {}
     }
+    return 'content://settings/system/notification_sound';
+  }
 
-    _callChannelId = 'incoming_calls_ring_${callSoundUri.hashCode.abs()}';
-    _msgChannelId = 'chat_messages_sound_${msgSoundUri.hashCode.abs()}';
+  static Future<String> _ensureMessageChannel({
+    required bool playSound,
+    required bool shouldVibrate,
+    required bool showPopup,
+  }) async {
+    final soundUri = playSound ? await _resolveMsgSoundUri() : 'silent';
+    final channelId = 'msg_ch_${playSound ? 1 : 0}_${shouldVibrate ? 1 : 0}_${showPopup ? 1 : 0}_${soundUri.hashCode.abs()}';
 
-    final callChannel = AndroidNotificationChannel(
-      _callChannelId,
-      'Incoming Calls (Ringtone)',
-      description: 'Ringtone & heads-up pop-up for incoming calls',
-      importance: Importance.max,
-      playSound: true,
-      sound: UriAndroidNotificationSound(callSoundUri),
-      audioAttributesUsage: AudioAttributesUsage.notificationRingtone,
-      enableVibration: true,
-      vibrationPattern: Int64List.fromList([0, 1000, 500, 1000]),
-      enableLights: true,
-      showBadge: true,
+    final androidPlugin = _notifications
+        .resolvePlatformSpecificImplementation<AndroidFlutterLocalNotificationsPlugin>();
+    if (androidPlugin != null) {
+      final channel = AndroidNotificationChannel(
+        channelId,
+        playSound ? 'Chat Messages (Sound)' : 'Chat Messages (Silent)',
+        description: 'Chat message notifications',
+        importance: showPopup ? Importance.max : Importance.defaultImportance,
+        playSound: playSound,
+        sound: playSound ? UriAndroidNotificationSound(soundUri) : null,
+        audioAttributesUsage: AudioAttributesUsage.notification,
+        enableVibration: shouldVibrate,
+        vibrationPattern: shouldVibrate ? Int64List.fromList([0, 250, 150, 250]) : null,
+        enableLights: true,
+        showBadge: true,
+      );
+      await androidPlugin.createNotificationChannel(channel);
+    }
+    return channelId;
+  }
+
+  static Future<String> _ensureCallChannel({
+    required bool playSound,
+    required bool shouldVibrate,
+    required bool showPopup,
+  }) async {
+    final soundUri = playSound ? await _resolveCallSoundUri() : 'silent';
+    final channelId = 'call_ch_${playSound ? 1 : 0}_${shouldVibrate ? 1 : 0}_${showPopup ? 1 : 0}_${soundUri.hashCode.abs()}';
+
+    final androidPlugin = _notifications
+        .resolvePlatformSpecificImplementation<AndroidFlutterLocalNotificationsPlugin>();
+    if (androidPlugin != null) {
+      final channel = AndroidNotificationChannel(
+        channelId,
+        playSound ? 'Incoming Calls (Ringtone)' : 'Incoming Calls (Silent)',
+        description: 'Incoming call notifications',
+        importance: showPopup ? Importance.max : Importance.defaultImportance,
+        playSound: playSound,
+        sound: playSound ? UriAndroidNotificationSound(soundUri) : null,
+        audioAttributesUsage: AudioAttributesUsage.notificationRingtone,
+        enableVibration: shouldVibrate,
+        vibrationPattern: shouldVibrate ? Int64List.fromList([0, 800, 400, 800]) : null,
+        enableLights: true,
+        showBadge: true,
+      );
+      await androidPlugin.createNotificationChannel(channel);
+    }
+    return channelId;
+  }
+
+  static Future<void> rebuildNotificationChannels() async {
+    final showPopup = AppSettingsController.headsUpPopup.value;
+    final shouldVibrate = AppSettingsController.vibrate.value;
+    await _ensureMessageChannel(
+      playSound: AppSettingsController.chatSounds.value,
+      shouldVibrate: shouldVibrate,
+      showPopup: showPopup,
     );
-
-    final msgChannel = AndroidNotificationChannel(
-      _msgChannelId,
-      'Chat Messages (Sound)',
-      description: 'Notification sound & pop-up for new messages',
-      importance: Importance.max,
-      playSound: true,
-      sound: UriAndroidNotificationSound(msgSoundUri),
-      audioAttributesUsage: AudioAttributesUsage.notification,
-      enableVibration: true,
-      vibrationPattern: Int64List.fromList([0, 300, 200, 300]),
-      enableLights: true,
-      showBadge: true,
+    await _ensureCallChannel(
+      playSound: AppSettingsController.audioCallSounds.value || AppSettingsController.videoCallSounds.value,
+      shouldVibrate: shouldVibrate,
+      showPopup: showPopup,
     );
-
-    await androidPlugin.createNotificationChannel(callChannel);
-    await androidPlugin.createNotificationChannel(msgChannel);
   }
 
   static Future<void> playNativeCallRingtone() async {
@@ -367,43 +403,43 @@ class NotificationAndPresenceService {
       _stopCallRing();
       _lastNotifiedCallId = callId;
 
+      if (!AppSettingsController.notificationsEnabled.value) return;
+
       final callerName = (data['callerName'] ?? 'কেউ একজন').toString();
       final isVideo = data['isVideo'] == true;
       final playSound = isVideo
           ? AppSettingsController.videoCallSounds.value
           : AppSettingsController.audioCallSounds.value;
       final shouldVibrate = AppSettingsController.vibrate.value;
+      final showPopup = AppSettingsController.headsUpPopup.value;
 
       if (playSound) {
         await playNativeCallRingtone();
       }
       if (shouldVibrate) HapticFeedback.heavyImpact();
 
-      final customPath = AppSettingsController.customCallRingtonePath.value;
-      String soundUri = 'content://settings/system/ringtone';
-      if (customPath != null && File(customPath).existsSync()) {
-        try {
-          final cUri = await _nativeChannel.invokeMethod<String>('getContentUri', {'path': customPath});
-          if (cUri != null && cUri.isNotEmpty) soundUri = cUri;
-        } catch (_) {}
-      }
+      final channelId = await _ensureCallChannel(
+        playSound: playSound,
+        shouldVibrate: shouldVibrate,
+        showPopup: showPopup,
+      );
+      final soundUri = playSound ? await _resolveCallSoundUri() : null;
 
       final androidDetails = AndroidNotificationDetails(
-        _callChannelId,
-        'Incoming Calls (Ringtone)',
-        channelDescription: 'Ringtone & heads-up pop-up for incoming calls',
-        importance: Importance.max,
-        priority: Priority.max,
-        ticker: 'Incoming call from $callerName',
+        channelId,
+        playSound ? 'Incoming Calls (Ringtone)' : 'Incoming Calls (Silent)',
+        channelDescription: 'Incoming call notifications',
+        importance: showPopup ? Importance.max : Importance.defaultImportance,
+        priority: showPopup ? Priority.max : Priority.defaultPriority,
         category: AndroidNotificationCategory.call,
-        fullScreenIntent: true,
+        fullScreenIntent: showPopup,
         ongoing: true,
         autoCancel: false,
         playSound: playSound,
-        sound: playSound ? UriAndroidNotificationSound(soundUri) : null,
+        sound: soundUri != null ? UriAndroidNotificationSound(soundUri) : null,
         audioAttributesUsage: AudioAttributesUsage.notificationRingtone,
         enableVibration: shouldVibrate,
-        vibrationPattern: shouldVibrate ? Int64List.fromList([0, 1000, 500, 1000]) : null,
+        vibrationPattern: shouldVibrate ? Int64List.fromList([0, 800, 400, 800]) : null,
         additionalFlags: playSound ? Int32List.fromList([4]) : null,
         channelShowBadge: true,
         visibility: NotificationVisibility.public,
@@ -451,6 +487,7 @@ class NotificationAndPresenceService {
         if (millis <= prevMillis) continue;
         _lastChatMsgMillis[doc.id] = millis;
 
+        if (!AppSettingsController.notificationsEnabled.value) continue;
         if (isAppInForeground && activeChatId == doc.id) continue;
 
         final lastSenderId = (data['lastSenderId'] ?? '').toString();
@@ -469,34 +506,32 @@ class NotificationAndPresenceService {
 
         final playSound = AppSettingsController.chatSounds.value;
         final shouldVibrate = AppSettingsController.vibrate.value;
+        final showPopup = AppSettingsController.headsUpPopup.value;
 
         if (playSound) {
           await playNativeMessageSound();
         }
         if (shouldVibrate) HapticFeedback.mediumImpact();
 
-        final customPath = AppSettingsController.customMsgSoundPath.value;
-        String soundUri = 'content://settings/system/notification_sound';
-        if (customPath != null && File(customPath).existsSync()) {
-          try {
-            final cUri = await _nativeChannel.invokeMethod<String>('getContentUri', {'path': customPath});
-            if (cUri != null && cUri.isNotEmpty) soundUri = cUri;
-          } catch (_) {}
-        }
+        final channelId = await _ensureMessageChannel(
+          playSound: playSound,
+          shouldVibrate: shouldVibrate,
+          showPopup: showPopup,
+        );
+        final soundUri = playSound ? await _resolveMsgSoundUri() : null;
 
         final androidDetails = AndroidNotificationDetails(
-          _msgChannelId,
-          'Chat Messages (Sound)',
-          channelDescription: 'Notification sound & pop-up for new messages',
-          importance: Importance.max,
-          priority: Priority.max,
-          ticker: '$senderName: $lastMsg',
+          channelId,
+          playSound ? 'Chat Messages (Sound)' : 'Chat Messages (Silent)',
+          channelDescription: 'Chat message notifications',
+          importance: showPopup ? Importance.max : Importance.defaultImportance,
+          priority: showPopup ? Priority.max : Priority.defaultPriority,
           category: AndroidNotificationCategory.message,
           playSound: playSound,
-          sound: playSound ? UriAndroidNotificationSound(soundUri) : null,
+          sound: soundUri != null ? UriAndroidNotificationSound(soundUri) : null,
           audioAttributesUsage: AudioAttributesUsage.notification,
           enableVibration: shouldVibrate,
-          vibrationPattern: shouldVibrate ? Int64List.fromList([0, 300, 200, 300]) : null,
+          vibrationPattern: shouldVibrate ? Int64List.fromList([0, 250, 150, 250]) : null,
           channelShowBadge: true,
           visibility: NotificationVisibility.public,
         );
@@ -630,6 +665,14 @@ class _SettingsScreenState extends State<SettingsScreen> {
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(text)));
   }
 
+  void _playShortRingtonePreview() {
+    _previewStopTimer?.cancel();
+    NotificationAndPresenceService.playNativeCallRingtone();
+    _previewStopTimer = Timer(const Duration(seconds: 2), () {
+      NotificationAndPresenceService.stopNativeCallRingtone();
+    });
+  }
+
   Future<void> _pickCustomCallRingtone() async {
     final files = await FilePicker.pickFiles(type: FileType.audio);
     if (files.isEmpty || files.first.path == null) return;
@@ -641,7 +684,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
     await AppSettingsController.save();
     await NotificationAndPresenceService.rebuildNotificationChannels();
 
-    // ৪ সেকেন্ডের জন্য রিংটোন প্রিভিউ শোনানো
     _previewStopTimer?.cancel();
     await NotificationAndPresenceService.playNativeCallRingtone();
     _previewStopTimer = Timer(const Duration(seconds: 4), () {
@@ -1109,53 +1151,106 @@ class _SettingsScreenState extends State<SettingsScreen> {
                       title: const Text('Notification', style: TextStyle(fontWeight: FontWeight.bold)),
                       children: [
                         ValueListenableBuilder<bool>(
-                          valueListenable: AppSettingsController.chatSounds,
-                          builder: (_, val, __) => SwitchListTile(
-                            secondary: const Icon(Icons.message),
-                            title: const Text('Chat sounds'),
-                            value: val,
-                            onChanged: (v) {
-                              AppSettingsController.chatSounds.value = v;
-                              if (v) NotificationAndPresenceService.playNativeMessageSound();
-                              AppSettingsController.save();
-                            },
-                          ),
-                        ),
-                        ValueListenableBuilder<bool>(
-                          valueListenable: AppSettingsController.videoCallSounds,
-                          builder: (_, val, __) => SwitchListTile(
-                            secondary: const Icon(Icons.videocam),
-                            title: const Text('Video call sounds'),
-                            value: val,
-                            onChanged: (v) {
-                              AppSettingsController.videoCallSounds.value = v;
-                              AppSettingsController.save();
-                            },
-                          ),
-                        ),
-                        ValueListenableBuilder<bool>(
-                          valueListenable: AppSettingsController.audioCallSounds,
-                          builder: (_, val, __) => SwitchListTile(
-                            secondary: const Icon(Icons.call),
-                            title: const Text('Audio call sounds'),
-                            value: val,
-                            onChanged: (v) {
-                              AppSettingsController.audioCallSounds.value = v;
-                              AppSettingsController.save();
-                            },
-                          ),
-                        ),
-                        ValueListenableBuilder<bool>(
-                          valueListenable: AppSettingsController.vibrate,
-                          builder: (_, val, __) => SwitchListTile(
-                            secondary: const Icon(Icons.vibration),
-                            title: const Text('Vibrate'),
-                            value: val,
-                            onChanged: (v) {
-                              AppSettingsController.vibrate.value = v;
-                              if (v) HapticFeedback.vibrate();
-                              AppSettingsController.save();
-                            },
+                          valueListenable: AppSettingsController.notificationsEnabled,
+                          builder: (_, enabled, __) => Column(
+                            children: [
+                              SwitchListTile(
+                                secondary: const Icon(Icons.notifications),
+                                title: const Text('Notifications'),
+                                subtitle: Text(enabled ? 'All notifications enabled' : 'All notifications muted'),
+                                value: enabled,
+                                onChanged: (v) async {
+                                  AppSettingsController.notificationsEnabled.value = v;
+                                  await AppSettingsController.save();
+                                  await NotificationAndPresenceService.rebuildNotificationChannels();
+                                  if (!v) {
+                                    await NotificationAndPresenceService.stopNativeCallRingtone();
+                                  }
+                                  _showMsg(v ? 'Notifications turned ON' : 'Notifications turned OFF');
+                                },
+                              ),
+                              ValueListenableBuilder<bool>(
+                                valueListenable: AppSettingsController.headsUpPopup,
+                                builder: (_, popupVal, __) => SwitchListTile(
+                                  secondary: const Icon(Icons.branding_watermark_outlined),
+                                  title: const Text('Pop-up on screen'),
+                                  subtitle: Text(popupVal ? 'Top floating banner ON' : 'Top floating banner OFF'),
+                                  value: enabled && popupVal,
+                                  onChanged: !enabled
+                                      ? null
+                                      : (v) async {
+                                          AppSettingsController.headsUpPopup.value = v;
+                                          await AppSettingsController.save();
+                                          await NotificationAndPresenceService.rebuildNotificationChannels();
+                                          _showMsg(v ? 'Top pop-up banner ON' : 'Top pop-up banner OFF');
+                                        },
+                                ),
+                              ),
+                              ValueListenableBuilder<bool>(
+                                valueListenable: AppSettingsController.chatSounds,
+                                builder: (_, chatVal, __) => SwitchListTile(
+                                  secondary: const Icon(Icons.message),
+                                  title: const Text('Chat sounds'),
+                                  value: enabled && chatVal,
+                                  onChanged: !enabled
+                                      ? null
+                                      : (v) async {
+                                          AppSettingsController.chatSounds.value = v;
+                                          await AppSettingsController.save();
+                                          await NotificationAndPresenceService.rebuildNotificationChannels();
+                                          if (v) NotificationAndPresenceService.playNativeMessageSound();
+                                        },
+                                ),
+                              ),
+                              ValueListenableBuilder<bool>(
+                                valueListenable: AppSettingsController.videoCallSounds,
+                                builder: (_, videoVal, __) => SwitchListTile(
+                                  secondary: const Icon(Icons.videocam),
+                                  title: const Text('Video call sounds'),
+                                  value: enabled && videoVal,
+                                  onChanged: !enabled
+                                      ? null
+                                      : (v) async {
+                                          AppSettingsController.videoCallSounds.value = v;
+                                          await AppSettingsController.save();
+                                          await NotificationAndPresenceService.rebuildNotificationChannels();
+                                          if (v) _playShortRingtonePreview();
+                                        },
+                                ),
+                              ),
+                              ValueListenableBuilder<bool>(
+                                valueListenable: AppSettingsController.audioCallSounds,
+                                builder: (_, audioVal, __) => SwitchListTile(
+                                  secondary: const Icon(Icons.call),
+                                  title: const Text('Audio call sounds'),
+                                  value: enabled && audioVal,
+                                  onChanged: !enabled
+                                      ? null
+                                      : (v) async {
+                                          AppSettingsController.audioCallSounds.value = v;
+                                          await AppSettingsController.save();
+                                          await NotificationAndPresenceService.rebuildNotificationChannels();
+                                          if (v) _playShortRingtonePreview();
+                                        },
+                                ),
+                              ),
+                              ValueListenableBuilder<bool>(
+                                valueListenable: AppSettingsController.vibrate,
+                                builder: (_, vibVal, __) => SwitchListTile(
+                                  secondary: const Icon(Icons.vibration),
+                                  title: const Text('Vibrate'),
+                                  value: enabled && vibVal,
+                                  onChanged: !enabled
+                                      ? null
+                                      : (v) async {
+                                          AppSettingsController.vibrate.value = v;
+                                          await AppSettingsController.save();
+                                          await NotificationAndPresenceService.rebuildNotificationChannels();
+                                          if (v) HapticFeedback.vibrate();
+                                        },
+                                ),
+                              ),
+                            ],
                           ),
                         ),
                         const Divider(height: 1),
