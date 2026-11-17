@@ -606,6 +606,10 @@ jobs:
                   m_xml = f.read()
               m_xml = re.sub(r'\s*android:extractNativeLibs="[^"]*"', '', m_xml)
               m_xml = m_xml.replace('android:label="universal_messenger"', 'android:label="Universal Messenger"')
+              if 'android:supportsPictureInPicture' not in m_xml:
+                  m_xml = m_xml.replace('<activity\n', '<activity\n            android:supportsPictureInPicture="true"\n            android:resizeableActivity="true"\n', 1)
+              if 'android:supportsPictureInPicture' not in m_xml:
+                  m_xml = m_xml.replace('<activity ', '<activity android:supportsPictureInPicture="true" android:resizeableActivity="true" ', 1)
               perms = ''.join(f'    <uses-permission android:name="android.permission.{p}"/>\n' for p in [
                   "INTERNET","CAMERA","RECORD_AUDIO","MODIFY_AUDIO_SETTINGS",
                   "ACCESS_NETWORK_STATE","ACCESS_WIFI_STATE","BLUETOOTH",
