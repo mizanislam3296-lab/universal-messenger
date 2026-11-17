@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:io';
 import 'dart:math' as math;
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:dio/dio.dart';
@@ -41,6 +42,9 @@ class _ChatScreenState extends State<ChatScreen> {
   bool _isTyping = false;
   Timer? _typingTimer;
 
+  // রিপ্লাই দেওয়ার জন্য সিলেক্ট করা মেসেজের ডাটা
+  Map<String, dynamic>? _replyingTo;
+
   @override
   void initState() {
     super.initState();
@@ -73,6 +77,16 @@ class _ChatScreenState extends State<ChatScreen> {
         'unreadCount': {_currentUser.uid: 0},
       }, SetOptions(merge: true));
     } catch (_) {}
+  }
+
+  // রিয়েল-টাইম Seen আপডেট ফাংশন
+  void _markMessagesAsSeen(List<QueryDocumentSnapshot> docs) {
+    for (final doc in docs) {
+      final data = doc.data() as Map<String, dynamic>;
+      if (data['senderId'] != _currentUser.uid && (data['isSeen'] ?? false) == false) {
+        doc.reference.update({'isSeen': true}).catchError((_) {});
+      }
+    }
   }
 
   Future<void> _setTypingStatus(bool typing) async {
@@ -163,19 +177,44 @@ class _ChatScreenState extends State<ChatScreen> {
     }, SetOptions(merge: true));
   }
 
+  void _selectReplyMessage(String docId, Map<String, dynamic> data, bool isMe) {
+    final type = (data['type'] ?? 'text').toString();
+    String previewText = (data['text'] ?? '').toString();
+    if (type == 'image') {
+      previewText = '📷 ছবি';
+    } else if (type == 'video') {
+      previewText = '🎥 ভিডিও: $previewText';
+    } else if (type == 'pdf' || type == 'file') {
+      previewText = '📎 $previewText';
+    }
+
+    setState(() {
+      _replyingTo = {
+        'id': docId,
+        'text': previewText,
+        'senderName': isMe ? 'আপনি' : widget.receiverName,
+      };
+    });
+  }
+
   Future<void> _sendMessage() async {
     final text = _messageController.text.trim();
     if (text.isEmpty) return;
 
+    final replyPayload = _replyingTo;
     _messageController.clear();
     _typingTimer?.cancel();
     _isTyping = false;
+    setState(() => _replyingTo = null);
 
     await FirebaseFirestore.instance.collection('chats').doc(_chatId).collection('messages').add({
       'senderId': _currentUser.uid,
       'receiverId': widget.receiverId,
       'text': text,
       'type': 'text',
+      'isSeen': false,
+      'isEdited': false,
+      if (replyPayload != null) 'replyTo': replyPayload,
       'timestamp': FieldValue.serverTimestamp(),
     });
     await _updateChatSummary(text);
@@ -192,11 +231,13 @@ class _ChatScreenState extends State<ChatScreen> {
       final fileName = pickedFile.name;
       final fileSize = _formatFileSize(await file.length());
       final fileType = _detectFileType(fileName);
+      final replyPayload = _replyingTo;
 
       setState(() {
         _isUploading = true;
         _uploadProgress = 0.0;
         _uploadingFileName = fileName;
+        _replyingTo = null;
       });
 
       final formData = FormData.fromMap({
@@ -224,6 +265,9 @@ class _ChatScreenState extends State<ChatScreen> {
         'fileUrl': downloadUrl,
         'fileName': fileName,
         'fileSize': fileSize,
+        'isSeen': false,
+        'isEdited': false,
+        if (replyPayload != null) 'replyTo': replyPayload,
         'timestamp': FieldValue.serverTimestamp(),
       });
       await _updateChatSummary('📎 $fileName');
@@ -240,6 +284,149 @@ class _ChatScreenState extends State<ChatScreen> {
           _uploadingFileName = '';
         });
       }
+    }
+  }
+
+  // মেসেজে ক্লিক করলে Reply, Copy, Edit, Delete মেনু দেখাবে
+  void _showMessageOptions(DocumentSnapshot doc, Map<String, dynamic> data, bool isMe, Color barColor) {
+    final type = (data['type'] ?? 'text').toString();
+    final text = (data['text'] ?? '').toString();
+
+    showModalBottomSheet(
+      context: context,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(18)),
+      ),
+      builder: (ctx) {
+        return SafeArea(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const SizedBox(height: 8),
+              Container(
+                width: 40,
+                height: 4,
+                decoration: BoxDecoration(color: Colors.grey.shade400, borderRadius: BorderRadius.circular(4)),
+              ),
+              const SizedBox(height: 6),
+              ListTile(
+                leading: Icon(Icons.reply, color: barColor),
+                title: const Text('Reply'),
+                onTap: () {
+                  Navigator.pop(ctx);
+                  _selectReplyMessage(doc.id, data, isMe);
+                },
+              ),
+              if (type == 'text' && text.isNotEmpty)
+                ListTile(
+                  leading: const Icon(Icons.copy, color: Colors.blueGrey),
+                  title: const Text('Copy'),
+                  onTap: () {
+                    Clipboard.setData(ClipboardData(text: text));
+                    Navigator.pop(ctx);
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(content: Text('মেসেজ কপি হয়েছে'), duration: Duration(seconds: 1)),
+                    );
+                  },
+                ),
+              if (isMe && type == 'text')
+                ListTile(
+                  leading: const Icon(Icons.edit, color: Colors.orange),
+                  title: const Text('Edit'),
+                  onTap: () {
+                    Navigator.pop(ctx);
+                    _showEditMessageDialog(doc, text, barColor);
+                  },
+                ),
+              if (isMe)
+                ListTile(
+                  leading: const Icon(Icons.delete, color: Colors.red),
+                  title: const Text('Delete', style: TextStyle(color: Colors.red)),
+                  onTap: () async {
+                    Navigator.pop(ctx);
+                    await _deleteMessage(doc);
+                  },
+                ),
+              const SizedBox(height: 8),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  void _showEditMessageDialog(DocumentSnapshot doc, String oldText, Color barColor) {
+    final editController = TextEditingController(text: oldText);
+
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('মেসেজ এডিট করুন'),
+        content: TextField(
+          controller: editController,
+          autofocus: true,
+          maxLines: 4,
+          minLines: 1,
+          decoration: const InputDecoration(
+            border: OutlineInputBorder(),
+            hintText: 'নতুন মেসেজ লিখুন...',
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('বাতিল'),
+          ),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(backgroundColor: barColor, foregroundColor: Colors.white),
+            onPressed: () async {
+              final updatedText = editController.text.trim();
+              if (updatedText.isNotEmpty && updatedText != oldText) {
+                await doc.reference.update({
+                  'text': updatedText,
+                  'isEdited': true,
+                });
+                // চ্যাট লিস্টের শেষ মেসেজও আপডেট করা হচ্ছে
+                await FirebaseFirestore.instance.collection('chats').doc(_chatId).set({
+                  'lastMessage': updatedText,
+                }, SetOptions(merge: true));
+              }
+              if (ctx.mounted) Navigator.pop(ctx);
+            },
+            child: const Text('সেভ করুন'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _deleteMessage(DocumentSnapshot doc) async {
+    try {
+      await doc.reference.delete();
+      // সর্বশেষ মেসেজটি বের করে চ্যাট লিস্ট আপডেট রাখা
+      final latestSnap = await FirebaseFirestore.instance
+          .collection('chats')
+          .doc(_chatId)
+          .collection('messages')
+          .orderBy('timestamp', descending: true)
+          .limit(1)
+          .get();
+
+      String newLastMsg = '';
+      if (latestSnap.docs.isNotEmpty) {
+        final d = latestSnap.docs.first.data();
+        final t = (d['type'] ?? 'text').toString();
+        newLastMsg = t == 'text' ? (d['text'] ?? '').toString() : '📎 ${d['fileName'] ?? 'File'}';
+      }
+
+      await FirebaseFirestore.instance.collection('chats').doc(_chatId).set({
+        'lastMessage': newLastMsg,
+      }, SetOptions(merge: true));
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('ডিলিট করতে সমস্যা হয়েছে: $e')),
+      );
     }
   }
 
@@ -449,8 +636,9 @@ class _ChatScreenState extends State<ChatScreen> {
                             );
                           }
 
-                          _markAsRead();
                           final messages = snapshot.data!.docs;
+                          _markAsRead();
+                          _markMessagesAsSeen(messages);
 
                           return ListView.builder(
                             controller: _scrollController,
@@ -458,32 +646,131 @@ class _ChatScreenState extends State<ChatScreen> {
                             padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 16),
                             itemCount: messages.length,
                             itemBuilder: (context, index) {
-                              final data = messages[index].data() as Map<String, dynamic>;
+                              final doc = messages[index];
+                              final data = doc.data() as Map<String, dynamic>;
                               final isMe = data['senderId'] == _currentUser.uid;
                               final time = _formatTime(data['timestamp'] as Timestamp?);
+                              final isSeen = data['isSeen'] == true;
+                              final isEdited = data['isEdited'] == true;
+                              final replyData = data['replyTo'] as Map<String, dynamic>?;
 
-                              return Align(
-                                alignment: isMe ? Alignment.centerRight : Alignment.centerLeft,
-                                child: Container(
-                                  margin: const EdgeInsets.symmetric(vertical: 4),
-                                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                                  constraints: BoxConstraints(maxWidth: MediaQuery.of(context).size.width * 0.78),
-                                  decoration: BoxDecoration(
-                                    color: isMe ? (isDefaultBg ? const Color(0xFFD9FDD3) : Color.lerp(Colors.white, chatColor, 0.25)) : Colors.white,
-                                    borderRadius: BorderRadius.only(
-                                      topLeft: const Radius.circular(14),
-                                      topRight: const Radius.circular(14),
-                                      bottomLeft: Radius.circular(isMe ? 14 : 2),
-                                      bottomRight: Radius.circular(isMe ? 2 : 14),
+                              return Dismissible(
+                                key: Key(doc.id),
+                                direction: DismissDirection.horizontal, // ডানে বা বামে স্লাইড করলে Reply হবে
+                                confirmDismiss: (_) async {
+                                  _selectReplyMessage(doc.id, data, isMe);
+                                  return false; // মেসেজটি ডিলিট না হয়ে আগের জায়গায় ফিরে আসবে
+                                },
+                                background: Align(
+                                  alignment: Alignment.centerLeft,
+                                  child: Padding(
+                                    padding: const EdgeInsets.only(left: 16),
+                                    child: CircleAvatar(
+                                      radius: 16,
+                                      backgroundColor: barColor.withOpacity(0.2),
+                                      child: Icon(Icons.reply, size: 18, color: barColor),
                                     ),
                                   ),
-                                  child: Column(
-                                    crossAxisAlignment: CrossAxisAlignment.end,
-                                    children: [
-                                      _buildMessageContent(data, barColor),
-                                      const SizedBox(height: 4),
-                                      Text(time, style: TextStyle(fontSize: 10, color: Colors.grey.shade600)),
-                                    ],
+                                ),
+                                secondaryBackground: Align(
+                                  alignment: Alignment.centerRight,
+                                  child: Padding(
+                                    padding: const EdgeInsets.only(right: 16),
+                                    child: CircleAvatar(
+                                      radius: 16,
+                                      backgroundColor: barColor.withOpacity(0.2),
+                                      child: Icon(Icons.reply, size: 18, color: barColor),
+                                    ),
+                                  ),
+                                ),
+                                child: Align(
+                                  alignment: isMe ? Alignment.centerRight : Alignment.centerLeft,
+                                  child: GestureDetector(
+                                    onTap: () => _showMessageOptions(doc, data, isMe, barColor),
+                                    child: Container(
+                                      margin: const EdgeInsets.symmetric(vertical: 4),
+                                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                                      constraints: BoxConstraints(maxWidth: MediaQuery.of(context).size.width * 0.78),
+                                      decoration: BoxDecoration(
+                                        color: isMe
+                                            ? (isDefaultBg ? const Color(0xFFD9FDD3) : Color.lerp(Colors.white, chatColor, 0.25))
+                                            : Colors.white,
+                                        borderRadius: BorderRadius.only(
+                                          topLeft: const Radius.circular(14),
+                                          topRight: const Radius.circular(14),
+                                          bottomLeft: Radius.circular(isMe ? 14 : 2),
+                                          bottomRight: Radius.circular(isMe ? 2 : 14),
+                                        ),
+                                      ),
+                                      child: Column(
+                                        crossAxisAlignment: CrossAxisAlignment.start,
+                                        children: [
+                                          // রিপ্লাই করা মেসেজের প্রিভিউ বক্স
+                                          if (replyData != null)
+                                            Container(
+                                              margin: const EdgeInsets.only(bottom: 6),
+                                              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+                                              decoration: BoxDecoration(
+                                                color: Colors.black.withOpacity(0.06),
+                                                borderRadius: BorderRadius.circular(8),
+                                                border: Border(left: BorderSide(color: barColor, width: 3)),
+                                              ),
+                                              child: Column(
+                                                crossAxisAlignment: CrossAxisAlignment.start,
+                                                children: [
+                                                  Text(
+                                                    (replyData['senderName'] ?? '').toString(),
+                                                    style: TextStyle(
+                                                      fontSize: 11,
+                                                      fontWeight: FontWeight.bold,
+                                                      color: barColor,
+                                                    ),
+                                                  ),
+                                                  const SizedBox(height: 2),
+                                                  Text(
+                                                    (replyData['text'] ?? '').toString(),
+                                                    maxLines: 2,
+                                                    overflow: TextOverflow.ellipsis,
+                                                    style: const TextStyle(fontSize: 12, color: Colors.black54),
+                                                  ),
+                                                ],
+                                              ),
+                                            ),
+                                          _buildMessageContent(data, barColor),
+                                          const SizedBox(height: 4),
+                                          Row(
+                                            mainAxisSize: MainAxisSize.min,
+                                            mainAxisAlignment: MainAxisAlignment.end,
+                                            children: [
+                                              if (isEdited)
+                                                Padding(
+                                                  padding: const EdgeInsets.only(right: 5),
+                                                  child: Text(
+                                                    'Edited',
+                                                    style: TextStyle(
+                                                      fontSize: 10,
+                                                      fontStyle: FontStyle.italic,
+                                                      color: Colors.grey.shade600,
+                                                    ),
+                                                  ),
+                                                ),
+                                              Text(time, style: TextStyle(fontSize: 10, color: Colors.grey.shade600)),
+                                              if (isMe) ...[
+                                                const SizedBox(width: 5),
+                                                Text(
+                                                  isSeen ? 'Seen' : 'Sent',
+                                                  style: TextStyle(
+                                                    fontSize: 10,
+                                                    fontWeight: isSeen ? FontWeight.bold : FontWeight.normal,
+                                                    color: isSeen ? const Color(0xFF1A73E8) : Colors.grey.shade600,
+                                                  ),
+                                                ),
+                                              ],
+                                            ],
+                                          ),
+                                        ],
+                                      ),
+                                    ),
                                   ),
                                 ),
                               );
@@ -522,32 +809,84 @@ class _ChatScreenState extends State<ChatScreen> {
                       child: Container(
                         padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
                         color: isDark ? const Color(0xFF1F2C34) : Colors.grey.shade100,
-                        child: Row(
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
                           children: [
-                            IconButton(icon: Icon(Icons.attach_file, color: barColor), onPressed: _isUploading ? null : _pickAndSendFile),
-                            Expanded(
-                              child: TextField(
-                                controller: _messageController,
-                                onChanged: _onTextChanged,
-                                textCapitalization: TextCapitalization.sentences,
-                                minLines: 1,
-                                maxLines: 4,
-                                style: const TextStyle(color: Colors.black87),
-                                decoration: InputDecoration(
-                                  hintText: 'মেসেজ লিখুন...',
-                                  hintStyle: TextStyle(color: Colors.grey.shade600),
-                                  filled: true,
-                                  fillColor: Colors.white,
-                                  contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-                                  border: OutlineInputBorder(borderRadius: BorderRadius.circular(24), borderSide: BorderSide.none),
+                            // ইনপুট বক্সের উপরে রিপ্লাই প্রিভিউ বার
+                            if (_replyingTo != null)
+                              Container(
+                                margin: const EdgeInsets.only(bottom: 6, left: 4, right: 4),
+                                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                                decoration: BoxDecoration(
+                                  color: isDark ? const Color(0xFF2A3942) : Colors.white,
+                                  borderRadius: BorderRadius.circular(12),
+                                  border: Border(left: BorderSide(color: barColor, width: 4)),
+                                ),
+                                child: Row(
+                                  children: [
+                                    Expanded(
+                                      child: Column(
+                                        crossAxisAlignment: CrossAxisAlignment.start,
+                                        children: [
+                                          Text(
+                                            'Replying to ${_replyingTo!['senderName']}',
+                                            style: TextStyle(
+                                              fontSize: 12,
+                                              fontWeight: FontWeight.bold,
+                                              color: barColor,
+                                            ),
+                                          ),
+                                          const SizedBox(height: 2),
+                                          Text(
+                                            (_replyingTo!['text'] ?? '').toString(),
+                                            maxLines: 1,
+                                            overflow: TextOverflow.ellipsis,
+                                            style: TextStyle(
+                                              fontSize: 13,
+                                              color: isDark ? Colors.white70 : Colors.black87,
+                                            ),
+                                          ),
+                                        ],
+                                      ),
+                                    ),
+                                    IconButton(
+                                      icon: const Icon(Icons.close, size: 18),
+                                      color: isDark ? Colors.white70 : Colors.black54,
+                                      padding: EdgeInsets.zero,
+                                      constraints: const BoxConstraints(),
+                                      onPressed: () => setState(() => _replyingTo = null),
+                                    ),
+                                  ],
                                 ),
                               ),
-                            ),
-                            const SizedBox(width: 6),
-                            CircleAvatar(
-                              backgroundColor: barColor,
-                              radius: 23,
-                              child: IconButton(icon: const Icon(Icons.send, color: Colors.white, size: 20), onPressed: _sendMessage),
+                            Row(
+                              children: [
+                                IconButton(icon: Icon(Icons.attach_file, color: barColor), onPressed: _isUploading ? null : _pickAndSendFile),
+                                Expanded(
+                                  child: TextField(
+                                    controller: _messageController,
+                                    onChanged: _onTextChanged,
+                                    textCapitalization: TextCapitalization.sentences,
+                                    minLines: 1,
+                                    maxLines: 4,
+                                    style: const TextStyle(color: Colors.black87),
+                                    decoration: InputDecoration(
+                                      hintText: 'মেসেজ লিখুন...',
+                                      hintStyle: TextStyle(color: Colors.grey.shade600),
+                                      filled: true,
+                                      fillColor: Colors.white,
+                                      contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+                                      border: OutlineInputBorder(borderRadius: BorderRadius.circular(24), borderSide: BorderSide.none),
+                                    ),
+                                  ),
+                                ),
+                                const SizedBox(width: 6),
+                                CircleAvatar(
+                                  backgroundColor: barColor,
+                                  radius: 23,
+                                  child: IconButton(icon: const Icon(Icons.send, color: Colors.white, size: 20), onPressed: _sendMessage),
+                                ),
+                              ],
                             ),
                           ],
                         ),
