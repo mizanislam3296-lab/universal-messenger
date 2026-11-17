@@ -100,8 +100,13 @@ jobs:
 
           if [ -n "$KEYSTORE_BASE64" ]; then
             echo "$KEYSTORE_BASE64" | base64 -d > android/app/release.jks
+            echo "Using permanent KEYSTORE_BASE64 from GitHub Secrets."
           else
             keytool -genkey -v -keystore android/app/release.jks -keyalg RSA -keysize 2048 -validity 10000 -alias messenger_key -storepass "Messenger@2026" -keypass "Messenger@2026" -dname "CN=Universal Messenger, OU=Mobile, O=Universal, L=Dhaka, S=Dhaka, C=BD"
+            echo "================ COPY THIS KEYSTORE_BASE64 FOR GITHUB SECRETS ================"
+            base64 -w 0 android/app/release.jks
+            echo ""
+            echo "=============================================================================="
           fi
 
           cat << 'PYEOF' > configure_android.py
@@ -132,6 +137,7 @@ jobs:
           import android.net.NetworkCapabilities
           import android.net.Uri
           import android.os.Build
+          import android.provider.Settings
           import androidx.core.content.FileProvider
           import io.flutter.embedding.android.FlutterActivity
           import io.flutter.embedding.engine.FlutterEngine
@@ -170,6 +176,39 @@ jobs:
                   super.configureFlutterEngine(flutterEngine)
                   MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL).setMethodCallHandler { call, result ->
                       when (call.method) {
+                          "installApk" -> {
+                              val path = call.argument<String>("path")
+                              if (path != null && File(path).exists()) {
+                                  try {
+                                      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && !packageManager.canRequestPackageInstalls()) {
+                                          val permIntent = Intent(
+                                              Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                                              Uri.parse("package:$packageName")
+                                          ).apply {
+                                              addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                          }
+                                          startActivity(permIntent)
+                                          result.success("PERMISSION_REQUIRED")
+                                      } else {
+                                          val apkUri = FileProvider.getUriForFile(
+                                              applicationContext,
+                                              "com.universal.messenger.fileprovider",
+                                              File(path)
+                                          )
+                                          val installIntent = Intent(Intent.ACTION_VIEW).apply {
+                                              setDataAndType(apkUri, "application/vnd.android.package-archive")
+                                              addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
+                                          }
+                                          startActivity(installIntent)
+                                          result.success("STARTED")
+                                      }
+                                  } catch (e: Exception) {
+                                      result.error("INSTALL_ERROR", e.message, null)
+                                  }
+                              } else {
+                                  result.error("FILE_NOT_FOUND", "APK file not found", null)
+                              }
+                          }
                           "getContentUri" -> {
                               val path = call.argument<String>("path")
                               if (path != null && File(path).exists()) {
@@ -531,7 +570,7 @@ jobs:
                   minSdk = 23
                   targetSdk = 34
                   versionCode = {run_num}
-                  versionName = "9.0.{run_num}"
+                  versionName = "10.0.{run_num}"
               }}
               signingConfigs {{
                   maybeCreate("release").apply {{
@@ -572,7 +611,7 @@ jobs:
                   "ACCESS_NETWORK_STATE","ACCESS_WIFI_STATE","BLUETOOTH",
                   "BLUETOOTH_CONNECT","WAKE_LOCK","POST_NOTIFICATIONS",
                   "VIBRATE","USE_FULL_SCREEN_INTENT","INSTALL_SHORTCUT",
-                  "RECEIVE_BOOT_COMPLETED"
+                  "RECEIVE_BOOT_COMPLETED","REQUEST_INSTALL_PACKAGES"
               ])
               perms += '    <queries><intent><action android:name="android.intent.action.VIEW"/><data android:scheme="https"/></intent></queries>\n    <application android:extractNativeLibs="true"'
               m_xml = m_xml.replace("<application", perms, 1)
@@ -735,4 +774,4 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release create "v9.0.${{ github.run_number }}-${{ github.run_attempt }}" "build/app/outputs/flutter-apk/app-release.apk#Universal-Messenger.apk" --target "${{ github.ref_name }}" --title "Universal Messenger v9.0.${{ github.run_number }}" --notes "Universal Messenger v9.0 with Custom MP3 Call Ringtone & Message Notification Sound" || true
+          gh release create "v10.0.${{ github.run_number }}-${{ github.run_attempt }}" "build/app/outputs/flutter-apk/app-release.apk#Universal-Messenger.apk" --target "${{ github.ref_name }}" --title "Universal Messenger v10.0.${{ github.run_number }}" --notes "Universal Messenger v10.0 with Direct In-App Update Installer" || true
