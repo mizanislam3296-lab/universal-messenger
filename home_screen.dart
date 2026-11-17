@@ -1,14 +1,142 @@
+import 'dart:async';
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:url_launcher/url_launcher.dart';
 import 'package:universal_messenger/screens/search_user_screen.dart';
 import 'package:universal_messenger/screens/chat_screen.dart';
 import 'package:universal_messenger/screens/call_screen.dart';
 import 'package:universal_messenger/screens/settings_screen.dart';
 
-class HomeScreen extends StatelessWidget {
+class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
+
+  static const int currentAppVersionCode = 7;
+  static const String currentAppVersionName = '7.0.0';
+  static const String defaultReleaseUrl =
+      'https://github.com/mizanislam3296-lab/universal-messenger/releases/latest';
+
+  @override
+  State<HomeScreen> createState() => _HomeScreenState();
+}
+
+class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
+  StreamSubscription<DocumentSnapshot>? _updateSub;
+  bool _isUpdateDialogShowing = false;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    AppSettingsController.load();
+    NotificationAndPresenceService.start();
+    _listenForAppUpdates();
+  }
+
+  @override
+  void dispose() {
+    _updateSub?.cancel();
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      NotificationAndPresenceService.setOnlineStatus(true);
+    } else if (state == AppLifecycleState.paused ||
+        state == AppLifecycleState.inactive ||
+        state == AppLifecycleState.detached ||
+        state == AppLifecycleState.hidden) {
+      NotificationAndPresenceService.setOnlineStatus(false);
+    }
+  }
+
+  void _listenForAppUpdates() {
+    final docRef =
+        FirebaseFirestore.instance.collection('app_config').doc('version');
+
+    _updateSub = docRef.snapshots().listen((snap) async {
+      if (!snap.exists) {
+        try {
+          await docRef.set({
+            'latestVersionCode': HomeScreen.currentAppVersionCode,
+            'latestVersionName': HomeScreen.currentAppVersionName,
+            'apkUrl': HomeScreen.defaultReleaseUrl,
+            'forceUpdate': false,
+            'releaseNotes': 'নতুন ফিচার ও পারফরম্যান্স উন্নতি যুক্ত করা হয়েছে।',
+          }, SetOptions(merge: true));
+        } catch (_) {}
+        return;
+      }
+
+      final data = snap.data();
+      if (data == null || !mounted || _isUpdateDialogShowing) return;
+
+      final latestCode = (data['latestVersionCode'] as num?)?.toInt() ??
+          HomeScreen.currentAppVersionCode;
+      if (latestCode <= HomeScreen.currentAppVersionCode) return;
+
+      final latestName =
+          (data['latestVersionName'] ?? 'New Version').toString();
+      final apkUrl =
+          (data['apkUrl'] ?? HomeScreen.defaultReleaseUrl).toString();
+      final forceUpdate = data['forceUpdate'] == true;
+      final notes = (data['releaseNotes'] ??
+              'অ্যাপটির নতুন ভার্সন এসেছে। সব ফিচার ঠিকভাবে ব্যবহার করতে এখনই আপডেট করুন।')
+          .toString();
+
+      _isUpdateDialogShowing = true;
+      await showDialog<void>(
+        context: context,
+        barrierDismissible: !forceUpdate,
+        builder: (ctx) => PopScope(
+          canPop: !forceUpdate,
+          child: AlertDialog(
+            shape:
+                RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
+            title: Row(
+              children: [
+                const Icon(Icons.system_update, color: Color(0xFF008069)),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Text(
+                    'নতুন আপডেট ($latestName)',
+                    style: const TextStyle(
+                        fontSize: 18, fontWeight: FontWeight.bold),
+                  ),
+                ),
+              ],
+            ),
+            content: Text(notes),
+            actions: [
+              if (!forceUpdate)
+                TextButton(
+                  onPressed: () => Navigator.pop(ctx),
+                  child: const Text('পরে'),
+                ),
+              ElevatedButton.icon(
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: const Color(0xFF008069),
+                  foregroundColor: Colors.white,
+                ),
+                icon: const Icon(Icons.download),
+                label: const Text('Update Now'),
+                onPressed: () async {
+                  final uri = Uri.tryParse(apkUrl);
+                  if (uri != null) {
+                    await launchUrl(uri, mode: LaunchMode.externalApplication);
+                  }
+                },
+              ),
+            ],
+          ),
+        ),
+      );
+      _isUpdateDialogShowing = false;
+    });
+  }
 
   String _formatDate(Timestamp? timestamp) {
     if (timestamp == null) return '';
@@ -139,18 +267,7 @@ class HomeScreen extends StatelessWidget {
 
             return Scaffold(
               appBar: AppBar(
-                title: Row(
-                  children: [
-                    AppSettingsController.buildAppIcon(radius: 16),
-                    const SizedBox(width: 10),
-                    const Expanded(
-                      child: Text(
-                        'Universal Messenger',
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                    ),
-                  ],
-                ),
+                title: const Text('Universal Messenger'),
                 backgroundColor: themeColor,
                 foregroundColor: Colors.white,
                 actions: [
@@ -284,36 +401,89 @@ class HomeScreen extends StatelessWidget {
                               final timeText = _formatDate(
                                   data['lastMessageTime'] as Timestamp?);
 
+                              final unreadMap = (data['unreadCount']
+                                      as Map<String, dynamic>?) ??
+                                  {};
+                              final unreadCount =
+                                  (unreadMap[currentUser.uid] as num?)
+                                          ?.toInt() ??
+                                      0;
+                              final hasUnread = unreadCount > 0;
+
                               return ListTile(
-                                leading: CircleAvatar(
-                                  radius: 24,
-                                  backgroundColor: themeColor,
-                                  child: Text(
-                                    name.isNotEmpty
-                                        ? name[0].toUpperCase()
-                                        : 'U',
-                                    style: const TextStyle(
-                                      color: Colors.white,
-                                      fontSize: 18,
+                                leading: NotificationAndPresenceService
+                                    .buildUserAvatarWithStatus(
+                                  userId: otherId,
+                                  dotSize: 14,
+                                  showOfflineTime: true,
+                                  avatar: CircleAvatar(
+                                    radius: 24,
+                                    backgroundColor: themeColor,
+                                    child: Text(
+                                      name.isNotEmpty
+                                          ? name[0].toUpperCase()
+                                          : 'U',
+                                      style: const TextStyle(
+                                        color: Colors.white,
+                                        fontSize: 18,
+                                      ),
                                     ),
                                   ),
                                 ),
                                 title: Text(
                                   name,
                                   style: const TextStyle(
-                                      fontWeight: FontWeight.bold),
+                                    fontWeight: FontWeight.bold,
+                                    fontSize: 16,
+                                  ),
                                 ),
                                 subtitle: Text(
-                                  lastMsg,
+                                  hasUnread
+                                      ? (unreadCount == 1
+                                          ? '1 new message'
+                                          : '$unreadCount new messages')
+                                      : lastMsg,
                                   maxLines: 1,
                                   overflow: TextOverflow.ellipsis,
-                                ),
-                                trailing: Text(
-                                  timeText,
                                   style: TextStyle(
-                                    fontSize: 12,
-                                    color: Colors.grey.shade600,
+                                    fontWeight: hasUnread
+                                        ? FontWeight.bold
+                                        : FontWeight.normal,
+                                    color: hasUnread
+                                        ? (isDark
+                                            ? Colors.white
+                                            : Colors.black87)
+                                        : Colors.grey.shade600,
                                   ),
+                                ),
+                                trailing: Column(
+                                  mainAxisAlignment: MainAxisAlignment.center,
+                                  crossAxisAlignment: CrossAxisAlignment.end,
+                                  children: [
+                                    Text(
+                                      timeText,
+                                      style: TextStyle(
+                                        fontSize: 12,
+                                        fontWeight: hasUnread
+                                            ? FontWeight.bold
+                                            : FontWeight.normal,
+                                        color: hasUnread
+                                            ? const Color(0xFF1A73E8)
+                                            : Colors.grey.shade600,
+                                      ),
+                                    ),
+                                    if (hasUnread) ...[
+                                      const SizedBox(height: 6),
+                                      Container(
+                                        width: 11,
+                                        height: 11,
+                                        decoration: const BoxDecoration(
+                                          color: Color(0xFF1A73E8),
+                                          shape: BoxShape.circle,
+                                        ),
+                                      ),
+                                    ],
+                                  ],
                                 ),
                                 onTap: () {
                                   Navigator.push(
