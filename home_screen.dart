@@ -14,8 +14,8 @@ import 'package:universal_messenger/screens/settings_screen.dart';
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
 
-  static const int currentAppVersionCode = 11;
-  static const String currentAppVersionName = '11.0.0';
+  static const int currentAppVersionCode = 12;
+  static const String currentAppVersionName = '12.0.0';
 
   static const String defaultDirectApkUrl =
       'https://github.com/mizanislam3296-lab/universal-messenger/releases/latest/download/Universal-Messenger.apk';
