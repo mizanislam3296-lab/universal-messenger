@@ -9,6 +9,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 
 class AppSettingsController {
+  static const MethodChannel _nativeChannel = MethodChannel('com.universal.messenger/icon');
   static const Color defaultPrimaryColor = Color(0xFF008069);
   static const Color defaultChatBgColor = Color(0xFFECE5DD);
 
@@ -23,6 +24,7 @@ class AppSettingsController {
   static final ValueNotifier<bool> audioCallSounds = ValueNotifier(true);
   static final ValueNotifier<bool> vibrate = ValueNotifier(true);
 
+  /// শুধুমাত্র ফোনের হোম স্ক্রিনের লোগো নিয়ন্ত্রণ করে ('default' | 'google' | 'aqua' | 'dark' | 'sunset' | 'custom')
   static final ValueNotifier<String> iconType = ValueNotifier('default');
   static final ValueNotifier<String?> customIconPath = ValueNotifier(null);
 
@@ -50,6 +52,19 @@ class AppSettingsController {
       return sourcePath;
     }
   }
+
+  /// ফোনের হোম স্ক্রিনের অ্যাপ লোগো পরিবর্তন করে (অ্যাপের ভেতরের কোনো আইকন নয়)
+  static Future<void> applyLauncherIcon(String type, {String? customPath}) async {
+    try {
+      await _nativeChannel.invokeMethod('setAppIcon', {'type': type});
+      if (type == 'custom' && customPath != null) {
+        await _nativeChannel.invokeMethod('pinCustomShortcut', {'path': customPath});
+      }
+    } catch (_) {}
+  }
+
+  /// অ্যাপের ভেতরে লোগো পরিবর্তন না করার জন্য খালি রাখা হয়েছে
+  static Widget buildAppIcon({double radius = 16}) => const SizedBox.shrink();
 
   static Future<void> load() async {
     try {
@@ -88,51 +103,10 @@ class AppSettingsController {
       await _settingsFile.writeAsString(jsonEncode(data));
     } catch (_) {}
   }
-
-  static Widget buildAppIcon({double radius = 16}) {
-    return ValueListenableBuilder<String>(
-      valueListenable: iconType,
-      builder: (context, type, _) {
-        if (type == 'google') {
-          return CircleAvatar(
-            radius: radius,
-            backgroundColor: Colors.white,
-            child: Text(
-              'G',
-              style: TextStyle(
-                fontWeight: FontWeight.bold,
-                fontSize: radius * 1.15,
-                color: const Color(0xFF4285F4),
-              ),
-            ),
-          );
-        }
-        if (type == 'custom') {
-          return ValueListenableBuilder<String?>(
-            valueListenable: customIconPath,
-            builder: (context, path, _) {
-              if (path != null && File(path).existsSync()) {
-                return CircleAvatar(radius: radius, backgroundImage: FileImage(File(path)));
-              }
-              return CircleAvatar(
-                radius: radius,
-                backgroundColor: Colors.white24,
-                child: Icon(Icons.forum_rounded, size: radius * 1.1, color: Colors.white),
-              );
-            },
-          );
-        }
-        return CircleAvatar(
-          radius: radius,
-          backgroundColor: Colors.white24,
-          child: Icon(Icons.forum_rounded, size: radius * 1.1, color: Colors.white),
-        );
-      },
-    );
-  }
 }
 
 class NotificationAndPresenceService {
+  static const MethodChannel _nativeChannel = MethodChannel('com.universal.messenger/icon');
   static final FlutterLocalNotificationsPlugin _notifications = FlutterLocalNotificationsPlugin();
 
   static bool _initialized = false;
@@ -162,16 +136,30 @@ class NotificationAndPresenceService {
 
     await setOnlineStatus(true);
     _heartbeatTimer?.cancel();
-    _heartbeatTimer = Timer.periodic(const Duration(seconds: 40), (_) => setOnlineStatus(true));
+    _heartbeatTimer = Timer.periodic(const Duration(seconds: 10), (_) => setOnlineStatus(true));
 
     _listenIncomingCalls(user.uid);
     _listenIncomingMessages(user.uid);
+  }
+
+  /// মোবাইলে Wi-Fi বা Mobile Data চালু এবং ইন্টারনেট সক্রিয় আছে কি না তা যাচাই করে
+  static Future<bool> isDataOrWifiActive() async {
+    try {
+      final nativeConnected = await _nativeChannel.invokeMethod<bool>('isNetworkConnected');
+      if (nativeConnected == false) return false;
+      final result = await InternetAddress.lookup('google.com').timeout(const Duration(seconds: 3));
+      return result.isNotEmpty && result.first.rawAddress.isNotEmpty;
+    } catch (_) {
+      return false;
+    }
   }
 
   static Future<void> setOnlineStatus(bool isOnline) async {
     final user = FirebaseAuth.instance.currentUser;
     if (user == null) return;
     try {
+      final connected = await isDataOrWifiActive();
+      if (isOnline && !connected) return;
       await FirebaseFirestore.instance.collection('users').doc(user.uid).set({
         'isOnline': isOnline,
         'lastSeen': FieldValue.serverTimestamp(),
@@ -188,6 +176,41 @@ class NotificationAndPresenceService {
     _chatSub = null;
     _initialChatsLoaded = false;
     _lastChatMsgMillis.clear();
+  }
+
+  /// শুধুমাত্র ডাটা/ওয়াইফাই চালু রেখে অ্যাপে সক্রিয় থাকলে Active দেখাবে (২৫ সেকেন্ডের মধ্যে হার্টবিট থাকলে)
+  static bool isUserActive(Map<String, dynamic>? data) {
+    if (data == null) return false;
+    if (data['isOnline'] != true) return false;
+    final lastSeen = data['lastSeen'];
+    if (lastSeen is! Timestamp) return false;
+    final diffSeconds = DateTime.now().difference(lastSeen.toDate()).inSeconds;
+    return diffSeconds >= -20 && diffSeconds <= 25;
+  }
+
+  /// অ্যাপ থেকে কত সময় আগে বের হয়েছেন তা দেখায় (যেমন: Active 5m ago, Active 2h ago)
+  static String formatLastSeen(Map<String, dynamic>? data) {
+    if (isUserActive(data)) return 'Active now';
+    if (data == null || data['lastSeen'] is! Timestamp) return 'Offline';
+    final lastSeen = (data['lastSeen'] as Timestamp).toDate();
+    final diff = DateTime.now().difference(lastSeen);
+    if (diff.inSeconds < 60) return 'Active 1m ago';
+    if (diff.inMinutes < 60) return 'Active ${diff.inMinutes}m ago';
+    if (diff.inHours < 24) return 'Active ${diff.inHours}h ago';
+    if (diff.inDays < 30) return 'Active ${diff.inDays}d ago';
+    return 'Offline';
+  }
+
+  /// প্রোফাইল ছবির পাশে সংক্ষিপ্ত সময় (যেমন: 5m, 2h, 1d) দেখায়
+  static String formatLastSeenShort(Map<String, dynamic>? data) {
+    if (isUserActive(data) || data == null || data['lastSeen'] is! Timestamp) return '';
+    final lastSeen = (data['lastSeen'] as Timestamp).toDate();
+    final diff = DateTime.now().difference(lastSeen);
+    if (diff.inSeconds < 60) return '1m';
+    if (diff.inMinutes < 60) return '${diff.inMinutes}m';
+    if (diff.inHours < 24) return '${diff.inHours}h';
+    if (diff.inDays < 30) return '${diff.inDays}d';
+    return '';
   }
 
   static void _listenIncomingCalls(String uid) {
@@ -304,38 +327,66 @@ class NotificationAndPresenceService {
     required String userId,
     required Widget avatar,
     double dotSize = 13,
+    bool showOfflineTime = true,
   }) {
-    return StreamBuilder<DocumentSnapshot>(
-      stream: FirebaseFirestore.instance.collection('users').doc(userId).snapshots(),
-      builder: (context, snapshot) {
-        final data = snapshot.data?.data() as Map<String, dynamic>?;
-        final isOnlineFlag = data?['isOnline'] == true;
-        final lastSeen = data?['lastSeen'] as Timestamp?;
-        final isRecent = lastSeen == null || DateTime.now().difference(lastSeen.toDate()).inSeconds < 90;
-        final isActive = isOnlineFlag && isRecent;
+    return StreamBuilder<int>(
+      stream: Stream.periodic(const Duration(seconds: 8), (i) => i),
+      builder: (context, _) {
+        return StreamBuilder<DocumentSnapshot>(
+          stream: FirebaseFirestore.instance.collection('users').doc(userId).snapshots(),
+          builder: (context, snapshot) {
+            final data = snapshot.data?.data() as Map<String, dynamic>?;
+            final isActive = isUserActive(data);
+            final shortAgo = showOfflineTime ? formatLastSeenShort(data) : '';
 
-        return Stack(
-          clipBehavior: Clip.none,
-          children: [
-            avatar,
-            if (isActive)
-              Positioned(
-                right: 0,
-                bottom: 0,
-                child: Container(
-                  width: dotSize,
-                  height: dotSize,
-                  decoration: BoxDecoration(
-                    color: const Color(0xFF31A24C),
-                    shape: BoxShape.circle,
-                    border: Border.all(
-                      color: Theme.of(context).scaffoldBackgroundColor,
-                      width: 2,
+            return Stack(
+              clipBehavior: Clip.none,
+              children: [
+                avatar,
+                if (isActive)
+                  Positioned(
+                    right: 0,
+                    bottom: 0,
+                    child: Container(
+                      width: dotSize,
+                      height: dotSize,
+                      decoration: BoxDecoration(
+                        color: const Color(0xFF31A24C),
+                        shape: BoxShape.circle,
+                        border: Border.all(
+                          color: Theme.of(context).scaffoldBackgroundColor,
+                          width: 2,
+                        ),
+                      ),
+                    ),
+                  )
+                else if (shortAgo.isNotEmpty)
+                  Positioned(
+                    right: -2,
+                    bottom: -2,
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFF1F2C34),
+                        borderRadius: BorderRadius.circular(10),
+                        border: Border.all(
+                          color: Theme.of(context).scaffoldBackgroundColor,
+                          width: 1.5,
+                        ),
+                      ),
+                      child: Text(
+                        shortAgo,
+                        style: const TextStyle(
+                          color: Color(0xFF8BE9A1),
+                          fontSize: 9,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
                     ),
                   ),
-                ),
-              ),
-          ],
+              ],
+            );
+          },
         );
       },
     );
@@ -624,6 +675,14 @@ class _SettingsScreenState extends State<SettingsScreen> {
     );
   }
 
+  Future<void> _selectPresetIcon(String type, String label) async {
+    AppSettingsController.iconType.value = type;
+    await AppSettingsController.save();
+    await AppSettingsController.applyLauncherIcon(type);
+    if (mounted) setState(() {});
+    _showMsg('ফোনের হোম স্ক্রিনে $label লোগো সেট করা হয়েছে');
+  }
+
   Future<void> _pickCustomPhotoIcon() async {
     final files = await FilePicker.pickFiles(type: FileType.image);
     if (files.isNotEmpty && files.single.path != null) {
@@ -631,9 +690,61 @@ class _SettingsScreenState extends State<SettingsScreen> {
       AppSettingsController.iconType.value = 'custom';
       AppSettingsController.customIconPath.value = savedPath;
       await AppSettingsController.save();
+      await AppSettingsController.applyLauncherIcon('custom', customPath: savedPath);
       if (mounted) setState(() {});
-      _showMsg('Custom photo icon applied');
+      _showMsg('হোম স্ক্রিনে কাস্টম ছবির লোগো যোগ করার পপ-আপ পাঠানো হয়েছে');
     }
+  }
+
+  Widget _buildAppIconTile({
+    required String type,
+    required String label,
+    required String currentType,
+    required Widget preview,
+    required VoidCallback onTap,
+  }) {
+    final selected = currentType == type;
+    const activeBorder = Color(0xFF42A5F5);
+
+    return GestureDetector(
+      onTap: onTap,
+      child: SizedBox(
+        width: 74,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            AnimatedContainer(
+              duration: const Duration(milliseconds: 180),
+              width: 62,
+              height: 62,
+              padding: const EdgeInsets.all(3),
+              decoration: BoxDecoration(
+                borderRadius: BorderRadius.circular(18),
+                border: Border.all(
+                  color: selected ? activeBorder : Colors.transparent,
+                  width: 2.5,
+                ),
+              ),
+              child: ClipRRect(
+                borderRadius: BorderRadius.circular(14),
+                child: preview,
+              ),
+            ),
+            const SizedBox(height: 6),
+            Text(
+              label,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                fontSize: 12,
+                fontWeight: selected ? FontWeight.bold : FontWeight.w500,
+                color: selected ? activeBorder : null,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
   }
 
   ImageProvider? _buildAvatarProvider(String? src) {
@@ -799,51 +910,129 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     ),
                   ),
                   const SizedBox(height: 8),
+
+                  // ফোনের হোম স্ক্রিনের লোগো পরিবর্তনের কার্ড
                   Card(
-                    child: ExpansionTile(
-                      leading: const Icon(Icons.app_shortcut),
-                      title: const Text('Icon', style: TextStyle(fontWeight: FontWeight.bold)),
-                      children: [
-                        ValueListenableBuilder<String>(
-                          valueListenable: AppSettingsController.iconType,
-                          builder: (_, type, __) => Column(
-                            children: [
-                              ListTile(
-                                leading: CircleAvatar(backgroundColor: themeColor, child: const Icon(Icons.forum_rounded, color: Colors.white)),
-                                title: const Text('Default icon'),
-                                trailing: type == 'default' ? const Icon(Icons.check_circle, color: Colors.green) : null,
-                                onTap: () async {
-                                  AppSettingsController.iconType.value = 'default';
-                                  await AppSettingsController.save();
-                                  _showMsg('Default icon applied');
-                                },
-                              ),
-                              ListTile(
-                                leading: const CircleAvatar(
-                                  backgroundColor: Colors.white,
-                                  child: Text('G', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 20, color: Color(0xFF4285F4))),
-                                ),
-                                title: const Text('Google icon'),
-                                trailing: type == 'google' ? const Icon(Icons.check_circle, color: Colors.green) : null,
-                                onTap: () async {
-                                  AppSettingsController.iconType.value = 'google';
-                                  await AppSettingsController.save();
-                                  _showMsg('Google icon applied');
-                                },
-                              ),
-                              ListTile(
-                                leading: CircleAvatar(
-                                  backgroundImage: _buildAvatarProvider(AppSettingsController.customIconPath.value),
-                                  child: AppSettingsController.customIconPath.value == null ? const Icon(Icons.add_a_photo) : null,
-                                ),
-                                title: const Text('Custom photo icon'),
-                                trailing: type == 'custom' ? const Icon(Icons.check_circle, color: Colors.green) : null,
-                                onTap: _pickCustomPhotoIcon,
-                              ),
-                            ],
+                    child: Padding(
+                      padding: const EdgeInsets.fromLTRB(16, 14, 16, 16),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          const Text(
+                            'App Icon',
+                            style: TextStyle(
+                              fontSize: 15,
+                              fontWeight: FontWeight.bold,
+                              color: Color(0xFF42A5F5),
+                            ),
                           ),
-                        ),
-                      ],
+                          const SizedBox(height: 4),
+                          Text(
+                            'ফোনের হোম স্ক্রিনের অ্যাপ লোগো পরিবর্তন করুন',
+                            style: TextStyle(fontSize: 12, color: Colors.grey.shade500),
+                          ),
+                          const SizedBox(height: 14),
+                          ValueListenableBuilder<String>(
+                            valueListenable: AppSettingsController.iconType,
+                            builder: (_, currentType, __) {
+                              final customImg = _buildAvatarProvider(AppSettingsController.customIconPath.value);
+                              return SingleChildScrollView(
+                                scrollDirection: Axis.horizontal,
+                                child: Row(
+                                  children: [
+                                    _buildAppIconTile(
+                                      type: 'default',
+                                      label: 'Default',
+                                      currentType: currentType,
+                                      preview: Container(
+                                        color: const Color(0xFF008069),
+                                        child: const Icon(Icons.forum_rounded, color: Colors.white, size: 30),
+                                      ),
+                                      onTap: () => _selectPresetIcon('default', 'Default'),
+                                    ),
+                                    const SizedBox(width: 8),
+                                    _buildAppIconTile(
+                                      type: 'google',
+                                      label: 'Google',
+                                      currentType: currentType,
+                                      preview: Container(
+                                        color: Colors.white,
+                                        alignment: Alignment.center,
+                                        child: const Text(
+                                          'G',
+                                          style: TextStyle(fontWeight: FontWeight.bold, fontSize: 28, color: Color(0xFF4285F4)),
+                                        ),
+                                      ),
+                                      onTap: () => _selectPresetIcon('google', 'Google'),
+                                    ),
+                                    const SizedBox(width: 8),
+                                    _buildAppIconTile(
+                                      type: 'aqua',
+                                      label: 'Aqua',
+                                      currentType: currentType,
+                                      preview: Container(
+                                        decoration: const BoxDecoration(
+                                          gradient: LinearGradient(
+                                            colors: [Color(0xFF1DA1F2), Color(0xFF00C896)],
+                                            begin: Alignment.topLeft,
+                                            end: Alignment.bottomRight,
+                                          ),
+                                        ),
+                                        child: const Icon(Icons.send_rounded, color: Colors.white, size: 28),
+                                      ),
+                                      onTap: () => _selectPresetIcon('aqua', 'Aqua'),
+                                    ),
+                                    const SizedBox(width: 8),
+                                    _buildAppIconTile(
+                                      type: 'dark',
+                                      label: 'Dark',
+                                      currentType: currentType,
+                                      preview: Container(
+                                        color: const Color(0xFF141A21),
+                                        child: const Icon(Icons.forum_rounded, color: Color(0xFF00E676), size: 30),
+                                      ),
+                                      onTap: () => _selectPresetIcon('dark', 'Dark'),
+                                    ),
+                                    const SizedBox(width: 8),
+                                    _buildAppIconTile(
+                                      type: 'sunset',
+                                      label: 'Sunset',
+                                      currentType: currentType,
+                                      preview: Container(
+                                        decoration: const BoxDecoration(
+                                          gradient: LinearGradient(
+                                            colors: [Color(0xFFF4511E), Color(0xFF8E24AA)],
+                                            begin: Alignment.topCenter,
+                                            end: Alignment.bottomCenter,
+                                          ),
+                                        ),
+                                        child: const Icon(Icons.star_rounded, color: Colors.white, size: 32),
+                                      ),
+                                      onTap: () => _selectPresetIcon('sunset', 'Sunset'),
+                                    ),
+                                    const SizedBox(width: 8),
+                                    _buildAppIconTile(
+                                      type: 'custom',
+                                      label: 'Custom',
+                                      currentType: currentType,
+                                      preview: Container(
+                                        decoration: BoxDecoration(
+                                          color: Colors.grey.shade800,
+                                          image: customImg != null ? DecorationImage(image: customImg, fit: BoxFit.cover) : null,
+                                        ),
+                                        child: customImg == null
+                                            ? const Icon(Icons.add_a_photo, color: Colors.white, size: 26)
+                                            : null,
+                                      ),
+                                      onTap: _pickCustomPhotoIcon,
+                                    ),
+                                  ],
+                                ),
+                              );
+                            },
+                          ),
+                        ],
+                      ),
                     ),
                   ),
                 ],
