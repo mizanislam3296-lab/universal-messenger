@@ -56,6 +56,7 @@ jobs:
               "call": "lib_clean/screens/call_screen.dart",
               "setting": "lib_clean/screens/settings_screen.dart",
           }
+          candidates = {}
           for root, _, files in os.walk(".", topdown=False):
               if ".git" in root or "lib_clean" in root:
                   continue
@@ -64,12 +65,21 @@ jobs:
                   if norm.endswith((".yml", ".yaml", ".json", ".md", ".py")):
                       continue
                   src = os.path.join(root, f)
+                  target = None
                   if "main" in norm and ("dart" in norm or root.strip().endswith("lib")):
-                      shutil.copy2(src, "lib_clean/main.dart")
+                      target = "lib_clean/main.dart"
                   else:
                       for k, dst in mapping.items():
                           if k in norm:
-                              shutil.copy2(src, dst)
+                              target = dst
+                              break
+                  if target:
+                      score = (1 if "lib" in root.replace("\\", "/").split("/") else 0, os.path.getmtime(src))
+                      if target not in candidates or score > candidates[target][0]:
+                          candidates[target] = (score, src)
+          for dst, (_, src) in candidates.items():
+              shutil.copy2(src, dst)
+              print("SELECTED:", src, "->", dst)
           for req in ["lib_clean/main.dart"] + list(mapping.values()):
               if not os.path.exists(req):
                   raise SystemExit("MISSING FILE: " + req)
@@ -114,20 +124,144 @@ jobs:
           import android.content.pm.ShortcutManager
           import android.graphics.BitmapFactory
           import android.graphics.drawable.Icon
+          import android.media.AudioAttributes
+          import android.media.MediaPlayer
+          import android.media.Ringtone
+          import android.media.RingtoneManager
           import android.net.ConnectivityManager
           import android.net.NetworkCapabilities
+          import android.net.Uri
           import android.os.Build
+          import androidx.core.content.FileProvider
           import io.flutter.embedding.android.FlutterActivity
           import io.flutter.embedding.engine.FlutterEngine
           import io.flutter.plugin.common.MethodChannel
+          import java.io.File
 
           class MainActivity : FlutterActivity() {
               private val CHANNEL = "com.universal.messenger/icon"
+              private var callMediaPlayer: MediaPlayer? = null
+              private var defaultCallRingtone: Ringtone? = null
+              private var msgMediaPlayer: MediaPlayer? = null
+
+              private fun stopAllCallAudio() {
+                  try {
+                      callMediaPlayer?.stop()
+                      callMediaPlayer?.release()
+                  } catch (_: Exception) {}
+                  callMediaPlayer = null
+                  try {
+                      defaultCallRingtone?.stop()
+                  } catch (_: Exception) {}
+                  defaultCallRingtone = null
+              }
+
+              override fun onDestroy() {
+                  stopAllCallAudio()
+                  try {
+                      msgMediaPlayer?.stop()
+                      msgMediaPlayer?.release()
+                  } catch (_: Exception) {}
+                  msgMediaPlayer = null
+                  super.onDestroy()
+              }
 
               override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
                   super.configureFlutterEngine(flutterEngine)
                   MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL).setMethodCallHandler { call, result ->
                       when (call.method) {
+                          "getContentUri" -> {
+                              val path = call.argument<String>("path")
+                              if (path != null && File(path).exists()) {
+                                  try {
+                                      val uri = FileProvider.getUriForFile(
+                                          applicationContext,
+                                          "com.universal.messenger.fileprovider",
+                                          File(path)
+                                      )
+                                      applicationContext.grantUriPermission(
+                                          "com.android.systemui",
+                                          uri,
+                                          Intent.FLAG_GRANT_READ_URI_PERMISSION
+                                      )
+                                      result.success(uri.toString())
+                                  } catch (_: Exception) {
+                                      result.success(null)
+                                  }
+                              } else {
+                                  result.success(null)
+                              }
+                          }
+                          "playRingtone" -> {
+                              val path = call.argument<String>("path")
+                              stopAllCallAudio()
+                              try {
+                                  if (path != null && File(path).exists()) {
+                                      val mp = MediaPlayer()
+                                      mp.setAudioAttributes(
+                                          AudioAttributes.Builder()
+                                              .setUsage(AudioAttributes.USAGE_NOTIFICATION_RINGTONE)
+                                              .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
+                                              .build()
+                                      )
+                                      mp.setDataSource(path)
+                                      mp.isLooping = true
+                                      mp.prepare()
+                                      mp.start()
+                                      callMediaPlayer = mp
+                                  } else {
+                                      val uri: Uri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_RINGTONE)
+                                      val rt = RingtoneManager.getRingtone(applicationContext, uri)
+                                      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                                          rt?.isLooping = true
+                                      }
+                                      rt?.play()
+                                      defaultCallRingtone = rt
+                                  }
+                                  result.success(true)
+                              } catch (_: Exception) {
+                                  result.success(false)
+                              }
+                          }
+                          "stopRingtone" -> {
+                              stopAllCallAudio()
+                              result.success(true)
+                          }
+                          "playMessageSound" -> {
+                              val path = call.argument<String>("path")
+                              try {
+                                  msgMediaPlayer?.stop()
+                                  msgMediaPlayer?.release()
+                              } catch (_: Exception) {}
+                              msgMediaPlayer = null
+                              try {
+                                  if (path != null && File(path).exists()) {
+                                      val mp = MediaPlayer()
+                                      mp.setAudioAttributes(
+                                          AudioAttributes.Builder()
+                                              .setUsage(AudioAttributes.USAGE_NOTIFICATION)
+                                              .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                                              .build()
+                                      )
+                                      mp.setDataSource(path)
+                                      mp.isLooping = false
+                                      mp.setOnCompletionListener { player ->
+                                          try { player.release() } catch (_: Exception) {}
+                                          if (msgMediaPlayer == player) msgMediaPlayer = null
+                                      }
+                                      mp.prepare()
+                                      mp.start()
+                                      msgMediaPlayer = mp
+                                  } else {
+                                      val uri: Uri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION)
+                                      val rt = RingtoneManager.getRingtone(applicationContext, uri)
+                                      rt?.play()
+                                  }
+                                  result.success(true)
+                              } catch (_: Exception) {
+                                  result.success(false)
+                              }
+                          }
                           "isNetworkConnected" -> {
                               try {
                                   val cm = applicationContext.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
@@ -298,6 +432,11 @@ jobs:
               with open(f"{ddir}/ic_launcher_sunset.png", "wb") as f:
                   f.write(make_png(size, size, sunset_px))
 
+          xml_dir = f"{res_dir}/xml"
+          os.makedirs(xml_dir, exist_ok=True)
+          with open(f"{xml_dir}/file_paths.xml", "w", encoding="utf-8") as f:
+              f.write('<?xml version="1.0" encoding="utf-8"?>\n<paths>\n    <files-path name="app_files" path="."/>\n    <cache-path name="app_cache" path="."/>\n</paths>\n')
+
           if os.path.exists("android/gradle.properties"):
               with open("android/gradle.properties", "r") as f:
                   gp = f.read()
@@ -392,7 +531,7 @@ jobs:
                   minSdk = 23
                   targetSdk = 34
                   versionCode = {run_num}
-                  versionName = "7.0.{run_num}"
+                  versionName = "9.0.{run_num}"
               }}
               signingConfigs {{
                   maybeCreate("release").apply {{
@@ -432,7 +571,8 @@ jobs:
                   "INTERNET","CAMERA","RECORD_AUDIO","MODIFY_AUDIO_SETTINGS",
                   "ACCESS_NETWORK_STATE","ACCESS_WIFI_STATE","BLUETOOTH",
                   "BLUETOOTH_CONNECT","WAKE_LOCK","POST_NOTIFICATIONS",
-                  "VIBRATE","USE_FULL_SCREEN_INTENT","INSTALL_SHORTCUT"
+                  "VIBRATE","USE_FULL_SCREEN_INTENT","INSTALL_SHORTCUT",
+                  "RECEIVE_BOOT_COMPLETED"
               ])
               perms += '    <queries><intent><action android:name="android.intent.action.VIEW"/><data android:scheme="https"/></intent></queries>\n    <application android:extractNativeLibs="true"'
               m_xml = m_xml.replace("<application", perms, 1)
@@ -443,6 +583,16 @@ jobs:
                   count=1
               )
               aliases = '''
+                  <provider
+                      android:name="androidx.core.content.FileProvider"
+                      android:authorities="com.universal.messenger.fileprovider"
+                      android:exported="false"
+                      android:grantUriPermissions="true">
+                      <meta-data
+                          android:name="android.support.FILE_PROVIDER_PATHS"
+                          android:resource="@xml/file_paths"/>
+                  </provider>
+                  <meta-data android:name="com.google.firebase.messaging.default_notification_channel_id" android:value="chat_messages_sound_v3"/>
                   <activity-alias android:name=".MainActivityDefault" android:enabled="true" android:exported="true" android:icon="@mipmap/ic_launcher" android:roundIcon="@mipmap/ic_launcher" android:label="Universal Messenger" android:targetActivity=".MainActivity">
                       <intent-filter><action android:name="android.intent.action.MAIN"/><category android:name="android.intent.category.LAUNCHER"/></intent-filter>
                   </activity-alias>
@@ -481,7 +631,6 @@ jobs:
               m_fp = re.search(r'(?m)^  file_picker:\n(?:    [^\n]+\n){1,12}    version:\s*["\']?(\d+)\.', lock_txt)
               if m_fp:
                   fp_ver = int(m_fp.group(1))
-          print("DETECTED file_picker MAJOR VERSION:", fp_ver)
           if 0 < fp_ver < 11:
               for droot, _, dfiles in os.walk("lib"):
                   for df in dfiles:
@@ -497,7 +646,6 @@ jobs:
                           if new_dtxt != dtxt:
                               with open(dp, "w", encoding="utf-8") as f:
                                   f.write(new_dtxt)
-                              print("AUTO-ADAPTED FilePicker API IN:", dp)
 
           proj_dir = os.path.realpath(".")
           flutter_root = os.path.realpath(os.environ["FLUTTER_ROOT"]) if os.environ.get("FLUTTER_ROOT") else ""
@@ -544,7 +692,6 @@ jobs:
                           if new_jtxt != jtxt:
                               with open(path, "w", encoding="utf-8") as f:
                                   f.write(new_jtxt)
-                              print("PATCHED SOURCE:", path)
                           continue
 
                       if not fname.endswith((".gradle", ".gradle.kts")):
@@ -564,7 +711,6 @@ jobs:
                       if text != orig:
                           with open(path, "w", encoding="utf-8") as f:
                               f.write(text)
-                          print("PATCHED:", path)
           PYEOF
           python3 fix_plugins.py && rm -f fix_plugins.py
 
@@ -589,4 +735,4 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release create "v7.0.${{ github.run_number }}-${{ github.run_attempt }}" "build/app/outputs/flutter-apk/app-release.apk#Universal-Messenger.apk" --target "${{ github.ref_name }}" --title "Universal Messenger v7.0.${{ github.run_number }}" --notes "Universal Messenger v7.0 with Home Screen Logo Switcher & Wi-Fi/Data Active Status" || true
+          gh release create "v9.0.${{ github.run_number }}-${{ github.run_attempt }}" "build/app/outputs/flutter-apk/app-release.apk#Universal-Messenger.apk" --target "${{ github.ref_name }}" --title "Universal Messenger v9.0.${{ github.run_number }}" --notes "Universal Messenger v9.0 with Custom MP3 Call Ringtone & Message Notification Sound" || true
