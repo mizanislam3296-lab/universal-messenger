@@ -25,6 +25,11 @@ class AppSettingsController {
   static final ValueNotifier<bool> audioCallSounds = ValueNotifier(true);
   static final ValueNotifier<bool> vibrate = ValueNotifier(true);
 
+  static final ValueNotifier<String?> customCallRingtonePath = ValueNotifier(null);
+  static final ValueNotifier<String?> customCallRingtoneName = ValueNotifier(null);
+  static final ValueNotifier<String?> customMsgSoundPath = ValueNotifier(null);
+  static final ValueNotifier<String?> customMsgSoundName = ValueNotifier(null);
+
   static final ValueNotifier<String> iconType = ValueNotifier('default');
   static final ValueNotifier<String?> customIconPath = ValueNotifier(null);
 
@@ -45,6 +50,19 @@ class AppSettingsController {
       final src = File(sourcePath);
       if (!await src.exists()) return sourcePath;
       final ext = sourcePath.contains('.') ? sourcePath.split('.').last : 'jpg';
+      final dest = File('${_appDir.path}/${prefix}_${DateTime.now().millisecondsSinceEpoch}.$ext');
+      await src.copy(dest.path);
+      return dest.path;
+    } catch (_) {
+      return sourcePath;
+    }
+  }
+
+  static Future<String> savePermanentAudio(String sourcePath, String prefix) async {
+    try {
+      final src = File(sourcePath);
+      if (!await src.exists()) return sourcePath;
+      final ext = sourcePath.contains('.') ? sourcePath.split('.').last : 'mp3';
       final dest = File('${_appDir.path}/${prefix}_${DateTime.now().millisecondsSinceEpoch}.$ext');
       await src.copy(dest.path);
       return dest.path;
@@ -78,6 +96,10 @@ class AppSettingsController {
       videoCallSounds.value = data['videoCallSounds'] ?? true;
       audioCallSounds.value = data['audioCallSounds'] ?? true;
       vibrate.value = data['vibrate'] ?? true;
+      customCallRingtonePath.value = data['customCallRingtonePath'];
+      customCallRingtoneName.value = data['customCallRingtoneName'];
+      customMsgSoundPath.value = data['customMsgSoundPath'];
+      customMsgSoundName.value = data['customMsgSoundName'];
       iconType.value = data['iconType'] ?? 'default';
       customIconPath.value = data['customIconPath'];
     } catch (_) {}
@@ -95,6 +117,10 @@ class AppSettingsController {
         'videoCallSounds': videoCallSounds.value,
         'audioCallSounds': audioCallSounds.value,
         'vibrate': vibrate.value,
+        'customCallRingtonePath': customCallRingtonePath.value,
+        'customCallRingtoneName': customCallRingtoneName.value,
+        'customMsgSoundPath': customMsgSoundPath.value,
+        'customMsgSoundName': customMsgSoundName.value,
         'iconType': iconType.value,
         'customIconPath': customIconPath.value,
       };
@@ -107,8 +133,8 @@ class NotificationAndPresenceService {
   static const MethodChannel _nativeChannel = MethodChannel('com.universal.messenger/icon');
   static final FlutterLocalNotificationsPlugin _notifications = FlutterLocalNotificationsPlugin();
 
-  static const String _callChannelId = 'incoming_calls_ring_v3';
-  static const String _msgChannelId = 'chat_messages_sound_v3';
+  static String _callChannelId = 'incoming_calls_ring_v4';
+  static String _msgChannelId = 'chat_messages_sound_v4';
 
   static bool _initialized = false;
   static bool isAppInForeground = true;
@@ -120,11 +146,96 @@ class NotificationAndPresenceService {
   static StreamSubscription<DocumentSnapshot>? _callSub;
   static StreamSubscription<QuerySnapshot>? _chatSub;
   static Timer? _heartbeatTimer;
-  static Timer? _ringtoneFallbackTimer;
+
+  static Future<void> rebuildNotificationChannels() async {
+    final androidPlugin = _notifications
+        .resolvePlatformSpecificImplementation<AndroidFlutterLocalNotificationsPlugin>();
+    if (androidPlugin == null) return;
+
+    final callPath = AppSettingsController.customCallRingtonePath.value;
+    String callSoundUri = 'content://settings/system/ringtone';
+    if (callPath != null && File(callPath).existsSync()) {
+      try {
+        final contentUri = await _nativeChannel.invokeMethod<String>('getContentUri', {'path': callPath});
+        if (contentUri != null && contentUri.isNotEmpty) {
+          callSoundUri = contentUri;
+        }
+      } catch (_) {}
+    }
+
+    final msgPath = AppSettingsController.customMsgSoundPath.value;
+    String msgSoundUri = 'content://settings/system/notification_sound';
+    if (msgPath != null && File(msgPath).existsSync()) {
+      try {
+        final contentUri = await _nativeChannel.invokeMethod<String>('getContentUri', {'path': msgPath});
+        if (contentUri != null && contentUri.isNotEmpty) {
+          msgSoundUri = contentUri;
+        }
+      } catch (_) {}
+    }
+
+    _callChannelId = 'incoming_calls_ring_${callSoundUri.hashCode.abs()}';
+    _msgChannelId = 'chat_messages_sound_${msgSoundUri.hashCode.abs()}';
+
+    final callChannel = AndroidNotificationChannel(
+      _callChannelId,
+      'Incoming Calls (Ringtone)',
+      description: 'Ringtone & heads-up pop-up for incoming calls',
+      importance: Importance.max,
+      playSound: true,
+      sound: UriAndroidNotificationSound(callSoundUri),
+      audioAttributesUsage: AudioAttributesUsage.notificationRingtone,
+      enableVibration: true,
+      vibrationPattern: Int64List.fromList([0, 1000, 500, 1000]),
+      enableLights: true,
+      showBadge: true,
+    );
+
+    final msgChannel = AndroidNotificationChannel(
+      _msgChannelId,
+      'Chat Messages (Sound)',
+      description: 'Notification sound & pop-up for new messages',
+      importance: Importance.max,
+      playSound: true,
+      sound: UriAndroidNotificationSound(msgSoundUri),
+      audioAttributesUsage: AudioAttributesUsage.notification,
+      enableVibration: true,
+      vibrationPattern: Int64List.fromList([0, 300, 200, 300]),
+      enableLights: true,
+      showBadge: true,
+    );
+
+    await androidPlugin.createNotificationChannel(callChannel);
+    await androidPlugin.createNotificationChannel(msgChannel);
+  }
+
+  static Future<void> playNativeCallRingtone() async {
+    try {
+      await _nativeChannel.invokeMethod('playRingtone', {
+        'path': AppSettingsController.customCallRingtonePath.value,
+      });
+    } catch (_) {}
+  }
+
+  static Future<void> stopNativeCallRingtone() async {
+    try {
+      await _nativeChannel.invokeMethod('stopRingtone');
+    } catch (_) {}
+  }
+
+  static Future<void> playNativeMessageSound() async {
+    try {
+      await _nativeChannel.invokeMethod('playMessageSound', {
+        'path': AppSettingsController.customMsgSoundPath.value,
+      });
+    } catch (_) {}
+  }
 
   static Future<void> start() async {
     final user = FirebaseAuth.instance.currentUser;
     if (user == null) return;
+
+    await AppSettingsController.load();
 
     if (!_initialized) {
       _initialized = true;
@@ -132,41 +243,12 @@ class NotificationAndPresenceService {
       const initSettings = InitializationSettings(android: androidInit);
       await _notifications.initialize(initSettings);
 
-      final callChannel = AndroidNotificationChannel(
-        _callChannelId,
-        'Incoming Calls (Ringtone)',
-        description: 'Ringtone & heads-up pop-up for incoming calls',
-        importance: Importance.max,
-        playSound: true,
-        sound: const UriAndroidNotificationSound('content://settings/system/ringtone'),
-        audioAttributesUsage: AudioAttributesUsage.notificationRingtone,
-        enableVibration: true,
-        vibrationPattern: Int64List.fromList([0, 1000, 500, 1000]),
-        enableLights: true,
-        showBadge: true,
-      );
-
-      final msgChannel = AndroidNotificationChannel(
-        _msgChannelId,
-        'Chat Messages (Sound)',
-        description: 'Notification sound & pop-up for new messages',
-        importance: Importance.max,
-        playSound: true,
-        sound: const UriAndroidNotificationSound('content://settings/system/notification_sound'),
-        audioAttributesUsage: AudioAttributesUsage.notification,
-        enableVibration: true,
-        vibrationPattern: Int64List.fromList([0, 300, 200, 300]),
-        enableLights: true,
-        showBadge: true,
-      );
-
       final androidPlugin = _notifications
           .resolvePlatformSpecificImplementation<AndroidFlutterLocalNotificationsPlugin>();
-      await androidPlugin?.createNotificationChannel(callChannel);
-      await androidPlugin?.createNotificationChannel(msgChannel);
       await androidPlugin?.requestNotificationsPermission();
     }
 
+    await rebuildNotificationChannels();
     await setOnlineStatus(true);
     _heartbeatTimer?.cancel();
     _heartbeatTimer = Timer.periodic(const Duration(seconds: 10), (_) {
@@ -221,8 +303,7 @@ class NotificationAndPresenceService {
   }
 
   static void _stopCallRing() {
-    _ringtoneFallbackTimer?.cancel();
-    _ringtoneFallbackTimer = null;
+    stopNativeCallRingtone();
     if (_lastNotifiedCallId != null) {
       _notifications.cancel(_lastNotifiedCallId.hashCode);
       _lastNotifiedCallId = null;
@@ -293,13 +374,19 @@ class NotificationAndPresenceService {
           : AppSettingsController.audioCallSounds.value;
       final shouldVibrate = AppSettingsController.vibrate.value;
 
-      // অ্যাপের ভেতরে বা বাইরে কল আসলে প্রতি ২ সেকেন্ড পরপর রিং ও ভাইব্রেশন চালু রাখা
-      if (playSound) SystemSound.play(SystemSoundType.alert);
+      if (playSound) {
+        await playNativeCallRingtone();
+      }
       if (shouldVibrate) HapticFeedback.heavyImpact();
-      _ringtoneFallbackTimer = Timer.periodic(const Duration(seconds: 2), (_) {
-        if (playSound) SystemSound.play(SystemSoundType.alert);
-        if (shouldVibrate) HapticFeedback.heavyImpact();
-      });
+
+      final customPath = AppSettingsController.customCallRingtonePath.value;
+      String soundUri = 'content://settings/system/ringtone';
+      if (customPath != null && File(customPath).existsSync()) {
+        try {
+          final cUri = await _nativeChannel.invokeMethod<String>('getContentUri', {'path': customPath});
+          if (cUri != null && cUri.isNotEmpty) soundUri = cUri;
+        } catch (_) {}
+      }
 
       final androidDetails = AndroidNotificationDetails(
         _callChannelId,
@@ -313,7 +400,7 @@ class NotificationAndPresenceService {
         ongoing: true,
         autoCancel: false,
         playSound: playSound,
-        sound: playSound ? const UriAndroidNotificationSound('content://settings/system/ringtone') : null,
+        sound: playSound ? UriAndroidNotificationSound(soundUri) : null,
         audioAttributesUsage: AudioAttributesUsage.notificationRingtone,
         enableVibration: shouldVibrate,
         vibrationPattern: shouldVibrate ? Int64List.fromList([0, 1000, 500, 1000]) : null,
@@ -383,8 +470,19 @@ class NotificationAndPresenceService {
         final playSound = AppSettingsController.chatSounds.value;
         final shouldVibrate = AppSettingsController.vibrate.value;
 
-        if (playSound) SystemSound.play(SystemSoundType.alert);
+        if (playSound) {
+          await playNativeMessageSound();
+        }
         if (shouldVibrate) HapticFeedback.mediumImpact();
+
+        final customPath = AppSettingsController.customMsgSoundPath.value;
+        String soundUri = 'content://settings/system/notification_sound';
+        if (customPath != null && File(customPath).existsSync()) {
+          try {
+            final cUri = await _nativeChannel.invokeMethod<String>('getContentUri', {'path': customPath});
+            if (cUri != null && cUri.isNotEmpty) soundUri = cUri;
+          } catch (_) {}
+        }
 
         final androidDetails = AndroidNotificationDetails(
           _msgChannelId,
@@ -395,7 +493,7 @@ class NotificationAndPresenceService {
           ticker: '$senderName: $lastMsg',
           category: AndroidNotificationCategory.message,
           playSound: playSound,
-          sound: playSound ? const UriAndroidNotificationSound('content://settings/system/notification_sound') : null,
+          sound: playSound ? UriAndroidNotificationSound(soundUri) : null,
           audioAttributesUsage: AudioAttributesUsage.notification,
           enableVibration: shouldVibrate,
           vibrationPattern: shouldVibrate ? Int64List.fromList([0, 300, 200, 300]) : null,
@@ -496,6 +594,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   String _displayName = '';
   String? _photoUrl;
   bool _isBusy = false;
+  Timer? _previewStopTimer;
 
   @override
   void initState() {
@@ -503,6 +602,13 @@ class _SettingsScreenState extends State<SettingsScreen> {
     _displayName = _user?.displayName ?? 'User';
     _photoUrl = _user?.photoURL;
     _loadUserFromFirestore();
+  }
+
+  @override
+  void dispose() {
+    _previewStopTimer?.cancel();
+    NotificationAndPresenceService.stopNativeCallRingtone();
+    super.dispose();
   }
 
   Future<void> _loadUserFromFirestore() async {
@@ -522,6 +628,64 @@ class _SettingsScreenState extends State<SettingsScreen> {
   void _showMsg(String text) {
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(text)));
+  }
+
+  Future<void> _pickCustomCallRingtone() async {
+    final files = await FilePicker.pickFiles(type: FileType.audio);
+    if (files.isEmpty || files.first.path == null) return;
+
+    final picked = files.first;
+    final savedPath = await AppSettingsController.savePermanentAudio(picked.path!, 'call_ringtone');
+    AppSettingsController.customCallRingtonePath.value = savedPath;
+    AppSettingsController.customCallRingtoneName.value = picked.name;
+    await AppSettingsController.save();
+    await NotificationAndPresenceService.rebuildNotificationChannels();
+
+    // ৪ সেকেন্ডের জন্য রিংটোন প্রিভিউ শোনানো
+    _previewStopTimer?.cancel();
+    await NotificationAndPresenceService.playNativeCallRingtone();
+    _previewStopTimer = Timer(const Duration(seconds: 4), () {
+      NotificationAndPresenceService.stopNativeCallRingtone();
+    });
+
+    if (mounted) setState(() {});
+    _showMsg('Call ringtone set: ${picked.name}');
+  }
+
+  Future<void> _resetCallRingtone() async {
+    _previewStopTimer?.cancel();
+    await NotificationAndPresenceService.stopNativeCallRingtone();
+    AppSettingsController.customCallRingtonePath.value = null;
+    AppSettingsController.customCallRingtoneName.value = null;
+    await AppSettingsController.save();
+    await NotificationAndPresenceService.rebuildNotificationChannels();
+    if (mounted) setState(() {});
+    _showMsg('Default call ringtone restored');
+  }
+
+  Future<void> _pickCustomMessageSound() async {
+    final files = await FilePicker.pickFiles(type: FileType.audio);
+    if (files.isEmpty || files.first.path == null) return;
+
+    final picked = files.first;
+    final savedPath = await AppSettingsController.savePermanentAudio(picked.path!, 'msg_sound');
+    AppSettingsController.customMsgSoundPath.value = savedPath;
+    AppSettingsController.customMsgSoundName.value = picked.name;
+    await AppSettingsController.save();
+    await NotificationAndPresenceService.rebuildNotificationChannels();
+    await NotificationAndPresenceService.playNativeMessageSound();
+
+    if (mounted) setState(() {});
+    _showMsg('Message sound set: ${picked.name}');
+  }
+
+  Future<void> _resetMessageSound() async {
+    AppSettingsController.customMsgSoundPath.value = null;
+    AppSettingsController.customMsgSoundName.value = null;
+    await AppSettingsController.save();
+    await NotificationAndPresenceService.rebuildNotificationChannels();
+    if (mounted) setState(() {});
+    _showMsg('Default message sound restored');
   }
 
   Future<void> _changeNameDialog() async {
@@ -952,7 +1116,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                             value: val,
                             onChanged: (v) {
                               AppSettingsController.chatSounds.value = v;
-                              if (v) SystemSound.play(SystemSoundType.alert);
+                              if (v) NotificationAndPresenceService.playNativeMessageSound();
                               AppSettingsController.save();
                             },
                           ),
@@ -965,7 +1129,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
                             value: val,
                             onChanged: (v) {
                               AppSettingsController.videoCallSounds.value = v;
-                              if (v) SystemSound.play(SystemSoundType.alert);
                               AppSettingsController.save();
                             },
                           ),
@@ -978,7 +1141,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
                             value: val,
                             onChanged: (v) {
                               AppSettingsController.audioCallSounds.value = v;
-                              if (v) SystemSound.play(SystemSoundType.alert);
                               AppSettingsController.save();
                             },
                           ),
@@ -994,6 +1156,57 @@ class _SettingsScreenState extends State<SettingsScreen> {
                               if (v) HapticFeedback.vibrate();
                               AppSettingsController.save();
                             },
+                          ),
+                        ),
+                        const Divider(height: 1),
+                        ValueListenableBuilder<String?>(
+                          valueListenable: AppSettingsController.customCallRingtoneName,
+                          builder: (_, ringtoneName, __) => ListTile(
+                            leading: const Icon(Icons.ring_volume, color: Color(0xFF008069)),
+                            title: const Text('Call ringtone (MP3)'),
+                            subtitle: Text(
+                              ringtoneName ?? 'Default system ringtone',
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                            trailing: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                if (ringtoneName != null)
+                                  IconButton(
+                                    icon: const Icon(Icons.restart_alt, color: Colors.orange),
+                                    tooltip: 'Reset to default',
+                                    onPressed: _resetCallRingtone,
+                                  ),
+                                const Icon(Icons.audio_file),
+                              ],
+                            ),
+                            onTap: _pickCustomCallRingtone,
+                          ),
+                        ),
+                        ValueListenableBuilder<String?>(
+                          valueListenable: AppSettingsController.customMsgSoundName,
+                          builder: (_, msgToneName, __) => ListTile(
+                            leading: const Icon(Icons.music_note, color: Color(0xFF1A73E8)),
+                            title: const Text('Message sound (MP3)'),
+                            subtitle: Text(
+                              msgToneName ?? 'Default notification sound',
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                            trailing: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                if (msgToneName != null)
+                                  IconButton(
+                                    icon: const Icon(Icons.restart_alt, color: Colors.orange),
+                                    tooltip: 'Reset to default',
+                                    onPressed: _resetMessageSound,
+                                  ),
+                                const Icon(Icons.audio_file),
+                              ],
+                            ),
+                            onTap: _pickCustomMessageSound,
                           ),
                         ),
                       ],
