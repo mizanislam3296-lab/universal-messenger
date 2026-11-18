@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:zego_uikit_prebuilt_call/zego_uikit_prebuilt_call.dart';
@@ -24,9 +25,33 @@ class CallScreen extends StatefulWidget {
 }
 
 class _CallScreenState extends State<CallScreen> {
+  static const MethodChannel _nativeChannel =
+      MethodChannel('com.universal.messenger/icon');
   bool _allowPop = false;
+  bool _cleanedUp = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _setNativeCallState(true);
+  }
+
+  @override
+  void dispose() {
+    _setNativeCallState(false);
+    super.dispose();
+  }
+
+  Future<void> _setNativeCallState(bool active) async {
+    try {
+      await _nativeChannel.invokeMethod('setCallActive', {'active': active});
+    } catch (_) {}
+  }
 
   void _cleanupCallStatus() {
+    if (_cleanedUp) return;
+    _cleanedUp = true;
+    _setNativeCallState(false);
     if (widget.receiverIdForCleanup != null) {
       FirebaseFirestore.instance
           .collection('calls')
@@ -55,11 +80,41 @@ class _CallScreenState extends State<CallScreen> {
         ? ZegoUIKitPrebuiltCallConfig.oneOnOneVideoCall()
         : ZegoUIKitPrebuiltCallConfig.oneOnOneVoiceCall();
 
+    config.turnOnCameraWhenJoining = widget.isVideoCall;
+    config.turnOnMicrophoneWhenJoining = true;
+    config.useSpeakerWhenJoining = widget.isVideoCall;
+
     config.topMenuBar.isVisible = true;
+    config.topMenuBar.hideAutomatically = false;
+    config.topMenuBar.hideByClick = false;
     config.topMenuBar.buttons = [
       ZegoCallMenuBarButtonName.minimizingButton,
       ZegoCallMenuBarButtonName.showMemberListButton,
     ];
+
+    config.bottomMenuBar.isVisible = true;
+    config.bottomMenuBar.hideAutomatically = false;
+    config.bottomMenuBar.hideByClick = false;
+    config.bottomMenuBar.maxCount = 5;
+    config.bottomMenuBar.buttons = widget.isVideoCall
+        ? [
+            ZegoCallMenuBarButtonName.toggleCameraButton,
+            ZegoCallMenuBarButtonName.switchCameraButton,
+            ZegoCallMenuBarButtonName.hangUpButton,
+            ZegoCallMenuBarButtonName.toggleMicrophoneButton,
+            ZegoCallMenuBarButtonName.toggleScreenSharingButton,
+          ]
+        : [
+            ZegoCallMenuBarButtonName.toggleMicrophoneButton,
+            ZegoCallMenuBarButtonName.switchAudioOutputButton,
+            ZegoCallMenuBarButtonName.hangUpButton,
+            ZegoCallMenuBarButtonName.toggleScreenSharingButton,
+          ];
+
+    config.layout = ZegoLayout.pictureInPicture(
+      isSmallViewDraggable: true,
+      switchLargeOrSmallViewByClick: true,
+    );
 
     config.pip.enableWhenBackground = true;
 
@@ -70,21 +125,23 @@ class _CallScreenState extends State<CallScreen> {
           _minimizeCall();
         }
       },
-      child: ZegoUIKitPrebuiltCall(
-        appID: CallScreen.zegoAppID,
-        appSign: CallScreen.zegoAppSign,
-        userID: currentUser.uid,
-        userName: userName,
-        callID: widget.callID,
-        config: config,
-        events: ZegoUIKitPrebuiltCallEvents(
-          onCallEnd: (event, defaultAction) {
-            setState(() => _allowPop = true);
-            _cleanupCallStatus();
-            WidgetsBinding.instance.addPostFrameCallback((_) {
-              defaultAction.call();
-            });
-          },
+      child: SafeArea(
+        child: ZegoUIKitPrebuiltCall(
+          appID: CallScreen.zegoAppID,
+          appSign: CallScreen.zegoAppSign,
+          userID: currentUser.uid,
+          userName: userName,
+          callID: widget.callID,
+          config: config,
+          events: ZegoUIKitPrebuiltCallEvents(
+            onCallEnd: (event, defaultAction) {
+              setState(() => _allowPop = true);
+              _cleanupCallStatus();
+              WidgetsBinding.instance.addPostFrameCallback((_) {
+                defaultAction.call();
+              });
+            },
+          ),
         ),
       ),
     );
