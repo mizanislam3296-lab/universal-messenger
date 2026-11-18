@@ -1318,4 +1318,577 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   } else {
                     AppSettingsController.appThemeColor.value = AppSettingsController.defaultPrimaryColor;
                     AppSettingsController.appThemeImage.value = null;
-                  
+                  }
+                  await AppSettingsController.save();
+                  if (mounted) setState(() {});
+                  if (ctx.mounted) Navigator.pop(ctx);
+                  _showMsg('Reset to default theme');
+                },
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<void> _selectPresetIcon(String type, String label) async {
+    AppSettingsController.iconType.value = type;
+    await AppSettingsController.save();
+    await AppSettingsController.applyLauncherIcon(type);
+    if (mounted) setState(() {});
+    _showMsg('ফোনের হোম স্ক্রিনে $label লোগো সেট করা হয়েছে');
+  }
+
+  Future<void> _pickCustomPhotoIcon() async {
+    final files = await FilePicker.pickFiles(type: FileType.image);
+    if (files.isNotEmpty && files.single.path != null) {
+      final savedPath = await AppSettingsController.savePermanentImage(files.single.path!, 'custom_icon');
+      AppSettingsController.iconType.value = 'custom';
+      AppSettingsController.customIconPath.value = savedPath;
+      await AppSettingsController.save();
+      await AppSettingsController.applyLauncherIcon('custom', customPath: savedPath);
+      if (mounted) setState(() {});
+      _showMsg('হোম স্ক্রিনে কাস্টম ছবির লোগো যোগ করার পপ-আপ পাঠানো হয়েছে');
+    }
+  }
+
+  Widget _buildAppIconTile({
+    required String type,
+    required String label,
+    required String currentType,
+    required Widget preview,
+    required VoidCallback onTap,
+  }) {
+    final selected = currentType == type;
+    const activeBorder = Color(0xFF42A5F5);
+
+    return GestureDetector(
+      onTap: onTap,
+      child: SizedBox(
+        width: 74,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            AnimatedContainer(
+              duration: const Duration(milliseconds: 180),
+              width: 62,
+              height: 62,
+              padding: const EdgeInsets.all(3),
+              decoration: BoxDecoration(
+                borderRadius: BorderRadius.circular(18),
+                border: Border.all(
+                  color: selected ? activeBorder : Colors.transparent,
+                  width: 2.5,
+                ),
+              ),
+              child: ClipRRect(
+                borderRadius: BorderRadius.circular(14),
+                child: preview,
+              ),
+            ),
+            const SizedBox(height: 6),
+            Text(
+              label,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                fontSize: 12,
+                fontWeight: selected ? FontWeight.bold : FontWeight.w500,
+                color: selected ? activeBorder : null,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  ImageProvider? _buildAvatarProvider(String? src) {
+    if (src == null || src.isEmpty) return null;
+    if (src.startsWith('data:image')) {
+      try {
+        return MemoryImage(base64Decode(src.split(',').last));
+      } catch (_) {
+        return null;
+      }
+    }
+    if (src.startsWith('http')) return NetworkImage(src);
+    final f = File(src);
+    if (f.existsSync()) return FileImage(f);
+    return null;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return ValueListenableBuilder<Color>(
+      valueListenable: AppSettingsController.appThemeColor,
+      builder: (context, themeColor, _) {
+        final avatarProvider = _buildAvatarProvider(_photoUrl);
+        return Scaffold(
+          appBar: AppBar(title: const Text('Settings'), backgroundColor: themeColor, foregroundColor: Colors.white),
+          body: Stack(
+            children: [
+              ListView(
+                padding: const EdgeInsets.all(12),
+                children: [
+                  Card(
+                    child: ExpansionTile(
+                      initiallyExpanded: false,
+                      leading: CircleAvatar(
+                        backgroundImage: avatarProvider,
+                        child: avatarProvider == null ? const Icon(Icons.person) : null,
+                      ),
+                      title: const Text('Account Info', style: TextStyle(fontWeight: FontWeight.bold)),
+                      subtitle: Text(_displayName),
+                      children: [
+                        ListTile(
+                          leading: const Icon(Icons.edit),
+                          title: const Text('Change name'),
+                          onTap: _changeNameDialog,
+                        ),
+                        ListTile(
+                          leading: const Icon(Icons.photo_camera),
+                          title: const Text('Change photo'),
+                          onTap: _changeProfilePhoto,
+                        ),
+                        ListTile(
+                          leading: const Icon(Icons.lock_reset),
+                          title: const Text('Change password'),
+                          onTap: _changePasswordDialog,
+                        ),
+                        ListTile(
+                          leading: const Icon(Icons.logout, color: Colors.red),
+                          title: const Text('Log out', style: TextStyle(color: Colors.red)),
+                          onTap: _logout,
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  Card(
+                    child: ExpansionTile(
+                      leading: const Icon(Icons.color_lens),
+                      title: const Text('Change Theme', style: TextStyle(fontWeight: FontWeight.bold)),
+                      children: [
+                        ListTile(
+                          leading: const Icon(Icons.chat_bubble_outline),
+                          title: const Text('Chat Theme'),
+                          trailing: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              ValueListenableBuilder<Color>(
+                                valueListenable: AppSettingsController.chatThemeColor,
+                                builder: (_, c, __) => CircleAvatar(radius: 10, backgroundColor: c),
+                              ),
+                              const SizedBox(width: 6),
+                              const Icon(Icons.chevron_right),
+                            ],
+                          ),
+                          onTap: () => _openThemePicker(isChatTheme: true),
+                        ),
+                        ListTile(
+                          leading: const Icon(Icons.wallpaper),
+                          title: const Text('App Theme'),
+                          trailing: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              CircleAvatar(radius: 10, backgroundColor: themeColor),
+                              const SizedBox(width: 6),
+                              const Icon(Icons.chevron_right),
+                            ],
+                          ),
+                          onTap: () => _openThemePicker(isChatTheme: false),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  Card(
+                    child: ValueListenableBuilder<ThemeMode>(
+                      valueListenable: AppSettingsController.themeMode,
+                      builder: (context, mode, _) {
+                        final isDark = mode == ThemeMode.dark;
+                        return ListTile(
+                          leading: Icon(isDark ? Icons.dark_mode : Icons.light_mode),
+                          title: const Text('Day or Dark Mode', style: TextStyle(fontWeight: FontWeight.bold)),
+                          subtitle: Text(isDark ? 'Dark Mode Active' : 'Day Mode Active'),
+                          trailing: Switch(
+                            value: isDark,
+                            onChanged: (val) {
+                              AppSettingsController.themeMode.value = val ? ThemeMode.dark : ThemeMode.light;
+                              AppSettingsController.save();
+                            },
+                          ),
+                          onTap: () {
+                            AppSettingsController.themeMode.value = isDark ? ThemeMode.light : ThemeMode.dark;
+                            AppSettingsController.save();
+                          },
+                        );
+                      },
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  Card(
+                    child: ValueListenableBuilder<bool>(
+                      valueListenable: AppSettingsController.batteryOptimization,
+                      builder: (context, isBatteryOpt, _) {
+                        return SwitchListTile(
+                          secondary: Icon(isBatteryOpt ? Icons.battery_saver : Icons.battery_std),
+                          title: const Text('Battery Optimization', style: TextStyle(fontWeight: FontWeight.bold)),
+                          subtitle: Text(
+                            isBatteryOpt
+                                ? 'Active: Low power mode & smart background sync'
+                                : 'Off: Full background speed mode',
+                          ),
+                          value: isBatteryOpt,
+                          onChanged: (val) async {
+                            AppSettingsController.batteryOptimization.value = val;
+                            await AppSettingsController.save();
+                            await NotificationAndPresenceService.start();
+                            _showMsg(val ? 'Battery Optimization ON' : 'Battery Optimization OFF');
+                          },
+                        );
+                      },
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  Card(
+                    child: ExpansionTile(
+                      leading: const Icon(Icons.notifications_active),
+                      title: const Text('Notification', style: TextStyle(fontWeight: FontWeight.bold)),
+                      children: [
+                        ValueListenableBuilder<bool>(
+                          valueListenable: AppSettingsController.notificationsEnabled,
+                          builder: (_, enabled, __) => Column(
+                            children: [
+                              SwitchListTile(
+                                secondary: const Icon(Icons.notifications),
+                                title: const Text('Notifications'),
+                                subtitle: Text(
+                                  enabled
+                                      ? 'All notifications enabled (even when closed)'
+                                      : 'All notifications muted',
+                                ),
+                                value: enabled,
+                                onChanged: (v) async {
+                                  AppSettingsController.notificationsEnabled.value = v;
+                                  await AppSettingsController.save();
+                                  await NotificationAndPresenceService.rebuildNotificationChannels();
+                                  await FcmPushService.syncDeviceTokenAndPrefs();
+                                  if (!v) {
+                                    await NotificationAndPresenceService.stopNativeCallRingtone();
+                                    await NotificationAndPresenceService.cancelAllNotifications();
+                                  }
+                                  _showMsg(v ? 'Notifications turned ON' : 'Notifications turned OFF');
+                                },
+                              ),
+                              ValueListenableBuilder<bool>(
+                                valueListenable: AppSettingsController.headsUpPopup,
+                                builder: (_, popupVal, __) => SwitchListTile(
+                                  secondary: const Icon(Icons.branding_watermark_outlined),
+                                  title: const Text('Pop-up on screen'),
+                                  subtitle: Text(popupVal ? 'Top floating banner ON' : 'Top floating banner OFF'),
+                                  value: enabled && popupVal,
+                                  onChanged: !enabled
+                                      ? null
+                                      : (v) async {
+                                          AppSettingsController.headsUpPopup.value = v;
+                                          await AppSettingsController.save();
+                                          await NotificationAndPresenceService.rebuildNotificationChannels();
+                                          await FcmPushService.syncDeviceTokenAndPrefs();
+                                          if (!v && !AppSettingsController.statusBarNotification.value) {
+                                            await NotificationAndPresenceService.cancelAllNotifications();
+                                          }
+                                          _showMsg(v ? 'Top pop-up banner ON' : 'Top pop-up banner OFF');
+                                        },
+                                ),
+                              ),
+                              ValueListenableBuilder<bool>(
+                                valueListenable: AppSettingsController.statusBarNotification,
+                                builder: (_, statusBarVal, __) => SwitchListTile(
+                                  secondary: const Icon(Icons.notifications_none),
+                                  title: const Text('Status bar notification'),
+                                  subtitle: Text(
+                                    statusBarVal
+                                        ? 'Top status bar icon & tray ON'
+                                        : 'Top status bar notification OFF',
+                                  ),
+                                  value: enabled && statusBarVal,
+                                  onChanged: !enabled
+                                      ? null
+                                      : (v) async {
+                                          AppSettingsController.statusBarNotification.value = v;
+                                          await AppSettingsController.save();
+                                          await NotificationAndPresenceService.rebuildNotificationChannels();
+                                          await FcmPushService.syncDeviceTokenAndPrefs();
+                                          if (!v && !AppSettingsController.headsUpPopup.value) {
+                                            await NotificationAndPresenceService.cancelAllNotifications();
+                                          }
+                                          _showMsg(v ? 'Status bar notification ON' : 'Status bar notification OFF');
+                                        },
+                                ),
+                              ),
+                              ValueListenableBuilder<bool>(
+                                valueListenable: AppSettingsController.chatSounds,
+                                builder: (_, chatVal, __) => SwitchListTile(
+                                  secondary: const Icon(Icons.message),
+                                  title: const Text('Chat sounds'),
+                                  value: enabled && chatVal,
+                                  onChanged: !enabled
+                                      ? null
+                                      : (v) async {
+                                          AppSettingsController.chatSounds.value = v;
+                                          await AppSettingsController.save();
+                                          await NotificationAndPresenceService.rebuildNotificationChannels();
+                                          await FcmPushService.syncDeviceTokenAndPrefs();
+                                          if (v) NotificationAndPresenceService.playNativeMessageSound();
+                                        },
+                                ),
+                              ),
+                              ValueListenableBuilder<bool>(
+                                valueListenable: AppSettingsController.videoCallSounds,
+                                builder: (_, videoVal, __) => SwitchListTile(
+                                  secondary: const Icon(Icons.videocam),
+                                  title: const Text('Video call sounds'),
+                                  value: enabled && videoVal,
+                                  onChanged: !enabled
+                                      ? null
+                                      : (v) async {
+                                          AppSettingsController.videoCallSounds.value = v;
+                                          await AppSettingsController.save();
+                                          await NotificationAndPresenceService.rebuildNotificationChannels();
+                                          await FcmPushService.syncDeviceTokenAndPrefs();
+                                          if (v) _playShortRingtonePreview();
+                                        },
+                              ),
+                              ValueListenableBuilder<bool>(
+                                valueListenable: AppSettingsController.audioCallSounds,
+                                builder: (_, audioVal, __) => SwitchListTile(
+                                  secondary: const Icon(Icons.call),
+                                  title: const Text('Audio call sounds'),
+                                  value: enabled && audioVal,
+                                  onChanged: !enabled
+                                      ? null
+                                      : (v) async {
+                                          AppSettingsController.audioCallSounds.value = v;
+                                          await AppSettingsController.save();
+                                          await NotificationAndPresenceService.rebuildNotificationChannels();
+                                          await FcmPushService.syncDeviceTokenAndPrefs();
+                                          if (v) _playShortRingtonePreview();
+                                        },
+                              ),
+                              ValueListenableBuilder<bool>(
+                                valueListenable: AppSettingsController.vibrate,
+                                builder: (_, vibVal, __) => SwitchListTile(
+                                  secondary: const Icon(Icons.vibration),
+                                  title: const Text('Vibrate'),
+                                  value: enabled && vibVal,
+                                  onChanged: !enabled
+                                      ? null
+                                      : (v) async {
+                                          AppSettingsController.vibrate.value = v;
+                                          await AppSettingsController.save();
+                                          await NotificationAndPresenceService.rebuildNotificationChannels();
+                                          await FcmPushService.syncDeviceTokenAndPrefs();
+                                          if (v) HapticFeedback.vibrate();
+                                        },
+                              ),
+                            ],
+                          ),
+                        ),
+                        const Divider(height: 1),
+                        ValueListenableBuilder<String?>(
+                          valueListenable: AppSettingsController.customCallRingtoneName,
+                          builder: (_, ringtoneName, __) => ListTile(
+                            leading: const Icon(Icons.ring_volume, color: Color(0xFF008069)),
+                            title: const Text('Call ringtone (MP3)'),
+                            subtitle: Text(
+                              ringtoneName ?? 'Default system ringtone',
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                            trailing: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                if (ringtoneName != null)
+                                  IconButton(
+                                    icon: const Icon(Icons.restart_alt, color: Colors.orange),
+                                    tooltip: 'Reset to default',
+                                    onPressed: _resetCallRingtone,
+                                  ),
+                                const Icon(Icons.audio_file),
+                              ],
+                            ),
+                            onTap: _pickCustomCallRingtone,
+                          ),
+                        ),
+                        ValueListenableBuilder<String?>(
+                          valueListenable: AppSettingsController.customMsgSoundName,
+                          builder: (_, msgToneName, __) => ListTile(
+                            leading: const Icon(Icons.music_note, color: Color(0xFF1A73E8)),
+                            title: const Text('Message sound (MP3)'),
+                            subtitle: Text(
+                              msgToneName ?? 'Default notification sound',
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                            trailing: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                if (msgToneName != null)
+                                  IconButton(
+                                    icon: const Icon(Icons.restart_alt, color: Colors.orange),
+                                    tooltip: 'Reset to default',
+                                    onPressed: _resetMessageSound,
+                                  ),
+                                const Icon(Icons.audio_file),
+                              ],
+                            ),
+                            onTap: _pickCustomMessageSound,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  Card(
+                    child: Padding(
+                      padding: const EdgeInsets.fromLTRB(16, 14, 16, 16),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          const Text(
+                            'App Icon',
+                            style: TextStyle(
+                              fontSize: 15,
+                              fontWeight: FontWeight.bold,
+                              color: Color(0xFF42A5F5),
+                            ),
+                          ),
+                          const SizedBox(height: 4),
+                          Text(
+                            'ফোনের হোম স্ক্রিনের অ্যাপ লোগো পরিবর্তন করুন',
+                            style: TextStyle(fontSize: 12, color: Colors.grey.shade500),
+                          ),
+                          const SizedBox(height: 14),
+                          ValueListenableBuilder<String>(
+                            valueListenable: AppSettingsController.iconType,
+                            builder: (_, currentType, __) {
+                              final customImg = _buildAvatarProvider(AppSettingsController.customIconPath.value);
+                              return SingleChildScrollView(
+                                scrollDirection: Axis.horizontal,
+                                child: Row(
+                                  children: [
+                                    _buildAppIconTile(
+                                      type: 'default',
+                                      label: 'Default',
+                                      currentType: currentType,
+                                      preview: Container(
+                                        color: const Color(0xFF008069),
+                                        child: const Icon(Icons.forum_rounded, color: Colors.white, size: 30),
+                                      ),
+                                      onTap: () => _selectPresetIcon('default', 'Default'),
+                                    ),
+                                    const SizedBox(width: 8),
+                                    _buildAppIconTile(
+                                      type: 'google',
+                                      label: 'Google',
+                                      currentType: currentType,
+                                      preview: Container(
+                                        color: Colors.white,
+                                        alignment: Alignment.center,
+                                        child: const Text(
+                                          'G',
+                                          style: TextStyle(
+                                            fontWeight: FontWeight.bold,
+                                            fontSize: 28,
+                                            color: Color(0xFF4285F4),
+                                          ),
+                                        ),
+                                      ),
+                                      onTap: () => _selectPresetIcon('google', 'Google'),
+                                    ),
+                                    const SizedBox(width: 8),
+                                    _buildAppIconTile(
+                                      type: 'aqua',
+                                      label: 'Aqua',
+                                      currentType: currentType,
+                                      preview: Container(
+                                        decoration: const BoxDecoration(
+                                          gradient: LinearGradient(
+                                            colors: [Color(0xFF1DA1F2), Color(0xFF00C896)],
+                                            begin: Alignment.topLeft,
+                                            end: Alignment.bottomRight,
+                                          ),
+                                        ),
+                                        child: const Icon(Icons.send_rounded, color: Colors.white, size: 28),
+                                      ),
+                                      onTap: () => _selectPresetIcon('aqua', 'Aqua'),
+                                    ),
+                                    const SizedBox(width: 8),
+                                    _buildAppIconTile(
+                                      type: 'dark',
+                                      label: 'Dark',
+                                      currentType: currentType,
+                                      preview: Container(
+                                        color: const Color(0xFF141A21),
+                                        child: const Icon(Icons.forum_rounded, color: Color(0xFF00E676), size: 30),
+                                      ),
+                                      onTap: () => _selectPresetIcon('dark', 'Dark'),
+                                    ),
+                                    const SizedBox(width: 8),
+                                    _buildAppIconTile(
+                                      type: 'sunset',
+                                      label: 'Sunset',
+                                      currentType: currentType,
+                                      preview: Container(
+                                        decoration: const BoxDecoration(
+                                          gradient: LinearGradient(
+                                            colors: [Color(0xFFF4511E), Color(0xFF8E24AA)],
+                                            begin: Alignment.topCenter,
+                                            end: Alignment.bottomCenter,
+                                          ),
+                                        ),
+                                        child: const Icon(Icons.star_rounded, color: Colors.white, size: 32),
+                                      ),
+                                      onTap: () => _selectPresetIcon('sunset', 'Sunset'),
+                                    ),
+                                    const SizedBox(width: 8),
+                                    _buildAppIconTile(
+                                      type: 'custom',
+                                      label: 'Custom',
+                                      currentType: currentType,
+                                      preview: Container(
+                                        decoration: BoxDecoration(
+                                          color: Colors.grey.shade800,
+                                          image: customImg != null
+                                              ? DecorationImage(image: customImg, fit: BoxFit.cover)
+                                              : null,
+                                        ),
+                                        child: customImg == null
+                                            ? const Icon(Icons.add_a_photo, color: Colors.white, size: 26)
+                                            : null,
+                                      ),
+                                      onTap: _pickCustomPhotoIcon,
+                                    ),
+                                  ],
+                                ),
+                              );
+                            },
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+              if (_isBusy)
+                Container(color: Colors.black38, child: const Center(child: CircularProgressIndicator())),
+            ],
+          ),
+        );
+      },
+    );
+  }
+}
