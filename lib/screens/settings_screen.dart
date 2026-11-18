@@ -91,6 +91,7 @@ class FcmPushService {
       if (prefs['enabled'] == false) return;
 
       final channelId = isCall ? 'fcm_call_all_v1' : 'fcm_msg_all_v1';
+      final tagId = isCall ? (callId ?? 'call') : (chatId ?? 'msg');
 
       await Dio().post(
         'https://fcm.googleapis.com/v1/projects/$_projectId/messages:send',
@@ -101,6 +102,7 @@ class FcmPushService {
             'notification': {'title': title, 'body': body},
             'android': {
               'priority': 'HIGH',
+              'ttl': '86400s',
               'notification': {
                 'channel_id': channelId,
                 'sound': 'default',
@@ -108,6 +110,7 @@ class FcmPushService {
                 'default_vibrate_timings': true,
                 'notification_priority': 'PRIORITY_MAX',
                 'visibility': 'PUBLIC',
+                'tag': tagId,
               },
             },
             'data': {
@@ -253,6 +256,12 @@ class NotificationAndPresenceService {
   static StreamSubscription<QuerySnapshot>? _chatSub;
   static StreamSubscription<String>? _fcmTokenRefreshSub;
   static Timer? _heartbeatTimer;
+
+  static Future<void> requestBatteryUnrestricted() async {
+    try {
+      await _nativeChannel.invokeMethod('requestIgnoreBatteryOptimizations');
+    } catch (_) {}
+  }
 
   static Future<void> rebuildNotificationChannels() async {
     final android = _notifications.resolvePlatformSpecificImplementation<AndroidFlutterLocalNotificationsPlugin>();
@@ -518,7 +527,6 @@ class NotificationAndPresenceService {
 
         if (!AppSettingsController.notificationsEnabled.value) continue;
         if (isAppInForeground && activeChatId == doc.id) continue;
-        if (!isAppInForeground && FcmPushService.isConfigured) continue;
         if ((data['lastSenderId'] ?? '') == uid) continue;
 
         final unread = ((data['unreadCount'] as Map<String, dynamic>?)?[uid] as num?)?.toInt() ?? 0;
@@ -1054,7 +1062,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
                           title: const Text('Notification', style: TextStyle(fontWeight: FontWeight.bold)),
                           subtitle: Text(
                             isNotifOn
-                                ? 'Active: Status bar, pop-up, sound & vibration ON'
+                                ? (FcmPushService.isConfigured
+                                    ? 'Active: Lock-screen, status bar, sound & push ON'
+                                    : 'Active: Add FCM_SERVICE_ACCOUNT in GitHub Secrets for killed-app push')
                                 : 'Off: All notifications & sounds muted',
                           ),
                           value: isNotifOn,
@@ -1064,6 +1074,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                             await NotificationAndPresenceService.rebuildNotificationChannels();
                             await FcmPushService.syncDeviceTokenAndPrefs();
                             if (val) {
+                              await NotificationAndPresenceService.requestBatteryUnrestricted();
                               await NotificationAndPresenceService.start();
                               NotificationAndPresenceService.playNativeMessageSound();
                               HapticFeedback.mediumImpact();
