@@ -30,11 +30,17 @@ class ChatScreen extends StatefulWidget {
 class _ChatScreenState extends State<ChatScreen> {
   static const String _cloudName = 'tcdkckrl';
   static const String _uploadPreset = 'ml_default';
+  static const int _pageSize = 40;
 
   final _messageController = TextEditingController();
   final _scrollController = ScrollController();
   late final String _chatId;
   late final User _currentUser;
+
+  int _messageLimit = _pageSize;
+  int _lastFetchedCount = 0;
+  bool _isLoadingMore = false;
+  final Set<String> _markedSeenIds = {};
 
   bool _isUploading = false;
   double _uploadProgress = 0.0;
@@ -42,7 +48,6 @@ class _ChatScreenState extends State<ChatScreen> {
   bool _isTyping = false;
   Timer? _typingTimer;
 
-  // রিপ্লাই দেওয়ার জন্য সিলেক্ট করা মেসেজের ডাটা
   Map<String, dynamic>? _replyingTo;
 
   @override
@@ -52,7 +57,24 @@ class _ChatScreenState extends State<ChatScreen> {
     final ids = [_currentUser.uid, widget.receiverId]..sort();
     _chatId = '${ids[0]}_${ids[1]}';
     NotificationAndPresenceService.activeChatId = _chatId;
+    _scrollController.addListener(_onScroll);
     _markAsRead();
+  }
+
+  void _onScroll() {
+    if (!_scrollController.hasClients || _isLoadingMore) return;
+    if (_scrollController.position.pixels >=
+        _scrollController.position.maxScrollExtent - 200) {
+      if (_lastFetchedCount >= _messageLimit) {
+        setState(() {
+          _isLoadingMore = true;
+          _messageLimit += _pageSize;
+        });
+        Future.delayed(const Duration(milliseconds: 400), () {
+          if (mounted) setState(() => _isLoadingMore = false);
+        });
+      }
+    }
   }
 
   @override
@@ -61,6 +83,7 @@ class _ChatScreenState extends State<ChatScreen> {
       NotificationAndPresenceService.activeChatId = null;
     }
     _typingTimer?.cancel();
+    _scrollController.removeListener(_onScroll);
     if (_isTyping) {
       FirebaseFirestore.instance.collection('chats').doc(_chatId).set({
         'typing': {_currentUser.uid: false},
@@ -79,13 +102,23 @@ class _ChatScreenState extends State<ChatScreen> {
     } catch (_) {}
   }
 
-  // রিয়েল-টাইম Seen আপডেট ফাংশন
   void _markMessagesAsSeen(List<QueryDocumentSnapshot> docs) {
+    final batch = FirebaseFirestore.instance.batch();
+    bool hasUpdates = false;
+
     for (final doc in docs) {
+      if (_markedSeenIds.contains(doc.id)) continue;
       final data = doc.data() as Map<String, dynamic>;
-      if (data['senderId'] != _currentUser.uid && (data['isSeen'] ?? false) == false) {
-        doc.reference.update({'isSeen': true}).catchError((_) {});
+      if (data['senderId'] != _currentUser.uid &&
+          (data['isSeen'] ?? false) == false) {
+        _markedSeenIds.add(doc.id);
+        batch.update(doc.reference, {'isSeen': true});
+        hasUpdates = true;
       }
+    }
+
+    if (hasUpdates) {
+      batch.commit().catchError((_) {});
     }
   }
 
@@ -123,6 +156,15 @@ class _ChatScreenState extends State<ChatScreen> {
       'status': 'ringing',
       'timestamp': FieldValue.serverTimestamp(),
     });
+
+    FcmPushService.sendPushToUser(
+      receiverId: widget.receiverId,
+      title: isVideo ? 'ইনকামিং ভিডিও কল' : 'ইনকামিং অডিও কল',
+      body: '$callerName আপনাকে কল দিচ্ছেন...',
+      isCall: true,
+      isVideo: isVideo,
+      callId: callId,
+    );
 
     if (!mounted) return;
     Navigator.push(
@@ -218,6 +260,13 @@ class _ChatScreenState extends State<ChatScreen> {
       'timestamp': FieldValue.serverTimestamp(),
     });
     await _updateChatSummary(text);
+
+    FcmPushService.sendPushToUser(
+      receiverId: widget.receiverId,
+      title: _currentUser.displayName ?? _currentUser.email ?? 'নতুন মেসেজ',
+      body: text,
+      chatId: _chatId,
+    );
   }
 
   Future<void> _pickAndSendFile() async {
@@ -271,6 +320,13 @@ class _ChatScreenState extends State<ChatScreen> {
         'timestamp': FieldValue.serverTimestamp(),
       });
       await _updateChatSummary('📎 $fileName');
+
+      FcmPushService.sendPushToUser(
+        receiverId: widget.receiverId,
+        title: _currentUser.displayName ?? _currentUser.email ?? 'নতুন মেসেজ',
+        body: fileType == 'image' ? '📷 একটি ছবি পাঠিয়েছেন' : '📎 $fileName',
+        chatId: _chatId,
+      );
     } catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
@@ -287,7 +343,6 @@ class _ChatScreenState extends State<ChatScreen> {
     }
   }
 
-  // মেসেজে ক্লিক করলে Reply, Copy, Edit, Delete মেনু দেখাবে
   void _showMessageOptions(DocumentSnapshot doc, Map<String, dynamic> data, bool isMe, Color barColor) {
     final type = (data['type'] ?? 'text').toString();
     final text = (data['text'] ?? '').toString();
@@ -386,10 +441,20 @@ class _ChatScreenState extends State<ChatScreen> {
                   'text': updatedText,
                   'isEdited': true,
                 });
-                // চ্যাট লিস্টের শেষ মেসেজও আপডেট করা হচ্ছে
-                await FirebaseFirestore.instance.collection('chats').doc(_chatId).set({
-                  'lastMessage': updatedText,
-                }, SetOptions(merge: true));
+
+                final latestSnap = await FirebaseFirestore.instance
+                    .collection('chats')
+                    .doc(_chatId)
+                    .collection('messages')
+                    .orderBy('timestamp', descending: true)
+                    .limit(1)
+                    .get();
+
+                if (latestSnap.docs.isNotEmpty && latestSnap.docs.first.id == doc.id) {
+                  await FirebaseFirestore.instance.collection('chats').doc(_chatId).set({
+                    'lastMessage': updatedText,
+                  }, SetOptions(merge: true));
+                }
               }
               if (ctx.mounted) Navigator.pop(ctx);
             },
@@ -403,7 +468,6 @@ class _ChatScreenState extends State<ChatScreen> {
   Future<void> _deleteMessage(DocumentSnapshot doc) async {
     try {
       await doc.reference.delete();
-      // সর্বশেষ মেসেজটি বের করে চ্যাট লিস্ট আপডেট রাখা
       final latestSnap = await FirebaseFirestore.instance
           .collection('chats')
           .doc(_chatId)
@@ -471,6 +535,7 @@ class _ChatScreenState extends State<ChatScreen> {
                 fileUrl,
                 width: 220,
                 height: 220,
+                cacheWidth: 600,
                 fit: BoxFit.cover,
                 errorBuilder: (_, __, ___) => const Padding(padding: EdgeInsets.all(12), child: Icon(Icons.broken_image, size: 40)),
               ),
@@ -554,32 +619,27 @@ class _ChatScreenState extends State<ChatScreen> {
                     ),
                     const SizedBox(width: 10),
                     Expanded(
-                      child: StreamBuilder<int>(
-                        stream: Stream.periodic(const Duration(seconds: 5), (i) => i),
-                        builder: (context, _) {
-                          return StreamBuilder<DocumentSnapshot>(
-                            stream: FirebaseFirestore.instance.collection('users').doc(widget.receiverId).snapshots(),
-                            builder: (context, snap) {
-                              final uData = snap.data?.data() as Map<String, dynamic>?;
-                              final activeNow = NotificationAndPresenceService.isUserActive(uData);
-                              final statusText = NotificationAndPresenceService.formatLastSeen(uData);
+                      child: StreamBuilder<DocumentSnapshot>(
+                        stream: FirebaseFirestore.instance.collection('users').doc(widget.receiverId).snapshots(),
+                        builder: (context, snap) {
+                          final uData = snap.data?.data() as Map<String, dynamic>?;
+                          final activeNow = NotificationAndPresenceService.isUserActive(uData);
+                          final statusText = NotificationAndPresenceService.formatLastSeen(uData);
 
-                              return Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: [
-                                  Text(widget.receiverName, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold), overflow: TextOverflow.ellipsis),
-                                  Text(
-                                    statusText,
-                                    style: TextStyle(
-                                      fontSize: 11,
-                                      color: activeNow ? Colors.lightGreenAccent : Colors.white70,
-                                      fontWeight: activeNow ? FontWeight.w600 : FontWeight.normal,
-                                    ),
-                                    overflow: TextOverflow.ellipsis,
-                                  ),
-                                ],
-                              );
-                            },
+                          return Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(widget.receiverName, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold), overflow: TextOverflow.ellipsis),
+                              Text(
+                                statusText,
+                                style: TextStyle(
+                                  fontSize: 11,
+                                  color: activeNow ? Colors.lightGreenAccent : Colors.white70,
+                                  fontWeight: activeNow ? FontWeight.w600 : FontWeight.normal,
+                                ),
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                            ],
                           );
                         },
                       ),
@@ -619,14 +679,32 @@ class _ChatScreenState extends State<ChatScreen> {
                           ],
                         ),
                       ),
+                    if (_isLoadingMore)
+                      Padding(
+                        padding: const EdgeInsets.symmetric(vertical: 6),
+                        child: SizedBox(
+                          width: 20,
+                          height: 20,
+                          child: CircularProgressIndicator(strokeWidth: 2, color: barColor),
+                        ),
+                      ),
                     Expanded(
                       child: StreamBuilder<QuerySnapshot>(
-                        stream: FirebaseFirestore.instance.collection('chats').doc(_chatId).collection('messages').orderBy('timestamp', descending: true).snapshots(),
+                        stream: FirebaseFirestore.instance
+                            .collection('chats')
+                            .doc(_chatId)
+                            .collection('messages')
+                            .orderBy('timestamp', descending: true)
+                            .limit(_messageLimit)
+                            .snapshots(),
                         builder: (context, snapshot) {
-                          if (snapshot.connectionState == ConnectionState.waiting) {
+                          if (snapshot.connectionState == ConnectionState.waiting && !snapshot.hasData) {
                             return const Center(child: CircularProgressIndicator());
                           }
-                          if (!snapshot.hasData || snapshot.data!.docs.isEmpty) {
+                          final messages = snapshot.data?.docs ?? [];
+                          _lastFetchedCount = messages.length;
+
+                          if (messages.isEmpty) {
                             return Center(
                               child: Container(
                                 padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
@@ -636,7 +714,6 @@ class _ChatScreenState extends State<ChatScreen> {
                             );
                           }
 
-                          final messages = snapshot.data!.docs;
                           _markAsRead();
                           _markMessagesAsSeen(messages);
 
@@ -655,11 +732,11 @@ class _ChatScreenState extends State<ChatScreen> {
                               final replyData = data['replyTo'] as Map<String, dynamic>?;
 
                               return Dismissible(
-                                key: Key(doc.id),
-                                direction: DismissDirection.horizontal, // ডানে বা বামে স্লাইড করলে Reply হবে
+                                key: ValueKey(doc.id),
+                                direction: DismissDirection.horizontal,
                                 confirmDismiss: (_) async {
                                   _selectReplyMessage(doc.id, data, isMe);
-                                  return false; // মেসেজটি ডিলিট না হয়ে আগের জায়গায় ফিরে আসবে
+                                  return false;
                                 },
                                 background: Align(
                                   alignment: Alignment.centerLeft,
@@ -705,7 +782,6 @@ class _ChatScreenState extends State<ChatScreen> {
                                       child: Column(
                                         crossAxisAlignment: CrossAxisAlignment.start,
                                         children: [
-                                          // রিপ্লাই করা মেসেজের প্রিভিউ বক্স
                                           if (replyData != null)
                                             Container(
                                               margin: const EdgeInsets.only(bottom: 6),
@@ -812,7 +888,6 @@ class _ChatScreenState extends State<ChatScreen> {
                         child: Column(
                           mainAxisSize: MainAxisSize.min,
                           children: [
-                            // ইনপুট বক্সের উপরে রিপ্লাই প্রিভিউ বার
                             if (_replyingTo != null)
                               Container(
                                 margin: const EdgeInsets.only(bottom: 6, left: 4, right: 4),
@@ -869,12 +944,12 @@ class _ChatScreenState extends State<ChatScreen> {
                                     textCapitalization: TextCapitalization.sentences,
                                     minLines: 1,
                                     maxLines: 4,
-                                    style: const TextStyle(color: Colors.black87),
+                                    style: TextStyle(color: isDark ? Colors.white : Colors.black87),
                                     decoration: InputDecoration(
                                       hintText: 'মেসেজ লিখুন...',
-                                      hintStyle: TextStyle(color: Colors.grey.shade600),
+                                      hintStyle: TextStyle(color: isDark ? Colors.white54 : Colors.grey.shade600),
                                       filled: true,
-                                      fillColor: Colors.white,
+                                      fillColor: isDark ? const Color(0xFF2A3942) : Colors.white,
                                       contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
                                       border: OutlineInputBorder(borderRadius: BorderRadius.circular(24), borderSide: BorderSide.none),
                                     ),
