@@ -32,7 +32,11 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
-    AppSettingsController.load();
+    AppSettingsController.load().then((_) {
+      if (AppSettingsController.notificationsEnabled.value) {
+        NotificationAndPresenceService.requestBatteryUnrestricted();
+      }
+    });
     NotificationAndPresenceService.setAppForeground(true);
     NotificationAndPresenceService.start();
     _listenForAppUpdates();
@@ -49,6 +53,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
       NotificationAndPresenceService.setAppForeground(true);
+      NotificationAndPresenceService.start();
     } else if (state == AppLifecycleState.paused ||
         state == AppLifecycleState.inactive ||
         state == AppLifecycleState.detached ||
@@ -193,7 +198,10 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                   FirebaseFirestore.instance
                       .collection('calls')
                       .doc(currentUser.uid)
-                      .set({'status': 'declined'}, SetOptions(merge: true));
+                      .set({
+                    'callId': callId,
+                    'status': 'declined',
+                  }, SetOptions(merge: true));
                 },
               ),
               const SizedBox(width: 8),
@@ -205,13 +213,17 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                   FirebaseFirestore.instance
                       .collection('calls')
                       .doc(currentUser.uid)
-                      .set({'status': 'accepted'}, SetOptions(merge: true));
+                      .set({
+                    'callId': callId,
+                    'status': 'accepted',
+                  }, SetOptions(merge: true));
                   Navigator.push(
                     context,
                     MaterialPageRoute(
                       builder: (_) => CallScreen(
                         callID: callId,
                         isVideoCall: isVideo,
+                        callDocId: currentUser.uid,
                       ),
                     ),
                   );
