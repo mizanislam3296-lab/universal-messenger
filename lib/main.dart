@@ -1,8 +1,10 @@
+import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
+import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:zego_uikit_prebuilt_call/zego_uikit_prebuilt_call.dart';
 import 'package:universal_messenger/screens/auth_screen.dart';
 import 'package:universal_messenger/screens/verify_email_screen.dart';
@@ -15,15 +17,61 @@ final GlobalKey<NavigatorState> navigatorKey = GlobalKey<NavigatorState>();
 Future<void> _firebaseMessagingBackgroundHandler(RemoteMessage message) async {
   await Firebase.initializeApp();
   await AppSettingsController.load();
-  if (AppSettingsController.notificationsEnabled.value) {
-    await NotificationAndPresenceService.rebuildNotificationChannels();
-  }
+  if (!AppSettingsController.notificationsEnabled.value) return;
+
+  final plugin = FlutterLocalNotificationsPlugin();
+  await plugin.initialize(
+    const InitializationSettings(
+      android: AndroidInitializationSettings('@mipmap/ic_launcher'),
+    ),
+  );
+  await NotificationAndPresenceService.rebuildNotificationChannels();
+
+  final data = message.data;
+  final isCall = data['type'] == 'call';
+  final title = (data['title'] ?? message.notification?.title ?? 'Universal Messenger').toString();
+  final body = (data['body'] ?? message.notification?.body ?? 'নতুন মেসেজ এসেছে').toString();
+  final idKey = isCall ? (data['callId'] ?? 'call') : (data['chatId'] ?? 'msg');
+
+  await plugin.show(
+    idKey.hashCode,
+    title,
+    body,
+    NotificationDetails(
+      android: AndroidNotificationDetails(
+        isCall ? 'call_ch_master_v1' : 'msg_ch_master_v1',
+        isCall ? 'Incoming Calls' : 'Chat Messages',
+        importance: Importance.max,
+        priority: Priority.max,
+        category: isCall
+            ? AndroidNotificationCategory.call
+            : AndroidNotificationCategory.message,
+        fullScreenIntent: isCall,
+        playSound: true,
+        sound: UriAndroidNotificationSound(
+          isCall
+              ? 'content://settings/system/ringtone'
+              : 'content://settings/system/notification_sound',
+        ),
+        enableVibration: true,
+        vibrationPattern: Int64List.fromList(
+          isCall ? [0, 800, 400, 800] : [0, 250, 150, 250],
+        ),
+        visibility: NotificationVisibility.public,
+      ),
+    ),
+  );
 }
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await Firebase.initializeApp();
   FirebaseMessaging.onBackgroundMessage(_firebaseMessagingBackgroundHandler);
+  await FirebaseMessaging.instance.setForegroundNotificationPresentationOptions(
+    alert: true,
+    badge: true,
+    sound: true,
+  );
   FirebaseFirestore.instance.settings = const Settings(
     persistenceEnabled: true,
     cacheSizeBytes: 50 * 1024 * 1024,
