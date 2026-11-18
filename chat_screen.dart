@@ -63,8 +63,7 @@ class _ChatScreenState extends State<ChatScreen> {
 
   void _onScroll() {
     if (!_scrollController.hasClients || _isLoadingMore) return;
-    if (_scrollController.position.pixels >=
-        _scrollController.position.maxScrollExtent - 200) {
+    if (_scrollController.position.pixels >= _scrollController.position.maxScrollExtent - 200) {
       if (_lastFetchedCount >= _messageLimit) {
         setState(() {
           _isLoadingMore = true;
@@ -105,21 +104,16 @@ class _ChatScreenState extends State<ChatScreen> {
   void _markMessagesAsSeen(List<QueryDocumentSnapshot> docs) {
     final batch = FirebaseFirestore.instance.batch();
     bool hasUpdates = false;
-
     for (final doc in docs) {
       if (_markedSeenIds.contains(doc.id)) continue;
       final data = doc.data() as Map<String, dynamic>;
-      if (data['senderId'] != _currentUser.uid &&
-          (data['isSeen'] ?? false) == false) {
+      if (data['senderId'] != _currentUser.uid && (data['isSeen'] ?? false) == false) {
         _markedSeenIds.add(doc.id);
         batch.update(doc.reference, {'isSeen': true});
         hasUpdates = true;
       }
     }
-
-    if (hasUpdates) {
-      batch.commit().catchError((_) {});
-    }
+    if (hasUpdates) batch.commit().catchError((_) {});
   }
 
   Future<void> _setTypingStatus(bool typing) async {
@@ -349,70 +343,59 @@ class _ChatScreenState extends State<ChatScreen> {
 
     showModalBottomSheet(
       context: context,
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(18)),
-      ),
-      builder: (ctx) {
-        return SafeArea(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              const SizedBox(height: 8),
-              Container(
-                width: 40,
-                height: 4,
-                decoration: BoxDecoration(color: Colors.grey.shade400, borderRadius: BorderRadius.circular(4)),
-              ),
-              const SizedBox(height: 6),
+      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(18))),
+      builder: (ctx) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const SizedBox(height: 8),
+            Container(width: 40, height: 4, decoration: BoxDecoration(color: Colors.grey.shade400, borderRadius: BorderRadius.circular(4))),
+            const SizedBox(height: 6),
+            ListTile(
+              leading: Icon(Icons.reply, color: barColor),
+              title: const Text('Reply'),
+              onTap: () {
+                Navigator.pop(ctx);
+                _selectReplyMessage(doc.id, data, isMe);
+              },
+            ),
+            if (type == 'text' && text.isNotEmpty)
               ListTile(
-                leading: Icon(Icons.reply, color: barColor),
-                title: const Text('Reply'),
+                leading: const Icon(Icons.copy, color: Colors.blueGrey),
+                title: const Text('Copy'),
                 onTap: () {
+                  Clipboard.setData(ClipboardData(text: text));
                   Navigator.pop(ctx);
-                  _selectReplyMessage(doc.id, data, isMe);
+                  ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('মেসেজ কপি হয়েছে'), duration: Duration(seconds: 1)));
                 },
               ),
-              if (type == 'text' && text.isNotEmpty)
-                ListTile(
-                  leading: const Icon(Icons.copy, color: Colors.blueGrey),
-                  title: const Text('Copy'),
-                  onTap: () {
-                    Clipboard.setData(ClipboardData(text: text));
-                    Navigator.pop(ctx);
-                    ScaffoldMessenger.of(context).showSnackBar(
-                      const SnackBar(content: Text('মেসেজ কপি হয়েছে'), duration: Duration(seconds: 1)),
-                    );
-                  },
-                ),
-              if (isMe && type == 'text')
-                ListTile(
-                  leading: const Icon(Icons.edit, color: Colors.orange),
-                  title: const Text('Edit'),
-                  onTap: () {
-                    Navigator.pop(ctx);
-                    _showEditMessageDialog(doc, text, barColor);
-                  },
-                ),
-              if (isMe)
-                ListTile(
-                  leading: const Icon(Icons.delete, color: Colors.red),
-                  title: const Text('Delete', style: TextStyle(color: Colors.red)),
-                  onTap: () async {
-                    Navigator.pop(ctx);
-                    await _deleteMessage(doc);
-                  },
-                ),
-              const SizedBox(height: 8),
-            ],
-          ),
-        );
-      },
+            if (isMe && type == 'text')
+              ListTile(
+                leading: const Icon(Icons.edit, color: Colors.orange),
+                title: const Text('Edit'),
+                onTap: () {
+                  Navigator.pop(ctx);
+                  _showEditMessageDialog(doc, text, barColor);
+                },
+              ),
+            if (isMe)
+              ListTile(
+                leading: const Icon(Icons.delete, color: Colors.red),
+                title: const Text('Delete', style: TextStyle(color: Colors.red)),
+                onTap: () async {
+                  Navigator.pop(ctx);
+                  await _deleteMessage(doc);
+                },
+              ),
+            const SizedBox(height: 8),
+          ],
+        ),
+      ),
     );
   }
 
   void _showEditMessageDialog(DocumentSnapshot doc, String oldText, Color barColor) {
     final editController = TextEditingController(text: oldText);
-
     showDialog(
       context: context,
       builder: (ctx) => AlertDialog(
@@ -420,28 +403,21 @@ class _ChatScreenState extends State<ChatScreen> {
         content: TextField(
           controller: editController,
           autofocus: true,
+          autocorrect: false,
+          enableSuggestions: false,
+          textCapitalization: TextCapitalization.none,
           maxLines: 4,
           minLines: 1,
-          decoration: const InputDecoration(
-            border: OutlineInputBorder(),
-            hintText: 'নতুন মেসেজ লিখুন...',
-          ),
+          decoration: const InputDecoration(border: OutlineInputBorder(), hintText: 'নতুন মেসেজ লিখুন...'),
         ),
         actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx),
-            child: const Text('বাতিল'),
-          ),
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('বাতিল')),
           ElevatedButton(
             style: ElevatedButton.styleFrom(backgroundColor: barColor, foregroundColor: Colors.white),
             onPressed: () async {
               final updatedText = editController.text.trim();
               if (updatedText.isNotEmpty && updatedText != oldText) {
-                await doc.reference.update({
-                  'text': updatedText,
-                  'isEdited': true,
-                });
-
+                await doc.reference.update({'text': updatedText, 'isEdited': true});
                 final latestSnap = await FirebaseFirestore.instance
                     .collection('chats')
                     .doc(_chatId)
@@ -449,11 +425,8 @@ class _ChatScreenState extends State<ChatScreen> {
                     .orderBy('timestamp', descending: true)
                     .limit(1)
                     .get();
-
                 if (latestSnap.docs.isNotEmpty && latestSnap.docs.first.id == doc.id) {
-                  await FirebaseFirestore.instance.collection('chats').doc(_chatId).set({
-                    'lastMessage': updatedText,
-                  }, SetOptions(merge: true));
+                  await FirebaseFirestore.instance.collection('chats').doc(_chatId).set({'lastMessage': updatedText}, SetOptions(merge: true));
                 }
               }
               if (ctx.mounted) Navigator.pop(ctx);
@@ -483,14 +456,10 @@ class _ChatScreenState extends State<ChatScreen> {
         newLastMsg = t == 'text' ? (d['text'] ?? '').toString() : '📎 ${d['fileName'] ?? 'File'}';
       }
 
-      await FirebaseFirestore.instance.collection('chats').doc(_chatId).set({
-        'lastMessage': newLastMsg,
-      }, SetOptions(merge: true));
+      await FirebaseFirestore.instance.collection('chats').doc(_chatId).set({'lastMessage': newLastMsg}, SetOptions(merge: true));
     } catch (e) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('ডিলিট করতে সমস্যা হয়েছে: $e')),
-      );
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('ডিলিট করতে সমস্যা হয়েছে: $e')));
     }
   }
 
@@ -632,11 +601,7 @@ class _ChatScreenState extends State<ChatScreen> {
                               Text(widget.receiverName, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold), overflow: TextOverflow.ellipsis),
                               Text(
                                 statusText,
-                                style: TextStyle(
-                                  fontSize: 11,
-                                  color: activeNow ? Colors.lightGreenAccent : Colors.white70,
-                                  fontWeight: activeNow ? FontWeight.w600 : FontWeight.normal,
-                                ),
+                                style: TextStyle(fontSize: 11, color: activeNow ? Colors.lightGreenAccent : Colors.white70, fontWeight: activeNow ? FontWeight.w600 : FontWeight.normal),
                                 overflow: TextOverflow.ellipsis,
                               ),
                             ],
@@ -682,11 +647,7 @@ class _ChatScreenState extends State<ChatScreen> {
                     if (_isLoadingMore)
                       Padding(
                         padding: const EdgeInsets.symmetric(vertical: 6),
-                        child: SizedBox(
-                          width: 20,
-                          height: 20,
-                          child: CircularProgressIndicator(strokeWidth: 2, color: barColor),
-                        ),
+                        child: SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2, color: barColor)),
                       ),
                     Expanded(
                       child: StreamBuilder<QuerySnapshot>(
@@ -742,22 +703,14 @@ class _ChatScreenState extends State<ChatScreen> {
                                   alignment: Alignment.centerLeft,
                                   child: Padding(
                                     padding: const EdgeInsets.only(left: 16),
-                                    child: CircleAvatar(
-                                      radius: 16,
-                                      backgroundColor: barColor.withOpacity(0.2),
-                                      child: Icon(Icons.reply, size: 18, color: barColor),
-                                    ),
+                                    child: CircleAvatar(radius: 16, backgroundColor: barColor.withOpacity(0.2), child: Icon(Icons.reply, size: 18, color: barColor)),
                                   ),
                                 ),
                                 secondaryBackground: Align(
                                   alignment: Alignment.centerRight,
                                   child: Padding(
                                     padding: const EdgeInsets.only(right: 16),
-                                    child: CircleAvatar(
-                                      radius: 16,
-                                      backgroundColor: barColor.withOpacity(0.2),
-                                      child: Icon(Icons.reply, size: 18, color: barColor),
-                                    ),
+                                    child: CircleAvatar(radius: 16, backgroundColor: barColor.withOpacity(0.2), child: Icon(Icons.reply, size: 18, color: barColor)),
                                   ),
                                 ),
                                 child: Align(
@@ -769,9 +722,7 @@ class _ChatScreenState extends State<ChatScreen> {
                                       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
                                       constraints: BoxConstraints(maxWidth: MediaQuery.of(context).size.width * 0.78),
                                       decoration: BoxDecoration(
-                                        color: isMe
-                                            ? (isDefaultBg ? const Color(0xFFD9FDD3) : Color.lerp(Colors.white, chatColor, 0.25))
-                                            : Colors.white,
+                                        color: isMe ? (isDefaultBg ? const Color(0xFFD9FDD3) : Color.lerp(Colors.white, chatColor, 0.25)) : Colors.white,
                                         borderRadius: BorderRadius.only(
                                           topLeft: const Radius.circular(14),
                                           topRight: const Radius.circular(14),
@@ -794,21 +745,9 @@ class _ChatScreenState extends State<ChatScreen> {
                                               child: Column(
                                                 crossAxisAlignment: CrossAxisAlignment.start,
                                                 children: [
-                                                  Text(
-                                                    (replyData['senderName'] ?? '').toString(),
-                                                    style: TextStyle(
-                                                      fontSize: 11,
-                                                      fontWeight: FontWeight.bold,
-                                                      color: barColor,
-                                                    ),
-                                                  ),
+                                                  Text((replyData['senderName'] ?? '').toString(), style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: barColor)),
                                                   const SizedBox(height: 2),
-                                                  Text(
-                                                    (replyData['text'] ?? '').toString(),
-                                                    maxLines: 2,
-                                                    overflow: TextOverflow.ellipsis,
-                                                    style: const TextStyle(fontSize: 12, color: Colors.black54),
-                                                  ),
+                                                  Text((replyData['text'] ?? '').toString(), maxLines: 2, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 12, color: Colors.black54)),
                                                 ],
                                               ),
                                             ),
@@ -821,25 +760,14 @@ class _ChatScreenState extends State<ChatScreen> {
                                               if (isEdited)
                                                 Padding(
                                                   padding: const EdgeInsets.only(right: 5),
-                                                  child: Text(
-                                                    'Edited',
-                                                    style: TextStyle(
-                                                      fontSize: 10,
-                                                      fontStyle: FontStyle.italic,
-                                                      color: Colors.grey.shade600,
-                                                    ),
-                                                  ),
+                                                  child: Text('Edited', style: TextStyle(fontSize: 10, fontStyle: FontStyle.italic, color: Colors.grey.shade600)),
                                                 ),
                                               Text(time, style: TextStyle(fontSize: 10, color: Colors.grey.shade600)),
                                               if (isMe) ...[
                                                 const SizedBox(width: 5),
                                                 Text(
                                                   isSeen ? 'Seen' : 'Sent',
-                                                  style: TextStyle(
-                                                    fontSize: 10,
-                                                    fontWeight: isSeen ? FontWeight.bold : FontWeight.normal,
-                                                    color: isSeen ? const Color(0xFF1A73E8) : Colors.grey.shade600,
-                                                  ),
+                                                  style: TextStyle(fontSize: 10, fontWeight: isSeen ? FontWeight.bold : FontWeight.normal, color: isSeen ? const Color(0xFF1A73E8) : Colors.grey.shade600),
                                                 ),
                                               ],
                                             ],
@@ -903,24 +831,9 @@ class _ChatScreenState extends State<ChatScreen> {
                                       child: Column(
                                         crossAxisAlignment: CrossAxisAlignment.start,
                                         children: [
-                                          Text(
-                                            'Replying to ${_replyingTo!['senderName']}',
-                                            style: TextStyle(
-                                              fontSize: 12,
-                                              fontWeight: FontWeight.bold,
-                                              color: barColor,
-                                            ),
-                                          ),
+                                          Text('Replying to ${_replyingTo!['senderName']}', style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: barColor)),
                                           const SizedBox(height: 2),
-                                          Text(
-                                            (_replyingTo!['text'] ?? '').toString(),
-                                            maxLines: 1,
-                                            overflow: TextOverflow.ellipsis,
-                                            style: TextStyle(
-                                              fontSize: 13,
-                                              color: isDark ? Colors.white70 : Colors.black87,
-                                            ),
-                                          ),
+                                          Text((_replyingTo!['text'] ?? '').toString(), maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(fontSize: 13, color: isDark ? Colors.white70 : Colors.black87)),
                                         ],
                                       ),
                                     ),
@@ -941,7 +854,10 @@ class _ChatScreenState extends State<ChatScreen> {
                                   child: TextField(
                                     controller: _messageController,
                                     onChanged: _onTextChanged,
-                                    textCapitalization: TextCapitalization.sentences,
+                                    textCapitalization: TextCapitalization.none,
+                                    autocorrect: false,
+                                    enableSuggestions: false,
+                                    cursorWidth: 1.5,
                                     minLines: 1,
                                     maxLines: 4,
                                     style: TextStyle(color: isDark ? Colors.white : Colors.black87),
