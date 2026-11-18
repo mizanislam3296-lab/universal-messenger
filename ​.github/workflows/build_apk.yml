@@ -28,7 +28,7 @@ jobs:
         run: |
           flutter create . --platforms=android --org com.universal --project-name universal_messenger
 
-      - name: Configure Firebase, PiP, Screen Share & Native Channel
+      - name: Configure Firebase, PiP, Android 10+ Screen Share & LockScreen Push
         run: |
           mkdir -p android/app/src/main/res/xml
           mkdir -p android/app/src/main/kotlin/com/universal/universal_messenger
@@ -64,8 +64,11 @@ jobs:
           import android.net.NetworkCapabilities
           import android.net.Uri
           import android.os.Build
+          import android.os.Bundle
+          import android.os.PowerManager
           import android.provider.Settings
           import android.util.Rational
+          import android.view.WindowManager
           import androidx.core.content.FileProvider
           import io.flutter.embedding.android.FlutterActivity
           import io.flutter.embedding.engine.FlutterEngine
@@ -75,8 +78,23 @@ jobs:
           class MainActivity : FlutterActivity() {
               private val CHANNEL = "com.universal.messenger/icon"
               private var isCallActive = false
+              private var suppressPipOnce = false
               private var activeRingtone: Ringtone? = null
               private var mediaPlayer: MediaPlayer? = null
+
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
+                      setShowWhenLocked(true)
+                      setTurnScreenOn(true)
+                  } else {
+                      @Suppress("DEPRECATION")
+                      window.addFlags(
+                          WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED or
+                          WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON
+                      )
+                  }
+              }
 
               override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
                   super.configureFlutterEngine(flutterEngine)
@@ -85,6 +103,27 @@ jobs:
                           "setCallActive" -> {
                               isCallActive = call.argument<Boolean>("active") ?: false
                               result.success(true)
+                          }
+                          "suppressPipOnce" -> {
+                              suppressPipOnce = true
+                              result.success(true)
+                          }
+                          "requestIgnoreBatteryOptimizations" -> {
+                              try {
+                                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                                      val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
+                                      if (!pm.isIgnoringBatteryOptimizations(packageName)) {
+                                          val intent = Intent(
+                                              Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                                              Uri.parse("package:$packageName")
+                                          )
+                                          startActivity(intent)
+                                      }
+                                  }
+                                  result.success(true)
+                              } catch (_: Exception) {
+                                  result.success(false)
+                              }
                           }
                           "isNetworkConnected" -> {
                               val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
@@ -190,6 +229,10 @@ jobs:
 
               override fun onUserLeaveHint() {
                   super.onUserLeaveHint()
+                  if (suppressPipOnce) {
+                      suppressPipOnce = false
+                      return
+                  }
                   if (isCallActive && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                       try {
                           val params = PictureInPictureParams.Builder()
@@ -264,6 +307,9 @@ jobs:
                   "android.permission.VIBRATE",
                   "android.permission.WAKE_LOCK",
                   "android.permission.RECEIVE_BOOT_COMPLETED",
+                  "android.permission.USE_FULL_SCREEN_INTENT",
+                  "android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS",
+                  "android.permission.SYSTEM_ALERT_WINDOW",
                   "android.permission.CAMERA",
                   "android.permission.RECORD_AUDIO",
                   "android.permission.MODIFY_AUDIO_SETTINGS",
@@ -284,11 +330,16 @@ jobs:
 
               m = m.replace(
                   "android:name=\".MainActivity\"",
-                  "android:name=\".MainActivity\"\n            android:supportsPictureInPicture=\"true\"\n            android:resizeableActivity=\"true\"",
+                  "android:name=\".MainActivity\"\n            android:supportsPictureInPicture=\"true\"\n            android:resizeableActivity=\"true\"\n            android:showWhenLocked=\"true\"\n            android:turnScreenOn=\"true\"",
                   1
               )
 
-              provider_xml = """        <provider
+              extra_xml = """        <service
+              android:name="im.zego.zegoexpress.internal.ZegoScreenCaptureService"
+              android:enabled="true"
+              android:exported="false"
+              android:foregroundServiceType="mediaProjection" />
+          <provider
               android:name="androidx.core.content.FileProvider"
               android:authorities="${applicationId}.fileprovider"
               android:exported="false"
@@ -301,8 +352,8 @@ jobs:
               android:name="com.google.firebase.messaging.default_notification_channel_id"
               android:value="fcm_msg_all_v1" />
       </application>"""
-              if "androidx.core.content.FileProvider" not in m:
-                  m = m.replace("</application>", provider_xml, 1)
+              if "ZegoScreenCaptureService" not in m:
+                  m = m.replace("</application>", extra_xml, 1)
 
               with open(manifest_path, "w") as f:
                   f.write(m)
