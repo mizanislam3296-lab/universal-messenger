@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:dio/dio.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
@@ -20,12 +21,15 @@ class AppSettingsController {
   static final ValueNotifier<Color> chatThemeColor = ValueNotifier(defaultChatBgColor);
   static final ValueNotifier<String?> chatThemeImage = ValueNotifier(null);
 
+  static final ValueNotifier<bool> batteryOptimization = ValueNotifier(true);
   static final ValueNotifier<bool> notificationsEnabled = ValueNotifier(true);
   static final ValueNotifier<bool> headsUpPopup = ValueNotifier(false);
   static final ValueNotifier<bool> chatSounds = ValueNotifier(true);
   static final ValueNotifier<bool> videoCallSounds = ValueNotifier(true);
   static final ValueNotifier<bool> audioCallSounds = ValueNotifier(true);
   static final ValueNotifier<bool> vibrate = ValueNotifier(true);
+
+  static ValueNotifier<bool> get popupNotificationsEnabled => notificationsEnabled;
 
   static final ValueNotifier<String?> customCallRingtonePath = ValueNotifier(null);
   static final ValueNotifier<String?> customCallRingtoneName = ValueNotifier(null);
@@ -94,6 +98,7 @@ class AppSettingsController {
       appThemeImage.value = data['appThemeImage'];
       if (data['chatThemeColor'] != null) chatThemeColor.value = Color(data['chatThemeColor']);
       chatThemeImage.value = data['chatThemeImage'];
+      batteryOptimization.value = data['batteryOptimization'] ?? true;
       notificationsEnabled.value = data['notificationsEnabled'] ?? true;
       headsUpPopup.value = data['headsUpPopup'] ?? false;
       chatSounds.value = data['chatSounds'] ?? true;
@@ -117,6 +122,7 @@ class AppSettingsController {
         'appThemeImage': appThemeImage.value,
         'chatThemeColor': chatThemeColor.value.value,
         'chatThemeImage': chatThemeImage.value,
+        'batteryOptimization': batteryOptimization.value,
         'notificationsEnabled': notificationsEnabled.value,
         'headsUpPopup': headsUpPopup.value,
         'chatSounds': chatSounds.value,
@@ -178,10 +184,11 @@ class NotificationAndPresenceService {
     required bool showPopup,
   }) async {
     final soundUri = playSound ? await _resolveMsgSoundUri() : 'silent';
-    final channelId = 'msg_ch_${playSound ? 1 : 0}_${shouldVibrate ? 1 : 0}_${showPopup ? 1 : 0}_${soundUri.hashCode.abs()}';
+    final channelId =
+        'msg_ch_${playSound ? 1 : 0}_${shouldVibrate ? 1 : 0}_${showPopup ? 1 : 0}_${soundUri.hashCode.abs()}';
 
-    final androidPlugin = _notifications
-        .resolvePlatformSpecificImplementation<AndroidFlutterLocalNotificationsPlugin>();
+    final androidPlugin =
+        _notifications.resolvePlatformSpecificImplementation<AndroidFlutterLocalNotificationsPlugin>();
     if (androidPlugin != null) {
       final channel = AndroidNotificationChannel(
         channelId,
@@ -207,10 +214,11 @@ class NotificationAndPresenceService {
     required bool showPopup,
   }) async {
     final soundUri = playSound ? await _resolveCallSoundUri() : 'silent';
-    final channelId = 'call_ch_${playSound ? 1 : 0}_${shouldVibrate ? 1 : 0}_${showPopup ? 1 : 0}_${soundUri.hashCode.abs()}';
+    final channelId =
+        'call_ch_${playSound ? 1 : 0}_${shouldVibrate ? 1 : 0}_${showPopup ? 1 : 0}_${soundUri.hashCode.abs()}';
 
-    final androidPlugin = _notifications
-        .resolvePlatformSpecificImplementation<AndroidFlutterLocalNotificationsPlugin>();
+    final androidPlugin =
+        _notifications.resolvePlatformSpecificImplementation<AndroidFlutterLocalNotificationsPlugin>();
     if (androidPlugin != null) {
       final channel = AndroidNotificationChannel(
         channelId,
@@ -267,6 +275,12 @@ class NotificationAndPresenceService {
     } catch (_) {}
   }
 
+  static Future<void> cancelAllNotifications() async {
+    try {
+      await _notifications.cancelAll();
+    } catch (_) {}
+  }
+
   static Future<void> start() async {
     final user = FirebaseAuth.instance.currentUser;
     if (user == null) return;
@@ -279,15 +293,17 @@ class NotificationAndPresenceService {
       const initSettings = InitializationSettings(android: androidInit);
       await _notifications.initialize(initSettings);
 
-      final androidPlugin = _notifications
-          .resolvePlatformSpecificImplementation<AndroidFlutterLocalNotificationsPlugin>();
+      final androidPlugin =
+          _notifications.resolvePlatformSpecificImplementation<AndroidFlutterLocalNotificationsPlugin>();
       await androidPlugin?.requestNotificationsPermission();
     }
 
     await rebuildNotificationChannels();
     await setOnlineStatus(true);
+
+    final intervalSeconds = AppSettingsController.batteryOptimization.value ? 25 : 12;
     _heartbeatTimer?.cancel();
-    _heartbeatTimer = Timer.periodic(const Duration(seconds: 10), (_) {
+    _heartbeatTimer = Timer.periodic(Duration(seconds: intervalSeconds), (_) {
       if (isAppInForeground) {
         setOnlineStatus(true);
       }
@@ -326,6 +342,10 @@ class NotificationAndPresenceService {
     } catch (_) {}
   }
 
+  static Future<void> stop() async {
+    await setOfflineAndStop();
+  }
+
   static Future<void> setOfflineAndStop() async {
     _stopCallRing();
     await setOnlineStatus(false);
@@ -352,7 +372,7 @@ class NotificationAndPresenceService {
     final lastSeen = data['lastSeen'];
     if (lastSeen is! Timestamp) return false;
     final diffSeconds = DateTime.now().difference(lastSeen.toDate()).inSeconds;
-    return diffSeconds >= -20 && diffSeconds <= 25;
+    return diffSeconds >= -20 && diffSeconds <= 35;
   }
 
   static String formatLastSeen(Map<String, dynamic>? data) {
@@ -462,6 +482,7 @@ class NotificationAndPresenceService {
     _chatSub = FirebaseFirestore.instance
         .collection('chats')
         .where('participants', arrayContains: uid)
+        .limit(50)
         .snapshots()
         .listen((snap) async {
       if (!_initialChatsLoaded) {
@@ -552,64 +573,94 @@ class NotificationAndPresenceService {
     double dotSize = 13,
     bool showOfflineTime = true,
   }) {
-    return StreamBuilder<int>(
-      stream: Stream.periodic(const Duration(seconds: 6), (i) => i),
-      builder: (context, _) {
-        return StreamBuilder<DocumentSnapshot>(
-          stream: FirebaseFirestore.instance.collection('users').doc(userId).snapshots(),
-          builder: (context, snapshot) {
-            final data = snapshot.data?.data() as Map<String, dynamic>?;
-            final isActive = isUserActive(data);
-            final shortAgo = showOfflineTime ? formatLastSeenShort(data) : '';
+    return StreamBuilder<DocumentSnapshot>(
+      stream: FirebaseFirestore.instance.collection('users').doc(userId).snapshots(),
+      builder: (context, snapshot) {
+        final data = snapshot.data?.data() as Map<String, dynamic>?;
+        final isActive = isUserActive(data);
+        final shortAgo = showOfflineTime ? formatLastSeenShort(data) : '';
+        final photoUrl = (data?['photoUrl'] ?? data?['profilePic'] ?? '').toString().trim();
 
-            return Stack(
-              clipBehavior: Clip.none,
-              children: [
-                avatar,
-                if (isActive)
-                  Positioned(
-                    right: 0,
-                    bottom: 0,
-                    child: Container(
-                      width: dotSize,
-                      height: dotSize,
-                      decoration: BoxDecoration(
-                        color: const Color(0xFF31A24C),
-                        shape: BoxShape.circle,
-                        border: Border.all(
-                          color: Theme.of(context).scaffoldBackgroundColor,
-                          width: 2,
-                        ),
-                      ),
-                    ),
-                  )
-                else if (shortAgo.isNotEmpty)
-                  Positioned(
-                    right: -2,
-                    bottom: -2,
-                    child: Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
-                      decoration: BoxDecoration(
-                        color: const Color(0xFF1F2C34),
-                        borderRadius: BorderRadius.circular(10),
-                        border: Border.all(
-                          color: Theme.of(context).scaffoldBackgroundColor,
-                          width: 1.5,
-                        ),
-                      ),
-                      child: Text(
-                        shortAgo,
-                        style: const TextStyle(
-                          color: Color(0xFF8BE9A1),
-                          fontSize: 9,
-                          fontWeight: FontWeight.bold,
-                        ),
-                      ),
+        Widget effectiveAvatar = avatar;
+        if (photoUrl.isNotEmpty && avatar is CircleAvatar) {
+          final double diameter = (avatar.radius ?? 20) * 2;
+          if (photoUrl.startsWith('http')) {
+            effectiveAvatar = ClipOval(
+              child: SizedBox(
+                width: diameter,
+                height: diameter,
+                child: Image.network(
+                  photoUrl,
+                  fit: BoxFit.cover,
+                  cacheWidth: 200,
+                  errorBuilder: (_, __, ___) => avatar,
+                ),
+              ),
+            );
+          } else if (photoUrl.startsWith('data:image')) {
+            try {
+              effectiveAvatar = ClipOval(
+                child: SizedBox(
+                  width: diameter,
+                  height: diameter,
+                  child: Image.memory(
+                    base64Decode(photoUrl.split(',').last),
+                    fit: BoxFit.cover,
+                    cacheWidth: 200,
+                    errorBuilder: (_, __, ___) => avatar,
+                  ),
+                ),
+              );
+            } catch (_) {}
+          }
+        }
+
+        return Stack(
+          clipBehavior: Clip.none,
+          children: [
+            effectiveAvatar,
+            if (isActive)
+              Positioned(
+                right: 0,
+                bottom: 0,
+                child: Container(
+                  width: dotSize,
+                  height: dotSize,
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF31A24C),
+                    shape: BoxShape.circle,
+                    border: Border.all(
+                      color: Theme.of(context).scaffoldBackgroundColor,
+                      width: 2,
                     ),
                   ),
-              ],
-            );
-          },
+                ),
+              )
+            else if (shortAgo.isNotEmpty)
+              Positioned(
+                right: -2,
+                bottom: -2,
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF1F2C34),
+                    borderRadius: BorderRadius.circular(10),
+                    border: Border.all(
+                      color: Theme.of(context).scaffoldBackgroundColor,
+                      width: 1.5,
+                    ),
+                  ),
+                  child: Text(
+                    shortAgo,
+                    style: const TextStyle(
+                      color: Color(0xFF8BE9A1),
+                      fontSize: 9,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                ),
+              ),
+          ],
         );
       },
     );
@@ -625,6 +676,9 @@ class SettingsScreen extends StatefulWidget {
 }
 
 class _SettingsScreenState extends State<SettingsScreen> {
+  static const String _cloudName = 'tcdkckrl';
+  static const String _uploadPreset = 'ml_default';
+
   final User? _user = FirebaseAuth.instance.currentUser;
   String _displayName = '';
   String? _photoUrl;
@@ -730,6 +784,28 @@ class _SettingsScreenState extends State<SettingsScreen> {
     _showMsg('Default message sound restored');
   }
 
+  Future<void> _syncUserProfileAcrossChats({String? newName, String? newPhotoUrl}) async {
+    if (_user == null) return;
+    try {
+      final chatsSnap = await FirebaseFirestore.instance
+          .collection('chats')
+          .where('participants', arrayContains: _user!.uid)
+          .get();
+      if (chatsSnap.docs.isEmpty) return;
+
+      final batch = FirebaseFirestore.instance.batch();
+      for (final doc in chatsSnap.docs) {
+        final updates = <String, dynamic>{};
+        if (newName != null) updates['users.${_user!.uid}.name'] = newName;
+        if (newPhotoUrl != null) updates['users.${_user!.uid}.photoUrl'] = newPhotoUrl;
+        if (updates.isNotEmpty) {
+          batch.update(doc.reference, updates);
+        }
+      }
+      await batch.commit();
+    } catch (_) {}
+  }
+
   Future<void> _changeNameDialog() async {
     final ctrl = TextEditingController(text: _displayName);
     final newName = await showDialog<String>(
@@ -751,7 +827,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
     setState(() => _isBusy = true);
     try {
       await _user!.updateDisplayName(newName);
-      await FirebaseFirestore.instance.collection('users').doc(_user!.uid).set({'name': newName}, SetOptions(merge: true));
+      await FirebaseFirestore.instance.collection('users').doc(_user!.uid).set({
+        'name': newName,
+      }, SetOptions(merge: true));
+      await _syncUserProfileAcrossChats(newName: newName);
       setState(() => _displayName = newName);
       _showMsg('Name updated successfully');
     } catch (e) {
@@ -764,23 +843,37 @@ class _SettingsScreenState extends State<SettingsScreen> {
   Future<void> _changeProfilePhoto() async {
     if (_user == null) return;
     final files = await FilePicker.pickFiles(type: FileType.image);
-    if (files.isEmpty) return;
+    if (files.isEmpty || files.first.path == null) return;
 
     setState(() => _isBusy = true);
     try {
-      final file = files.first;
-      String photoValue = file.path ?? '';
-      if (file.path != null) {
-        final bytes = await File(file.path!).readAsBytes();
-        if (bytes.length <= 500 * 1024) {
-          photoValue = 'data:image/jpeg;base64,${base64Encode(bytes)}';
-        } else {
-          photoValue = await AppSettingsController.savePermanentImage(file.path!, 'profile');
-        }
+      final picked = files.first;
+      final file = File(picked.path!);
+
+      final formData = FormData.fromMap({
+        'file': await MultipartFile.fromFile(file.path, filename: picked.name),
+        'upload_preset': _uploadPreset,
+        'folder': 'universal_messenger/profiles',
+      });
+
+      final response = await Dio().post(
+        'https://api.cloudinary.com/v1_1/$_cloudName/image/upload',
+        data: formData,
+      );
+
+      final downloadUrl = response.data['secure_url']?.toString() ?? '';
+      if (downloadUrl.isEmpty) {
+        throw Exception('Could not upload photo to server.');
       }
-      await FirebaseFirestore.instance.collection('users').doc(_user!.uid).set({'photoUrl': photoValue}, SetOptions(merge: true));
-      setState(() => _photoUrl = photoValue);
-      _showMsg('Profile photo updated');
+
+      await _user!.updatePhotoURL(downloadUrl);
+      await FirebaseFirestore.instance.collection('users').doc(_user!.uid).set({
+        'photoUrl': downloadUrl,
+      }, SetOptions(merge: true));
+      await _syncUserProfileAcrossChats(newPhotoUrl: downloadUrl);
+
+      setState(() => _photoUrl = downloadUrl);
+      _showMsg('Profile photo updated for everyone');
     } catch (e) {
       _showMsg('Photo update failed: $e');
     } finally {
@@ -798,9 +891,17 @@ class _SettingsScreenState extends State<SettingsScreen> {
         content: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            TextField(controller: oldCtrl, obscureText: true, decoration: const InputDecoration(labelText: 'Current Password', border: OutlineInputBorder())),
+            TextField(
+              controller: oldCtrl,
+              obscureText: true,
+              decoration: const InputDecoration(labelText: 'Current Password', border: OutlineInputBorder()),
+            ),
             const SizedBox(height: 12),
-            TextField(controller: newCtrl, obscureText: true, decoration: const InputDecoration(labelText: 'New Password (min 6 chars)', border: OutlineInputBorder())),
+            TextField(
+              controller: newCtrl,
+              obscureText: true,
+              decoration: const InputDecoration(labelText: 'New Password (min 6 chars)', border: OutlineInputBorder()),
+            ),
           ],
         ),
         actions: [
@@ -890,7 +991,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text(isChatTheme ? 'Chat Theme' : 'App Theme', style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+            Text(
+              isChatTheme ? 'Chat Theme' : 'App Theme',
+              style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+            ),
             const SizedBox(height: 14),
             Wrap(
               spacing: 12,
@@ -913,7 +1017,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   child: Container(
                     width: 44,
                     height: 44,
-                    decoration: BoxDecoration(color: c, shape: BoxShape.circle, border: Border.all(color: Colors.grey.shade400, width: 1.5)),
+                    decoration: BoxDecoration(
+                      color: c,
+                      shape: BoxShape.circle,
+                      border: Border.all(color: Colors.grey.shade400, width: 1.5),
+                    ),
                   ),
                 );
               }).toList(),
@@ -1045,7 +1153,13 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   ImageProvider? _buildAvatarProvider(String? src) {
     if (src == null || src.isEmpty) return null;
-    if (src.startsWith('data:image')) return MemoryImage(base64Decode(src.split(',').last));
+    if (src.startsWith('data:image')) {
+      try {
+        return MemoryImage(base64Decode(src.split(',').last));
+      } catch (_) {
+        return null;
+      }
+    }
     if (src.startsWith('http')) return NetworkImage(src);
     final f = File(src);
     if (f.existsSync()) return FileImage(f);
@@ -1057,6 +1171,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     return ValueListenableBuilder<Color>(
       valueListenable: AppSettingsController.appThemeColor,
       builder: (context, themeColor, _) {
+        final avatarProvider = _buildAvatarProvider(_photoUrl);
         return Scaffold(
           appBar: AppBar(title: const Text('Settings'), backgroundColor: themeColor, foregroundColor: Colors.white),
           body: Stack(
@@ -1068,16 +1183,32 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     child: ExpansionTile(
                       initiallyExpanded: false,
                       leading: CircleAvatar(
-                        backgroundImage: _buildAvatarProvider(_photoUrl),
-                        child: _photoUrl == null ? const Icon(Icons.person) : null,
+                        backgroundImage: avatarProvider,
+                        child: avatarProvider == null ? const Icon(Icons.person) : null,
                       ),
                       title: const Text('Account Info', style: TextStyle(fontWeight: FontWeight.bold)),
                       subtitle: Text(_displayName),
                       children: [
-                        ListTile(leading: const Icon(Icons.edit), title: const Text('Change name'), onTap: _changeNameDialog),
-                        ListTile(leading: const Icon(Icons.photo_camera), title: const Text('Change photo'), onTap: _changeProfilePhoto),
-                        ListTile(leading: const Icon(Icons.lock_reset), title: const Text('Change password'), onTap: _changePasswordDialog),
-                        ListTile(leading: const Icon(Icons.logout, color: Colors.red), title: const Text('Log out', style: TextStyle(color: Colors.red)), onTap: _logout),
+                        ListTile(
+                          leading: const Icon(Icons.edit),
+                          title: const Text('Change name'),
+                          onTap: _changeNameDialog,
+                        ),
+                        ListTile(
+                          leading: const Icon(Icons.photo_camera),
+                          title: const Text('Change photo'),
+                          onTap: _changeProfilePhoto,
+                        ),
+                        ListTile(
+                          leading: const Icon(Icons.lock_reset),
+                          title: const Text('Change password'),
+                          onTap: _changePasswordDialog,
+                        ),
+                        ListTile(
+                          leading: const Icon(Icons.logout, color: Colors.red),
+                          title: const Text('Log out', style: TextStyle(color: Colors.red)),
+                          onTap: _logout,
+                        ),
                       ],
                     ),
                   ),
@@ -1146,6 +1277,30 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   ),
                   const SizedBox(height: 8),
                   Card(
+                    child: ValueListenableBuilder<bool>(
+                      valueListenable: AppSettingsController.batteryOptimization,
+                      builder: (context, isBatteryOpt, _) {
+                        return SwitchListTile(
+                          secondary: Icon(isBatteryOpt ? Icons.battery_saver : Icons.battery_std),
+                          title: const Text('Battery Optimization', style: TextStyle(fontWeight: FontWeight.bold)),
+                          subtitle: Text(
+                            isBatteryOpt
+                                ? 'Active: Low power mode & smart background sync'
+                                : 'Off: Full background speed mode',
+                          ),
+                          value: isBatteryOpt,
+                          onChanged: (val) async {
+                            AppSettingsController.batteryOptimization.value = val;
+                            await AppSettingsController.save();
+                            await NotificationAndPresenceService.start();
+                            _showMsg(val ? 'Battery Optimization ON' : 'Battery Optimization OFF');
+                          },
+                        );
+                      },
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  Card(
                     child: ExpansionTile(
                       leading: const Icon(Icons.notifications_active),
                       title: const Text('Notification', style: TextStyle(fontWeight: FontWeight.bold)),
@@ -1165,6 +1320,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                                   await NotificationAndPresenceService.rebuildNotificationChannels();
                                   if (!v) {
                                     await NotificationAndPresenceService.stopNativeCallRingtone();
+                                    await NotificationAndPresenceService.cancelAllNotifications();
                                   }
                                   _showMsg(v ? 'Notifications turned ON' : 'Notifications turned OFF');
                                 },
@@ -1356,7 +1512,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
                                         alignment: Alignment.center,
                                         child: const Text(
                                           'G',
-                                          style: TextStyle(fontWeight: FontWeight.bold, fontSize: 28, color: Color(0xFF4285F4)),
+                                          style: TextStyle(
+                                            fontWeight: FontWeight.bold,
+                                            fontSize: 28,
+                                            color: Color(0xFF4285F4),
+                                          ),
                                         ),
                                       ),
                                       onTap: () => _selectPresetIcon('google', 'Google'),
@@ -1414,7 +1574,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
                                       preview: Container(
                                         decoration: BoxDecoration(
                                           color: Colors.grey.shade800,
-                                          image: customImg != null ? DecorationImage(image: customImg, fit: BoxFit.cover) : null,
+                                          image: customImg != null
+                                              ? DecorationImage(image: customImg, fit: BoxFit.cover)
+                                              : null,
                                         ),
                                         child: customImg == null
                                             ? const Icon(Icons.add_a_photo, color: Colors.white, size: 26)
