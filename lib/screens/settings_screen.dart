@@ -61,6 +61,7 @@ class FcmPushService {
           'notifPrefs': {
             'enabled': false,
             'headsUpPopup': AppSettingsController.headsUpPopup.value,
+            'statusBar': AppSettingsController.statusBarNotification.value,
             'chatSounds': AppSettingsController.chatSounds.value,
             'videoCallSounds': AppSettingsController.videoCallSounds.value,
             'audioCallSounds': AppSettingsController.audioCallSounds.value,
@@ -77,6 +78,7 @@ class FcmPushService {
         'notifPrefs': {
           'enabled': true,
           'headsUpPopup': AppSettingsController.headsUpPopup.value,
+          'statusBar': AppSettingsController.statusBarNotification.value,
           'chatSounds': AppSettingsController.chatSounds.value,
           'videoCallSounds': AppSettingsController.videoCallSounds.value,
           'audioCallSounds': AppSettingsController.audioCallSounds.value,
@@ -111,6 +113,11 @@ class FcmPushService {
       if (prefs['enabled'] == false) return;
 
       final showPopup = prefs['headsUpPopup'] != false;
+      final showStatusBar = prefs['statusBar'] != false;
+
+      // পপ-আপ এবং স্ট্যাটাস বার দুটোই বন্ধ থাকলে উপরে কোনো পুশ নোটিফিকেশন যাবে না
+      if (!isCall && !showPopup && !showStatusBar) return;
+
       final playSound = isCall
           ? (isVideo ? prefs['videoCallSounds'] != false : prefs['audioCallSounds'] != false)
           : (prefs['chatSounds'] != false);
@@ -184,6 +191,7 @@ class AppSettingsController {
   static final ValueNotifier<bool> batteryOptimization = ValueNotifier(true);
   static final ValueNotifier<bool> notificationsEnabled = ValueNotifier(true);
   static final ValueNotifier<bool> headsUpPopup = ValueNotifier(true);
+  static final ValueNotifier<bool> statusBarNotification = ValueNotifier(true);
   static final ValueNotifier<bool> chatSounds = ValueNotifier(true);
   static final ValueNotifier<bool> videoCallSounds = ValueNotifier(true);
   static final ValueNotifier<bool> audioCallSounds = ValueNotifier(true);
@@ -261,6 +269,7 @@ class AppSettingsController {
       batteryOptimization.value = data['batteryOptimization'] ?? true;
       notificationsEnabled.value = data['notificationsEnabled'] ?? true;
       headsUpPopup.value = data['headsUpPopup'] ?? true;
+      statusBarNotification.value = data['statusBarNotification'] ?? true;
       chatSounds.value = data['chatSounds'] ?? true;
       videoCallSounds.value = data['videoCallSounds'] ?? true;
       audioCallSounds.value = data['audioCallSounds'] ?? true;
@@ -285,6 +294,7 @@ class AppSettingsController {
         'batteryOptimization': batteryOptimization.value,
         'notificationsEnabled': notificationsEnabled.value,
         'headsUpPopup': headsUpPopup.value,
+        'statusBarNotification': statusBarNotification.value,
         'chatSounds': chatSounds.value,
         'videoCallSounds': videoCallSounds.value,
         'audioCallSounds': audioCallSounds.value,
@@ -768,11 +778,15 @@ class NotificationAndPresenceService {
         final playSound = AppSettingsController.chatSounds.value;
         final shouldVibrate = AppSettingsController.vibrate.value;
         final showPopup = AppSettingsController.headsUpPopup.value;
+        final showStatusBar = AppSettingsController.statusBarNotification.value;
 
         if (playSound) {
           await playNativeMessageSound();
         }
         if (shouldVibrate) HapticFeedback.mediumImpact();
+
+        // পপ-আপ এবং স্ট্যাটাস বার দুটোই বন্ধ থাকলে উপরে কোনো নোটিফিকেশন দেখাবে না
+        if (!showPopup && !showStatusBar) continue;
 
         final channelId = await _ensureMessageChannel(
           playSound: playSound,
@@ -793,7 +807,8 @@ class NotificationAndPresenceService {
           audioAttributesUsage: AudioAttributesUsage.notification,
           enableVibration: shouldVibrate,
           vibrationPattern: shouldVibrate ? Int64List.fromList([0, 250, 150, 250]) : null,
-          channelShowBadge: true,
+          channelShowBadge: showStatusBar,
+          timeoutAfter: (!showStatusBar && showPopup) ? 4000 : null,
           visibility: NotificationVisibility.public,
         );
 
@@ -1552,7 +1567,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
                               SwitchListTile(
                                 secondary: const Icon(Icons.notifications),
                                 title: const Text('Notifications'),
-                                subtitle: Text(enabled ? 'All notifications enabled (even when closed)' : 'All notifications muted'),
+                                subtitle: Text(
+                                  enabled
+                                      ? 'All notifications enabled (even when closed)'
+                                      : 'All notifications muted',
+                                ),
                                 value: enabled,
                                 onChanged: (v) async {
                                   AppSettingsController.notificationsEnabled.value = v;
@@ -1580,7 +1599,35 @@ class _SettingsScreenState extends State<SettingsScreen> {
                                           await AppSettingsController.save();
                                           await NotificationAndPresenceService.rebuildNotificationChannels();
                                           await FcmPushService.syncDeviceTokenAndPrefs();
+                                          if (!v && !AppSettingsController.statusBarNotification.value) {
+                                            await NotificationAndPresenceService.cancelAllNotifications();
+                                          }
                                           _showMsg(v ? 'Top pop-up banner ON' : 'Top pop-up banner OFF');
+                                        },
+                                ),
+                              ),
+                              ValueListenableBuilder<bool>(
+                                valueListenable: AppSettingsController.statusBarNotification,
+                                builder: (_, statusBarVal, __) => SwitchListTile(
+                                  secondary: const Icon(Icons.notifications_none),
+                                  title: const Text('Status bar notification'),
+                                  subtitle: Text(
+                                    statusBarVal
+                                        ? 'Top status bar icon & tray ON'
+                                        : 'Top status bar notification OFF',
+                                  ),
+                                  value: enabled && statusBarVal,
+                                  onChanged: !enabled
+                                      ? null
+                                      : (v) async {
+                                          AppSettingsController.statusBarNotification.value = v;
+                                          await AppSettingsController.save();
+                                          await NotificationAndPresenceService.rebuildNotificationChannels();
+                                          await FcmPushService.syncDeviceTokenAndPrefs();
+                                          if (!v && !AppSettingsController.headsUpPopup.value) {
+                                            await NotificationAndPresenceService.cancelAllNotifications();
+                                          }
+                                          _showMsg(v ? 'Status bar notification ON' : 'Status bar notification OFF');
                                         },
                                 ),
                               ),
@@ -1616,7 +1663,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
                                           await FcmPushService.syncDeviceTokenAndPrefs();
                                           if (v) _playShortRingtonePreview();
                                         },
-                                ),
                               ),
                               ValueListenableBuilder<bool>(
                                 valueListenable: AppSettingsController.audioCallSounds,
@@ -1633,7 +1679,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
                                           await FcmPushService.syncDeviceTokenAndPrefs();
                                           if (v) _playShortRingtonePreview();
                                         },
-                                ),
                               ),
                               ValueListenableBuilder<bool>(
                                 valueListenable: AppSettingsController.vibrate,
@@ -1650,7 +1695,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
                                           await FcmPushService.syncDeviceTokenAndPrefs();
                                           if (v) HapticFeedback.vibrate();
                                         },
-                                ),
                               ),
                             ],
                           ),
