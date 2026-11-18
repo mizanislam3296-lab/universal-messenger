@@ -64,14 +64,14 @@ jobs:
               with open("android/settings.gradle", "w") as f:
                   f.write("\n".join(out) + "\n")
 
-          # 2. Patch app/build.gradle.kts or app/build.gradle (minSdk 21 + MultiDex + Google Services)
+          # 2. Patch app/build.gradle.kts or app/build.gradle (minSdk 23 for FCM + MultiDex + Google Services)
           if os.path.exists("android/app/build.gradle.kts"):
               with open("android/app/build.gradle.kts", "r") as f:
                   lines = f.read().splitlines()
               out = []
               for l in lines:
                   if "minSdk =" in l or "minSdkVersion" in l:
-                      out.append("        minSdk = 21")
+                      out.append("        minSdk = 23")
                       out.append("        multiDexEnabled = true")
                       continue
                   out.append(l)
@@ -85,7 +85,7 @@ jobs:
               out = []
               for l in lines:
                   if "minSdk =" in l or "minSdkVersion" in l:
-                      out.append("        minSdkVersion 21")
+                      out.append("        minSdkVersion 23")
                       out.append("        multiDexEnabled true")
                       continue
                   out.append(l)
@@ -94,22 +94,43 @@ jobs:
               with open("android/app/build.gradle", "w") as f:
                   f.write("\n".join(out) + "\n")
 
-          # 3. Ensure INTERNET permission in AndroidManifest.xml
+          # 3. Ensure Permissions & PiP Support in AndroidManifest.xml
           manifest_path = "android/app/src/main/AndroidManifest.xml"
           if os.path.exists(manifest_path):
               with open(manifest_path, "r") as f:
                   m = f.read()
-              if "android.permission.INTERNET" not in m:
-                  m = m.replace("<application", "<uses-permission android:name=\"android.permission.INTERNET\"/>\n    <application", 1)
-                  with open(manifest_path, "w") as f:
-                      f.write(m)
+              perms = [
+                  "android.permission.INTERNET",
+                  "android.permission.POST_NOTIFICATIONS",
+                  "android.permission.VIBRATE",
+                  "android.permission.WAKE_LOCK",
+                  "android.permission.RECEIVE_BOOT_COMPLETED",
+              ]
+              perm_tags = ""
+              for p in perms:
+                  if p not in m:
+                      perm_tags += f"    <uses-permission android:name=\"{p}\"/>\n"
+              if perm_tags:
+                  m = m.replace("<application", perm_tags + "    <application", 1)
+              if "supportsPictureInPicture" not in m:
+                  m = m.replace("android:name=\".MainActivity\"", "android:name=\".MainActivity\"\n            android:supportsPictureInPicture=\"true\"", 1)
+              with open(manifest_path, "w") as f:
+                  f.write(m)
           '
 
       - name: Get Dependencies
         run: flutter pub get
 
       - name: Build Release APK
-        run: flutter build apk --release
+        env:
+          FCM_SERVICE_ACCOUNT: ${{ secrets.FCM_SERVICE_ACCOUNT }}
+        run: |
+          if [ -n "$FCM_SERVICE_ACCOUNT" ]; then
+            FCM_B64=$(printf '%s' "$FCM_SERVICE_ACCOUNT" | base64 -w 0)
+            flutter build apk --release --dart-define=FCM_SA_B64=$FCM_B64
+          else
+            flutter build apk --release
+          fi
 
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
