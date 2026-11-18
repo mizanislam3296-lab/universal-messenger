@@ -168,6 +168,7 @@ class _ChatScreenState extends State<ChatScreen> {
           callID: callId,
           isVideoCall: isVideo,
           receiverIdForCleanup: widget.receiverId,
+          callDocId: widget.receiverId,
         ),
       ),
     );
