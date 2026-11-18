@@ -14,6 +14,10 @@ final GlobalKey<NavigatorState> navigatorKey = GlobalKey<NavigatorState>();
 @pragma('vm:entry-point')
 Future<void> _firebaseMessagingBackgroundHandler(RemoteMessage message) async {
   await Firebase.initializeApp();
+  await AppSettingsController.load();
+  if (AppSettingsController.notificationsEnabled.value) {
+    await NotificationAndPresenceService.rebuildNotificationChannels();
+  }
 }
 
 void main() async {
@@ -25,6 +29,7 @@ void main() async {
     cacheSizeBytes: 50 * 1024 * 1024,
   );
   await AppSettingsController.load();
+  await NotificationAndPresenceService.rebuildNotificationChannels();
   runApp(const UniversalMessengerApp());
 }
 
