@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:firebase_auth/firebase_auth.dart';
@@ -12,12 +13,14 @@ class CallScreen extends StatefulWidget {
   final String callID;
   final bool isVideoCall;
   final String? receiverIdForCleanup;
+  final String? callDocId;
 
   const CallScreen({
     super.key,
     required this.callID,
     required this.isVideoCall,
     this.receiverIdForCleanup,
+    this.callDocId,
   });
 
   @override
@@ -27,18 +30,26 @@ class CallScreen extends StatefulWidget {
 class _CallScreenState extends State<CallScreen> {
   static const MethodChannel _nativeChannel =
       MethodChannel('com.universal.messenger/icon');
+
+  StreamSubscription<DocumentSnapshot>? _callDocSub;
   bool _allowPop = false;
   bool _cleanedUp = false;
+  bool _remoteEnded = false;
+
+  String? get _effectiveCallDocId =>
+      widget.callDocId ?? widget.receiverIdForCleanup;
 
   @override
   void initState() {
     super.initState();
     _setNativeCallState(true);
+    _listenForRemoteHangUp();
   }
 
   @override
   void dispose() {
-    _setNativeCallState(false);
+    _callDocSub?.cancel();
+    _cleanupCallStatus();
     super.dispose();
   }
 
@@ -48,20 +59,67 @@ class _CallScreenState extends State<CallScreen> {
     } catch (_) {}
   }
 
+  void _listenForRemoteHangUp() {
+    final docId = _effectiveCallDocId;
+    if (docId == null || docId.isEmpty) return;
+
+    _callDocSub = FirebaseFirestore.instance
+        .collection('calls')
+        .doc(docId)
+        .snapshots()
+        .listen((snap) {
+      if (!snap.exists || _remoteEnded || _cleanedUp) return;
+      final data = snap.data();
+      if (data == null) return;
+
+      final docCallId = (data['callId'] ?? '').toString();
+      final status = (data['status'] ?? '').toString();
+
+      if (docCallId == widget.callID &&
+          (status == 'ended' || status == 'declined')) {
+        _endCallFromRemote();
+      }
+    });
+  }
+
+  void _endCallFromRemote() {
+    if (_remoteEnded) return;
+    _remoteEnded = true;
+    _cleanedUp = true;
+    _setNativeCallState(false);
+
+    if (!mounted) return;
+    setState(() => _allowPop = true);
+
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      try {
+        ZegoUIKitPrebuiltCallController().hangUp(context);
+      } catch (_) {
+        if (Navigator.of(context).canPop()) {
+          Navigator.of(context).pop();
+        }
+      }
+    });
+  }
+
   void _cleanupCallStatus() {
     if (_cleanedUp) return;
     _cleanedUp = true;
     _setNativeCallState(false);
-    if (widget.receiverIdForCleanup != null) {
-      FirebaseFirestore.instance
-          .collection('calls')
-          .doc(widget.receiverIdForCleanup)
-          .set({'status': 'ended'}, SetOptions(merge: true));
+
+    final docId = _effectiveCallDocId;
+    if (docId != null && docId.isNotEmpty) {
+      FirebaseFirestore.instance.collection('calls').doc(docId).set({
+        'callId': widget.callID,
+        'status': 'ended',
+        'endedAt': FieldValue.serverTimestamp(),
+      }, SetOptions(merge: true));
     }
   }
 
   void _minimizeCall() {
-    if (_allowPop) return;
+    if (_allowPop || _remoteEnded) return;
     setState(() => _allowPop = true);
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) {
@@ -136,6 +194,14 @@ class _CallScreenState extends State<CallScreen> {
                 defaultAction.call();
               });
             },
+            user: ZegoCallUserEvents(
+              onLeave: (user) {
+                if (user.id != currentUser.uid) {
+                  _cleanupCallStatus();
+                  _endCallFromRemote();
+                }
+              },
+            ),
           ),
         ),
       ),
