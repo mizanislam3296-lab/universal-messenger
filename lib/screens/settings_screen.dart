@@ -6,9 +6,169 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:dio/dio.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
+import 'package:googleapis_auth/auth_io.dart';
+
+class FcmPushService {
+  static const String _fcmSaB64 = String.fromEnvironment('FCM_SA_B64');
+  static String? _cachedAccessToken;
+  static DateTime? _tokenExpiry;
+  static String? _projectId;
+
+  static bool get isConfigured => _fcmSaB64.trim().isNotEmpty;
+
+  static Future<String?> _getAccessToken() async {
+    if (!isConfigured) return null;
+    if (_cachedAccessToken != null &&
+        _tokenExpiry != null &&
+        DateTime.now().isBefore(_tokenExpiry!.subtract(const Duration(minutes: 5)))) {
+      return _cachedAccessToken;
+    }
+
+    try {
+      final jsonStr = utf8.decode(base64Decode(_fcmSaB64.trim()));
+      final jsonMap = jsonDecode(jsonStr) as Map<String, dynamic>;
+      _projectId = jsonMap['project_id']?.toString();
+      if (_projectId == null || _projectId!.isEmpty) return null;
+
+      final credentials = ServiceAccountCredentials.fromJson(jsonMap);
+      final client = await clientViaServiceAccount(
+        credentials,
+        ['https://www.googleapis.com/auth/firebase.messaging'],
+      );
+      _cachedAccessToken = client.credentials.accessToken.data;
+      _tokenExpiry = client.credentials.accessToken.expiry;
+      client.close();
+      return _cachedAccessToken;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  static Future<void> syncDeviceTokenAndPrefs() async {
+    final user = FirebaseAuth.instance.currentUser;
+    if (user == null) return;
+
+    try {
+      final messaging = FirebaseMessaging.instance;
+      if (!AppSettingsController.notificationsEnabled.value) {
+        await messaging.deleteToken();
+        await FirebaseFirestore.instance.collection('users').doc(user.uid).set({
+          'fcmToken': FieldValue.delete(),
+          'notifPrefs': {
+            'enabled': false,
+            'headsUpPopup': AppSettingsController.headsUpPopup.value,
+            'chatSounds': AppSettingsController.chatSounds.value,
+            'videoCallSounds': AppSettingsController.videoCallSounds.value,
+            'audioCallSounds': AppSettingsController.audioCallSounds.value,
+            'vibrate': AppSettingsController.vibrate.value,
+          },
+        }, SetOptions(merge: true));
+        return;
+      }
+
+      await messaging.requestPermission(alert: true, badge: true, sound: true);
+      final token = await messaging.getToken();
+      await FirebaseFirestore.instance.collection('users').doc(user.uid).set({
+        if (token != null && token.isNotEmpty) 'fcmToken': token,
+        'notifPrefs': {
+          'enabled': true,
+          'headsUpPopup': AppSettingsController.headsUpPopup.value,
+          'chatSounds': AppSettingsController.chatSounds.value,
+          'videoCallSounds': AppSettingsController.videoCallSounds.value,
+          'audioCallSounds': AppSettingsController.audioCallSounds.value,
+          'vibrate': AppSettingsController.vibrate.value,
+        },
+      }, SetOptions(merge: true));
+    } catch (_) {}
+  }
+
+  static Future<void> sendPushToUser({
+    required String receiverId,
+    required String title,
+    required String body,
+    bool isCall = false,
+    bool isVideo = false,
+    String? chatId,
+    String? callId,
+  }) async {
+    if (!isConfigured) return;
+    try {
+      final accessToken = await _getAccessToken();
+      if (accessToken == null || _projectId == null) return;
+
+      final userDoc = await FirebaseFirestore.instance.collection('users').doc(receiverId).get();
+      final data = userDoc.data();
+      if (data == null) return;
+
+      final targetToken = (data['fcmToken'] ?? '').toString().trim();
+      if (targetToken.isEmpty) return;
+
+      final prefs = (data['notifPrefs'] as Map<String, dynamic>?) ?? {};
+      if (prefs['enabled'] == false) return;
+
+      final showPopup = prefs['headsUpPopup'] != false;
+      final playSound = isCall
+          ? (isVideo ? prefs['videoCallSounds'] != false : prefs['audioCallSounds'] != false)
+          : (prefs['chatSounds'] != false);
+      final shouldVibrate = prefs['vibrate'] != false;
+
+      String channelId;
+      if (isCall) {
+        channelId = playSound ? 'fcm_call_sound_v1' : 'fcm_call_silent_v1';
+      } else if (showPopup && playSound) {
+        channelId = 'fcm_heads_up_sound_v1';
+      } else if (showPopup && !playSound) {
+        channelId = 'fcm_heads_up_silent_v1';
+      } else if (!showPopup && playSound) {
+        channelId = 'fcm_normal_sound_v1';
+      } else {
+        channelId = 'fcm_normal_silent_v1';
+      }
+
+      await Dio().post(
+        'https://fcm.googleapis.com/v1/projects/$_projectId/messages:send',
+        options: Options(
+          headers: {
+            'Authorization': 'Bearer $accessToken',
+            'Content-Type': 'application/json',
+          },
+        ),
+        data: {
+          'message': {
+            'token': targetToken,
+            'notification': {
+              'title': title,
+              'body': body,
+            },
+            'android': {
+              'priority': 'HIGH',
+              'notification': {
+                'channel_id': channelId,
+                if (playSound) 'sound': 'default',
+                'default_sound': playSound,
+                'default_vibrate_timings': shouldVibrate,
+                'notification_priority': showPopup ? 'PRIORITY_MAX' : 'PRIORITY_DEFAULT',
+                'visibility': 'PUBLIC',
+              },
+            },
+            'data': {
+              'type': isCall ? 'call' : 'message',
+              'title': title,
+              'body': body,
+              'chatId': chatId ?? '',
+              'callId': callId ?? '',
+              'isVideo': isVideo ? 'true' : 'false',
+            },
+          },
+        },
+      );
+    } catch (_) {}
+  }
+}
 
 class AppSettingsController {
   static const MethodChannel _nativeChannel = MethodChannel('com.universal.messenger/icon');
@@ -23,7 +183,7 @@ class AppSettingsController {
 
   static final ValueNotifier<bool> batteryOptimization = ValueNotifier(true);
   static final ValueNotifier<bool> notificationsEnabled = ValueNotifier(true);
-  static final ValueNotifier<bool> headsUpPopup = ValueNotifier(false);
+  static final ValueNotifier<bool> headsUpPopup = ValueNotifier(true);
   static final ValueNotifier<bool> chatSounds = ValueNotifier(true);
   static final ValueNotifier<bool> videoCallSounds = ValueNotifier(true);
   static final ValueNotifier<bool> audioCallSounds = ValueNotifier(true);
@@ -100,7 +260,7 @@ class AppSettingsController {
       chatThemeImage.value = data['chatThemeImage'];
       batteryOptimization.value = data['batteryOptimization'] ?? true;
       notificationsEnabled.value = data['notificationsEnabled'] ?? true;
-      headsUpPopup.value = data['headsUpPopup'] ?? false;
+      headsUpPopup.value = data['headsUpPopup'] ?? true;
       chatSounds.value = data['chatSounds'] ?? true;
       videoCallSounds.value = data['videoCallSounds'] ?? true;
       audioCallSounds.value = data['audioCallSounds'] ?? true;
@@ -154,6 +314,7 @@ class NotificationAndPresenceService {
 
   static StreamSubscription<DocumentSnapshot>? _callSub;
   static StreamSubscription<QuerySnapshot>? _chatSub;
+  static StreamSubscription<String>? _fcmTokenRefreshSub;
   static Timer? _heartbeatTimer;
 
   static Future<String> _resolveCallSoundUri() async {
@@ -176,6 +337,73 @@ class NotificationAndPresenceService {
       } catch (_) {}
     }
     return 'content://settings/system/notification_sound';
+  }
+
+  static Future<void> _createFcmChannels() async {
+    final androidPlugin =
+        _notifications.resolvePlatformSpecificImplementation<AndroidFlutterLocalNotificationsPlugin>();
+    if (androidPlugin == null) return;
+
+    final channels = [
+      const AndroidNotificationChannel(
+        'fcm_heads_up_sound_v1',
+        'Push Messages (Pop-up & Sound)',
+        description: 'Background pop-up message alerts with sound',
+        importance: Importance.max,
+        playSound: true,
+        enableVibration: true,
+        showBadge: true,
+      ),
+      const AndroidNotificationChannel(
+        'fcm_heads_up_silent_v1',
+        'Push Messages (Pop-up Silent)',
+        description: 'Background pop-up message alerts without sound',
+        importance: Importance.max,
+        playSound: false,
+        enableVibration: true,
+        showBadge: true,
+      ),
+      const AndroidNotificationChannel(
+        'fcm_normal_sound_v1',
+        'Push Messages (Status Bar & Sound)',
+        description: 'Status bar message alerts with sound',
+        importance: Importance.defaultImportance,
+        playSound: true,
+        enableVibration: true,
+        showBadge: true,
+      ),
+      const AndroidNotificationChannel(
+        'fcm_normal_silent_v1',
+        'Push Messages (Silent)',
+        description: 'Silent status bar message alerts',
+        importance: Importance.low,
+        playSound: false,
+        enableVibration: false,
+        showBadge: true,
+      ),
+      const AndroidNotificationChannel(
+        'fcm_call_sound_v1',
+        'Incoming Push Calls (Ringtone)',
+        description: 'Incoming call push notifications with sound',
+        importance: Importance.max,
+        playSound: true,
+        enableVibration: true,
+        showBadge: true,
+      ),
+      const AndroidNotificationChannel(
+        'fcm_call_silent_v1',
+        'Incoming Push Calls (Silent)',
+        description: 'Silent incoming call push notifications',
+        importance: Importance.max,
+        playSound: false,
+        enableVibration: true,
+        showBadge: true,
+      ),
+    ];
+
+    for (final ch in channels) {
+      await androidPlugin.createNotificationChannel(ch);
+    }
   }
 
   static Future<String> _ensureMessageChannel({
@@ -239,6 +467,7 @@ class NotificationAndPresenceService {
   }
 
   static Future<void> rebuildNotificationChannels() async {
+    await _createFcmChannels();
     final showPopup = AppSettingsController.headsUpPopup.value;
     final shouldVibrate = AppSettingsController.vibrate.value;
     await _ensureMessageChannel(
@@ -296,9 +525,19 @@ class NotificationAndPresenceService {
       final androidPlugin =
           _notifications.resolvePlatformSpecificImplementation<AndroidFlutterLocalNotificationsPlugin>();
       await androidPlugin?.requestNotificationsPermission();
+
+      _fcmTokenRefreshSub?.cancel();
+      _fcmTokenRefreshSub = FirebaseMessaging.instance.onTokenRefresh.listen((newToken) {
+        if (AppSettingsController.notificationsEnabled.value && newToken.isNotEmpty) {
+          FirebaseFirestore.instance.collection('users').doc(user.uid).set({
+            'fcmToken': newToken,
+          }, SetOptions(merge: true));
+        }
+      });
     }
 
     await rebuildNotificationChannels();
+    await FcmPushService.syncDeviceTokenAndPrefs();
     await setOnlineStatus(true);
 
     final intervalSeconds = AppSettingsController.batteryOptimization.value ? 25 : 12;
@@ -510,6 +749,7 @@ class NotificationAndPresenceService {
 
         if (!AppSettingsController.notificationsEnabled.value) continue;
         if (isAppInForeground && activeChatId == doc.id) continue;
+        if (!isAppInForeground && FcmPushService.isConfigured) continue;
 
         final lastSenderId = (data['lastSenderId'] ?? '').toString();
         if (lastSenderId == uid) continue;
@@ -1312,12 +1552,13 @@ class _SettingsScreenState extends State<SettingsScreen> {
                               SwitchListTile(
                                 secondary: const Icon(Icons.notifications),
                                 title: const Text('Notifications'),
-                                subtitle: Text(enabled ? 'All notifications enabled' : 'All notifications muted'),
+                                subtitle: Text(enabled ? 'All notifications enabled (even when closed)' : 'All notifications muted'),
                                 value: enabled,
                                 onChanged: (v) async {
                                   AppSettingsController.notificationsEnabled.value = v;
                                   await AppSettingsController.save();
                                   await NotificationAndPresenceService.rebuildNotificationChannels();
+                                  await FcmPushService.syncDeviceTokenAndPrefs();
                                   if (!v) {
                                     await NotificationAndPresenceService.stopNativeCallRingtone();
                                     await NotificationAndPresenceService.cancelAllNotifications();
@@ -1338,6 +1579,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                                           AppSettingsController.headsUpPopup.value = v;
                                           await AppSettingsController.save();
                                           await NotificationAndPresenceService.rebuildNotificationChannels();
+                                          await FcmPushService.syncDeviceTokenAndPrefs();
                                           _showMsg(v ? 'Top pop-up banner ON' : 'Top pop-up banner OFF');
                                         },
                                 ),
@@ -1354,6 +1596,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                                           AppSettingsController.chatSounds.value = v;
                                           await AppSettingsController.save();
                                           await NotificationAndPresenceService.rebuildNotificationChannels();
+                                          await FcmPushService.syncDeviceTokenAndPrefs();
                                           if (v) NotificationAndPresenceService.playNativeMessageSound();
                                         },
                                 ),
@@ -1370,6 +1613,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                                           AppSettingsController.videoCallSounds.value = v;
                                           await AppSettingsController.save();
                                           await NotificationAndPresenceService.rebuildNotificationChannels();
+                                          await FcmPushService.syncDeviceTokenAndPrefs();
                                           if (v) _playShortRingtonePreview();
                                         },
                                 ),
@@ -1386,6 +1630,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                                           AppSettingsController.audioCallSounds.value = v;
                                           await AppSettingsController.save();
                                           await NotificationAndPresenceService.rebuildNotificationChannels();
+                                          await FcmPushService.syncDeviceTokenAndPrefs();
                                           if (v) _playShortRingtonePreview();
                                         },
                                 ),
@@ -1402,6 +1647,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                                           AppSettingsController.vibrate.value = v;
                                           await AppSettingsController.save();
                                           await NotificationAndPresenceService.rebuildNotificationChannels();
+                                          await FcmPushService.syncDeviceTokenAndPrefs();
                                           if (v) HapticFeedback.vibrate();
                                         },
                                 ),
