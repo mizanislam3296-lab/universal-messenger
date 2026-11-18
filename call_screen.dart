@@ -111,11 +111,6 @@ class _CallScreenState extends State<CallScreen> {
             ZegoCallMenuBarButtonName.toggleScreenSharingButton,
           ];
 
-    config.layout = ZegoLayout.pictureInPicture(
-      isSmallViewDraggable: true,
-      switchLargeOrSmallViewByClick: true,
-    );
-
     config.pip.enableWhenBackground = true;
 
     return PopScope(
