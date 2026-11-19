@@ -10,73 +10,64 @@ def fix_gradle_file(p):
     except Exception:
         return False
 
-    lines = content.splitlines()
-    changed = False
+    is_kts = p.endswith(".kts")
+    orig = content
 
-    apply_indices = [
-        i for i, l in enumerate(lines)
-        if re.match(r"^\s*apply\s+plugin\s*:", l)
-    ]
-    if len(apply_indices) > 1:
-        apply_lines = [lines[i] for i in apply_indices]
-        android_first = [
-            l for l in apply_lines
-            if "com.android.library" in l or "com.android.application" in l
-        ]
-        others = [
-            l for l in apply_lines
-            if "com.android.library" not in l and "com.android.application" not in l
-        ]
-        reordered = android_first + others
-        if android_first and reordered != apply_lines:
-            for idx, new_line in zip(apply_indices, reordered):
-                lines[idx] = new_line
-            changed = True
+    m_plugins = re.search(r"(^|\n)([ \t]*plugins\s*\{)([\s\S]*?)(\n[ \t]*\})", content)
+    if m_plugins:
+        header = m_plugins.group(2)
+        body = m_plugins.group(3)
+        footer = m_plugins.group(4)
+        body_lines = [l for l in body.splitlines() if l.strip()]
+        has_android = any("com.android.library" in l or "com.android.application" in l for l in body_lines)
+        has_flutter_or_kotlin = any(
+            k in l for l in body_lines
+            for k in ("dev.flutter.flutter-gradle-plugin", "kotlin-android", "org.jetbrains.kotlin.android")
+        )
+        if has_android or has_flutter_or_kotlin:
+            android_lines = [l for l in body_lines if "com.android.library" in l or "com.android.application" in l]
+            if not android_lines:
+                android_lines = ['    id("com.android.library")' if is_kts else "    id 'com.android.library'"]
+            other_lines = [l for l in body_lines if "com.android.library" not in l and "com.android.application" not in l]
+            new_block = header + "\n" + "\n".join(android_lines + other_lines) + footer
+            content = content[:m_plugins.start(2)] + new_block + content[m_plugins.end(4):]
 
-    p_start = -1
-    p_end = -1
-    for i, l in enumerate(lines):
-        s = l.strip()
-        if re.match(r"^plugins\s*\{", s):
-            p_start = i
-        elif p_start != -1 and s == "}":
-            p_end = i
-            break
-    if p_start != -1 and p_end != -1:
-        block = lines[p_start + 1:p_end]
-        android_first = [
-            l for l in block
-            if "com.android.library" in l or "com.android.application" in l
-        ]
-        others = [
-            l for l in block
-            if "com.android.library" not in l and "com.android.application" not in l
-        ]
-        reordered = android_first + others
-        if android_first and reordered != block:
-            lines = lines[:p_start + 1] + reordered + lines[p_end:]
-            changed = True
+    elif any(k in content for k in ("dev.flutter.flutter-gradle-plugin", "flutter.gradle", "android {")):
+        lines = content.splitlines()
+        top_android_re = re.compile(
+            r'^(apply\s+plugin\s*:\s*["\']com\.android\.(library|application)["\']|apply\s*\(\s*plugin\s*=\s*["\']com\.android\.(library|application)["\']\s*\))'
+        )
+        target_re = re.compile(
+            r'^\s*(apply\s+plugin\s*:|apply\s*\(\s*plugin\s*=|apply\s+from\s*:|apply\s*\(\s*from\s*=|android\s*\{)'
+        )
 
-    new_content = "\n".join(lines) + "\n"
+        android_apply_lines = [l for l in lines if top_android_re.match(l)]
+        remaining = [l for l in lines if not top_android_re.match(l)]
 
-    if "android {" in new_content and "namespace" not in new_content:
+        insert_idx = next((i for i, l in enumerate(remaining) if target_re.match(l)), -1)
+        if insert_idx != -1:
+            if not android_apply_lines:
+                android_apply_lines = [
+                    'apply(plugin = "com.android.library")' if is_kts else "apply plugin: 'com.android.library'"
+                ]
+            remaining = remaining[:insert_idx] + android_apply_lines + remaining[insert_idx:]
+            content = "\n".join(remaining) + "\n"
+
+    if "android {" in content and "namespace" not in content:
         manifest_file = os.path.join(os.path.dirname(p), "src", "main", "AndroidManifest.xml")
         if os.path.exists(manifest_file):
             m_txt = open(manifest_file, "r", encoding="utf-8", errors="ignore").read()
             m_pkg = re.search(r'package\s*=\s*["\']([^"\']+)["\']', m_txt)
             if m_pkg:
                 pkg_name = m_pkg.group(1)
-                new_content = new_content.replace(
-                    "android {",
-                    f'android {{\n    namespace "{pkg_name}"',
-                    1
-                )
-                changed = True
+                ns_line = f'    namespace = "{pkg_name}"' if is_kts else f'    namespace "{pkg_name}"'
+                content = content.replace("android {", f"android {{\n{ns_line}", 1)
 
-    if changed:
-        open(p, "w", encoding="utf-8").write(new_content)
+    if content != orig:
+        open(p, "w", encoding="utf-8").write(content)
         print(f"Fixed plugin gradle: {p}")
-    return changed
+        return True
+    return False
 
 
 pkg_dirs = set()
