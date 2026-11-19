@@ -17,17 +17,57 @@ ANDROID_DIR = ROOT / "android"
 APP_DIR = ANDROID_DIR / "app"
 MAIN_DIR = APP_DIR / "src" / "main"
 TARGET_COMPILE_SDK = 36
+DEFAULT_APP_ID = "com.universal.universal_messenger"
 
 
 def log(msg: str) -> None:
     print(f"[configure_android] {msg}")
 
 
+def resolve_application_id() -> str:
+    """Read package_name from google-services.json to prevent Firebase package mismatch."""
+    gs_file = ROOT / "google-services.json"
+    if not gs_file.exists():
+        log("ERROR: google-services.json not found in repository root!")
+        sys.exit(1)
+
+    try:
+        data = json.loads(gs_file.read_text(encoding="utf-8"))
+    except Exception as exc:
+        log(f"ERROR: google-services.json contains invalid JSON: {exc}")
+        sys.exit(1)
+
+    package_names: list[str] = []
+    for client in data.get("client", []):
+        pkg = (
+            client.get("client_info", {})
+            .get("android_client_info", {})
+            .get("package_name", "")
+            .strip()
+        )
+        if pkg:
+            package_names.append(pkg)
+
+    if not package_names:
+        log("ERROR: No android_client_info.package_name found in google-services.json!")
+        sys.exit(1)
+
+    if DEFAULT_APP_ID in package_names:
+        log(f"Matched default applicationId in google-services.json: {DEFAULT_APP_ID}")
+        return DEFAULT_APP_ID
+
+    matched = package_names[0]
+    log(
+        f"Note: '{DEFAULT_APP_ID}' not found in google-services.json. "
+        f"Auto-matching applicationId to '{matched}'."
+    )
+    return matched
+
+
 def collect_plugin_android_dirs() -> list[Path]:
     """Discover all plugin android/ directories from package_config.json and pub-cache."""
     android_dirs: set[Path] = set()
 
-    # 1. Scan .dart_tool/package_config.json
     pkg_config = ROOT / ".dart_tool" / "package_config.json"
     if pkg_config.exists():
         try:
@@ -49,7 +89,6 @@ def collect_plugin_android_dirs() -> list[Path]:
         except Exception as exc:
             log(f"Warning: Could not parse package_config.json: {exc}")
 
-    # 2. Scan PUB_CACHE or ~/.pub-cache
     pub_cache = Path(os.environ.get("PUB_CACHE", str(Path.home() / ".pub-cache")))
     if pub_cache.is_dir():
         for gradle_name in ("build.gradle", "build.gradle.kts"):
@@ -182,16 +221,27 @@ def reorder_top_level_apply_plugins(content: str) -> str:
 
 
 def upgrade_compile_sdk(content: str, is_kts: bool) -> str:
-    """Force compileSdk to 36 across all plugins (prevents null ext / outdated SDK errors)."""
-    replacement = f"compileSdk = {TARGET_COMPILE_SDK}" if is_kts else f"compileSdk {TARGET_COMPILE_SDK}"
-
-    # Replace any compileSdk / compileSdkVersion line (numeric or expression like rootProject.ext / flutter.*)
-    pattern = re.compile(
-        r"(?m)^([ \t]*)(?:compileSdkVersion|compileSdk)(?:\s*=\s*|\s+|\s*\(\s*)[^\r\n]+$"
+    """Force static compileSdk = 36 so flutter.compileSdkVersion never evaluates to null in AGP 9."""
+    replacement = (
+        f"compileSdk = {TARGET_COMPILE_SDK}"
+        if is_kts
+        else f"compileSdk {TARGET_COMPILE_SDK}"
     )
-    if pattern.search(content):
-        content = pattern.sub(lambda m: f"{m.group(1)}{replacement}", content)
-    elif re.search(r"(?m)^[ \t]*android\s*\{", content):
+
+    content = re.sub(
+        r"(?m)^([ \t]*)compileSdkVersion\s*(?:=|\s+)\s*[^\r\n]+$",
+        lambda m: f"{m.group(1)}{replacement}",
+        content,
+    )
+    content = re.sub(
+        r"(?m)^([ \t]*)compileSdk\s*(?:=|\s+)\s*[^\r\n]+$",
+        lambda m: f"{m.group(1)}{replacement}",
+        content,
+    )
+
+    if re.search(r"(?m)^[ \t]*android\s*\{", content) and not re.search(
+        r"\bcompileSdk(?:Version)?\b", content
+    ):
         content = re.sub(
             r"(?m)^([ \t]*android\s*\{)",
             lambda m: f"{m.group(1)}\n    {replacement}",
@@ -257,20 +307,12 @@ def patch_plugin_android_dir(android_dir: Path) -> None:
         original = gradle_file.read_text(encoding="utf-8", errors="ignore")
         content = original
 
-        # 1. Replace deprecated jcenter() with mavenCentral()
         content = re.sub(r"\bjcenter\s*\(\s*\)", "mavenCentral()", content)
-
-        # 2. Reorder plugins so com.android.library is applied first
         content = reorder_plugins_block(content)
         content = reorder_top_level_apply_plugins(content)
-
-        # 3. Force compileSdk to 36 (resolves null rootProject.ext / flutter.* issues)
         content = upgrade_compile_sdk(content, is_kts=is_kts)
-
-        # 4. Inject buildFeatures { buildConfig = true } per plugin (AGP 9 safe)
         content = ensure_build_config_feature(content, is_kts=is_kts)
 
-        # 5. Inject namespace if missing
         has_namespace = re.search(
             r"""(?m)^\s*namespace\s*(?:=|\s+['"])""", content
         )
@@ -304,7 +346,6 @@ def configure_gradle_properties() -> None:
         else []
     )
 
-    # Remove flags removed or breaking Kotlin DSL in AGP 9.0+
     removed_keys = {
         "android.defaults.buildfeatures.buildconfig",
         "android.enableJetifier",
@@ -356,12 +397,6 @@ def configure_settings_gradle() -> None:
 
         before_hook = """
 gradle.beforeProject {
-    if (path == ":") {
-        val ext = extensions.extraProperties
-        if (!ext.has("compileSdkVersion")) ext.set("compileSdkVersion", 36)
-        if (!ext.has("minSdkVersion")) ext.set("minSdkVersion", 23)
-        if (!ext.has("targetSdkVersion")) ext.set("targetSdkVersion", 34)
-    }
     if (path != ":" && name != "app" && buildFile.exists()) {
         val text = buildFile.readText()
         val hasPluginsDsl = Regex("(?m)^\\\\s*plugins\\\\s*\\\\{").containsMatchIn(text)
@@ -394,11 +429,6 @@ gradle.beforeProject {
 
         before_hook_groovy = """
 gradle.beforeProject { proj ->
-    if (proj.path == ":") {
-        if (!proj.ext.has("compileSdkVersion")) proj.ext.set("compileSdkVersion", 36)
-        if (!proj.ext.has("minSdkVersion")) proj.ext.set("minSdkVersion", 23)
-        if (!proj.ext.has("targetSdkVersion")) proj.ext.set("targetSdkVersion", 34)
-    }
     if (proj.path != ":" && proj.name != "app" && proj.buildFile.exists()) {
         def text = proj.buildFile.text
         def hasPluginsDsl = (text =~ /(?m)^\\s*plugins\\s*\\{/).find()
@@ -419,12 +449,12 @@ gradle.beforeProject { proj ->
         log("Configured android/settings.gradle")
 
 
-def write_app_build_gradle_kts() -> None:
+def write_app_build_gradle_kts(application_id: str) -> None:
     groovy_app = APP_DIR / "build.gradle"
     if groovy_app.exists():
         groovy_app.unlink()
 
-    kts_content = """import org.jetbrains.kotlin.gradle.dsl.JvmTarget
+    kts_template = """import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 import org.jetbrains.kotlin.gradle.tasks.KotlinCompile
 
 plugins {
@@ -436,7 +466,7 @@ plugins {
 
 android {
     namespace = "com.universal.universal_messenger"
-    compileSdk = maxOf(flutter.compileSdkVersion, 36)
+    compileSdk = 36
     ndkVersion = flutter.ndkVersion
 
     compileOptions {
@@ -446,7 +476,7 @@ android {
     }
 
     defaultConfig {
-        applicationId = "com.universal.universal_messenger"
+        applicationId = "__APP_ID__"
         minSdk = 23
         targetSdk = 34
         versionCode = flutter.versionCode
@@ -482,16 +512,14 @@ dependencies {
     implementation("androidx.multidex:multidex:2.0.1")
 }
 """
+    kts_content = kts_template.replace("__APP_ID__", application_id)
     (APP_DIR / "build.gradle.kts").write_text(kts_content, encoding="utf-8")
-    log("Wrote android/app/build.gradle.kts")
+    log(f"Wrote android/app/build.gradle.kts (applicationId={application_id})")
 
 
 def copy_google_services() -> None:
     src = ROOT / "google-services.json"
     dst = APP_DIR / "google-services.json"
-    if not src.exists():
-        log("ERROR: google-services.json not found in repository root!")
-        sys.exit(1)
     shutil.copy2(src, dst)
     log("Copied google-services.json to android/app/google-services.json")
 
@@ -544,7 +572,7 @@ def write_android_manifest() -> None:
         android:requestLegacyExternalStorage="true">
 
         <activity
-            android:name=".MainActivity"
+            android:name="com.universal.universal_messenger.MainActivity"
             android:exported="true"
             android:launchMode="singleTop"
             android:taskAffinity=""
@@ -608,7 +636,6 @@ def write_android_manifest() -> None:
 
 
 def write_main_activity_kt() -> None:
-    # Remove any generated Java MainActivity to prevent duplicate classes
     for stray in MAIN_DIR.rglob("MainActivity.java"):
         stray.unlink()
 
@@ -886,10 +913,11 @@ def main() -> None:
         log("ERROR: android/ directory not found. Run 'flutter create' first.")
         sys.exit(1)
 
+    app_id = resolve_application_id()
     patch_all_plugins()
     configure_gradle_properties()
     configure_settings_gradle()
-    write_app_build_gradle_kts()
+    write_app_build_gradle_kts(app_id)
     copy_google_services()
     write_file_paths_xml()
     write_android_manifest()
