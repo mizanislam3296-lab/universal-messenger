@@ -16,7 +16,7 @@ ROOT = Path.cwd()
 ANDROID_DIR = ROOT / "android"
 APP_DIR = ANDROID_DIR / "app"
 MAIN_DIR = APP_DIR / "src" / "main"
-TARGET_COMPILE_SDK = 36
+TARGET_COMPILE_SDK = 37
 DEFAULT_APP_ID = "com.universal.universal_messenger"
 
 
@@ -221,7 +221,7 @@ def reorder_top_level_apply_plugins(content: str) -> str:
 
 
 def upgrade_compile_sdk(content: str, is_kts: bool) -> str:
-    """Force static compileSdk = 36 so flutter.compileSdkVersion never evaluates to null in AGP 9."""
+    """Force static compileSdk = 37 so flutter.compileSdkVersion never evaluates to null in AGP 9."""
     replacement = (
         f"compileSdk = {TARGET_COMPILE_SDK}"
         if is_kts
@@ -466,7 +466,7 @@ plugins {
 
 android {
     namespace = "com.universal.universal_messenger"
-    compileSdk = 36
+    compileSdk = 37
     ndkVersion = flutter.ndkVersion
 
     compileOptions {
