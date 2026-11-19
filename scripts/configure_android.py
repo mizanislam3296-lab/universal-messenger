@@ -1,93 +1,581 @@
-import json, os, re
+#!/usr/bin/env python3
+"""
+Configure freshly generated Android project and patch cached Flutter plugins
+for AGP 8+ / modern Flutter compatibility on CI.
+"""
+
+import json
+import os
+import re
+import shutil
+import sys
+from pathlib import Path
 from urllib.parse import unquote, urlparse
 
-def fix_gradle(p):
-    try:
-        c = open(p, encoding="utf-8", errors="ignore").read()
-    except Exception:
-        return
-    kts = p.endswith(".kts")
-    orig = c
-    c = c.replace("jcenter()", "mavenCentral()")
-    mp = re.search(r"(^|\n)([ \t]*plugins\s*\{)([\s\S]*?)(\n[ \t]*\})", c)
-    if mp:
-        lines = [l for l in mp.group(3).splitlines() if l.strip()]
-        if any(k in l for l in lines for k in ("com.android.", "flutter-gradle-plugin", "kotlin")):
-            a = [l for l in lines if "com.android.library" in l or "com.android.application" in l]
-            if not a:
-                a = ['    id("com.android.library")' if kts else "    id 'com.android.library'"]
-            o = [l for l in lines if "com.android.library" not in l and "com.android.application" not in l]
-            c = c[:mp.start(2)] + mp.group(2) + "\n" + "\n".join(a + o) + mp.group(4) + c[mp.end(4):]
-    elif re.search(r"(flutter-gradle-plugin|flutter\.gradle|^\s*android\s*\{)", c, re.M):
-        lines = c.splitlines()
-        ar = re.compile(r'^\s*apply[\s(]+plugin\s*[:=]\s*["\']com\.android\.(library|application)["\']')
-        tr = re.compile(r'^\s*(apply[\s(]+(plugin|from)\s*[:=]|android\s*\{)')
-        al = [l for l in lines if ar.match(l)]
-        rem = [l for l in lines if not ar.match(l)]
-        idx = next((i for i, l in enumerate(rem) if tr.match(l)), -1)
-        if idx != -1:
-            if not al:
-                al = ['apply(plugin = "com.android.library")' if kts else "apply plugin: 'com.android.library'"]
-            c = "\n".join(rem[:idx] + al + rem[idx:]) + "\n"
-    if re.search(r"^\s*android\s*\{", c, re.M):
-        c = re.sub(r"\bcompileSdkVersion\s+\d+", "compileSdkVersion 34", c)
-        c = re.sub(r"\bcompileSdk\s*=\s*\d+", "compileSdk = 34", c)
-        if "namespace" not in c:
-            mf = os.path.join(os.path.dirname(p), "src/main/AndroidManifest.xml")
-            pkg = None
-            if os.path.exists(mf):
-                mt = open(mf, encoding="utf-8", errors="ignore").read()
-                m = re.search(r'package\s*=\s*["\']([^"\']+)["\']', mt)
-                if m:
-                    pkg = m.group(1)
-                    open(mf, "w", encoding="utf-8").write(re.sub(r'\s+package\s*=\s*["\'][^"\']+["\']', "", mt, count=1))
-            if not pkg:
-                gm = re.search(r'^\s*group\s*[:=]?\s*["\']([^"\']+)["\']', c, re.M)
-                pkg = gm.group(1) if gm else "com.universal.plugin_" + re.sub(r"[^a-zA-Z0-9]", "_", os.path.basename(os.path.dirname(os.path.dirname(p))))
-            ns = f'    namespace = "{pkg}"' if kts else f'    namespace "{pkg}"'
-            c = re.sub(r"^(\s*android\s*\{)", rf"\1\n{ns}", c, count=1, flags=re.M)
-    if c != orig:
-        open(p, "w", encoding="utf-8").write(c)
-        print("Fixed:", p)
+ROOT = Path.cwd()
+ANDROID_DIR = ROOT / "android"
+APP_DIR = ANDROID_DIR / "app"
+MAIN_DIR = APP_DIR / "src" / "main"
+MIN_COMPILE_SDK = 34
 
-dirs = {os.environ.get("PUB_CACHE", ""), os.path.expanduser("~/.pub-cache"), "/root/.pub-cache", "/home/runner/.pub-cache"}
-if os.path.exists(".dart_tool/package_config.json"):
-    for pkg in json.load(open(".dart_tool/package_config.json", encoding="utf-8")).get("packages", []):
-        u = pkg.get("rootUri", "")
-        lp = unquote(urlparse(u).path) if u.startswith("file://") else os.path.abspath(os.path.join(".dart_tool", u))
-        if os.path.isdir(lp):
-            dirs.add(lp)
-for d in dirs:
-    if d and os.path.exists(d):
-        for r, _, fs in os.walk(d):
-            for fn in fs:
-                if fn in ("build.gradle", "build.gradle.kts"):
-                    fix_gradle(os.path.join(r, fn))
 
-gp = "android/gradle.properties"
-if os.path.exists(gp):
-    gpt = open(gp, encoding="utf-8").read()
-    if "buildfeatures.buildconfig" not in gpt:
-        open(gp, "w", encoding="utf-8").write(gpt + "\nandroid.defaults.buildfeatures.buildconfig=true\n")
+def log(msg: str) -> None:
+    print(f"[configure_android] {msg}")
 
-os.makedirs("android/app/src/main/res/xml", exist_ok=True)
-open("android/app/src/main/res/xml/file_paths.xml", "w").write(
-    '<?xml version="1.0" encoding="utf-8"?><paths><files-path name="f" path="."/><cache-path name="c" path="."/><external-path name="e" path="."/></paths>'
-)
-if os.path.exists("google-services.json"):
-    open("android/app/google-services.json", "wb").write(open("google-services.json", "rb").read())
-assert os.path.exists("android/app/google-services.json"), "google-services.json missing"
 
-kt_dir = "android/app/src/main/kotlin/com/universal/universal_messenger"
-os.makedirs(kt_dir, exist_ok=True)
-open(os.path.join(kt_dir, "MainActivity.kt"), "w", encoding="utf-8").write('''package com.universal.universal_messenger
+def collect_plugin_android_dirs() -> list[Path]:
+    """Discover all plugin android/ directories from package_config.json and pub-cache."""
+    android_dirs: set[Path] = set()
+
+    # 1. Scan .dart_tool/package_config.json
+    pkg_config = ROOT / ".dart_tool" / "package_config.json"
+    if pkg_config.exists():
+        try:
+            data = json.loads(pkg_config.read_text(encoding="utf-8"))
+            for pkg in data.get("packages", []):
+                root_uri = pkg.get("rootUri", "")
+                if not root_uri:
+                    continue
+                if root_uri.startswith("file://"):
+                    pkg_path = Path(unquote(urlparse(root_uri).path))
+                else:
+                    pkg_path = (pkg_config.parent / root_uri).resolve()
+                candidate = pkg_path / "android"
+                if candidate.is_dir() and (
+                    (candidate / "build.gradle").exists()
+                    or (candidate / "build.gradle.kts").exists()
+                ):
+                    android_dirs.add(candidate.resolve())
+        except Exception as exc:
+            log(f"Warning: Could not parse package_config.json: {exc}")
+
+    # 2. Scan PUB_CACHE or ~/.pub-cache
+    pub_cache = Path(os.environ.get("PUB_CACHE", str(Path.home() / ".pub-cache")))
+    if pub_cache.is_dir():
+        for gradle_name in ("build.gradle", "build.gradle.kts"):
+            for gradle_file in pub_cache.rglob(gradle_name):
+                if gradle_file.parent.name == "android":
+                    android_dirs.add(gradle_file.parent.resolve())
+
+    return sorted(android_dirs)
+
+
+def extract_and_clean_manifest_package(android_dir: Path) -> str | None:
+    """Read package from plugin AndroidManifest.xml and strip deprecated package attribute."""
+    manifest_path = android_dir / "src" / "main" / "AndroidManifest.xml"
+    if not manifest_path.exists():
+        return None
+
+    content = manifest_path.read_text(encoding="utf-8", errors="ignore")
+    tag_match = re.search(r"<manifest\b[^>]*>", content, flags=re.DOTALL)
+    if not tag_match:
+        return None
+
+    manifest_tag = tag_match.group(0)
+    pkg_match = re.search(r'\bpackage\s*=\s*["\']([^"\']+)["\']', manifest_tag)
+    if not pkg_match:
+        return None
+
+    package_name = pkg_match.group(1).strip()
+    cleaned_tag = re.sub(r'\s+\bpackage\s*=\s*["\'][^"\']+["\']', "", manifest_tag)
+    new_content = (
+        content[: tag_match.start()] + cleaned_tag + content[tag_match.end() :]
+    )
+    if new_content != content:
+        manifest_path.write_text(new_content, encoding="utf-8")
+    return package_name
+
+
+def reorder_plugins_block(content: str) -> str:
+    """Ensure com.android.library is always first inside a plugins { ... } block."""
+    pattern = re.compile(r"(?m)^([ \t]*plugins\s*\{)([\s\S]*?)(\n[ \t]*\})")
+
+    def _replace(match: re.Match) -> str:
+        header, body, footer = match.group(1), match.group(2), match.group(3)
+        android_lib: list[str] = []
+        kotlin_lines: list[str] = []
+        other_lines: list[str] = []
+
+        for line in body.splitlines():
+            stripped = line.strip()
+            if not stripped:
+                continue
+            if "com.android.library" in stripped:
+                android_lib.append(line)
+            elif (
+                "kotlin-android" in stripped
+                or "org.jetbrains.kotlin.android" in stripped
+            ):
+                kotlin_lines.append(line)
+            else:
+                other_lines.append(line)
+
+        if not android_lib:
+            return match.group(0)
+
+        reordered = android_lib + kotlin_lines + other_lines
+        return f"{header}\n" + "\n".join(reordered) + footer
+
+    return pattern.sub(_replace, content, count=1)
+
+
+def reorder_top_level_apply_plugins(content: str) -> str:
+    """Ensure top-level apply plugin: 'com.android.library' runs before kotlin-android and android {}."""
+    apply_re = re.compile(
+        r"""^[ \t]*apply\s+plugin\s*:\s*['"]([^'"]+)['"][ \t]*$"""
+    )
+    lines = content.splitlines()
+    depth = 0
+    matched_indices: set[int] = set()
+    plugin_entries: list[tuple[str, str]] = []
+    first_apply_out_idx: int | None = None
+    android_block_out_idx: int | None = None
+    kept_lines: list[str] = []
+
+    for idx, line in enumerate(lines):
+        code_part = re.sub(r"//.*$", "", line)
+        if depth == 0:
+            m = apply_re.match(line)
+            if m:
+                matched_indices.add(idx)
+                plugin_entries.append((m.group(1), line.strip()))
+                if first_apply_out_idx is None:
+                    first_apply_out_idx = len(kept_lines)
+                continue
+            if android_block_out_idx is None and re.match(r"^[ \t]*android\s*\{", line):
+                android_block_out_idx = len(kept_lines)
+
+        kept_lines.append(line)
+        depth += code_part.count("{") - code_part.count("}")
+        if depth < 0:
+            depth = 0
+
+    if not any(pid == "com.android.library" for pid, _ in plugin_entries):
+        return content
+
+    seen: set[str] = set()
+    android_lib: list[str] = []
+    kotlin_lines: list[str] = []
+    other_lines: list[str] = []
+
+    for pid, raw in plugin_entries:
+        if pid in seen:
+            continue
+        seen.add(pid)
+        if pid == "com.android.library":
+            android_lib.append(raw)
+        elif pid in ("kotlin-android", "org.jetbrains.kotlin.android"):
+            kotlin_lines.append(raw)
+        else:
+            other_lines.append(raw)
+
+    ordered = android_lib + kotlin_lines + other_lines
+
+    if android_block_out_idx is not None and (
+        first_apply_out_idx is None or first_apply_out_idx > android_block_out_idx
+    ):
+        insert_at = android_block_out_idx
+    else:
+        insert_at = first_apply_out_idx if first_apply_out_idx is not None else 0
+
+    result = kept_lines[:insert_at] + ordered + kept_lines[insert_at:]
+    trailing = "\n" if content.endswith("\n") else ""
+    return "\n".join(result) + trailing
+
+
+def upgrade_compile_sdk(content: str, is_kts: bool) -> str:
+    """Upgrade numeric compileSdk / compileSdkVersion values below MIN_COMPILE_SDK to 34."""
+
+    def _upgrade_num(match: re.Match) -> str:
+        val = int(match.group(1))
+        target = max(val, MIN_COMPILE_SDK)
+        return f"compileSdk = {target}" if is_kts else f"compileSdk {target}"
+
+    content = re.sub(
+        r"\bcompileSdkVersion\s*(?:=|\()?\s*(\d+)\s*\)?",
+        _upgrade_num,
+        content,
+    )
+    content = re.sub(
+        r"\bcompileSdk\s*(?:=|\s+)\s*(\d+)",
+        _upgrade_num,
+        content,
+    )
+    return content
+
+
+def infer_namespace(content: str, manifest_pkg: str | None, android_dir: Path) -> str:
+    """Resolve namespace from AndroidManifest, build.gradle group, or folder name."""
+    if manifest_pkg:
+        return manifest_pkg
+    group_match = re.search(
+        r"""(?m)^\s*group\s*(?:=|\s+)\s*['"]([^'"]+)['"]""", content
+    )
+    if group_match:
+        return group_match.group(1).strip()
+    raw_name = re.sub(r"[^a-zA-Z0-9_]", "_", android_dir.parent.name).lower()
+    raw_name = re.sub(r"_+", "_", raw_name).strip("_") or "plugin"
+    if raw_name[0].isdigit():
+        raw_name = f"p_{raw_name}"
+    return f"com.universal.plugin.{raw_name}"
+
+
+def patch_plugin_android_dir(android_dir: Path) -> None:
+    manifest_pkg = extract_and_clean_manifest_package(android_dir)
+
+    for gradle_name in ("build.gradle", "build.gradle.kts"):
+        gradle_file = android_dir / gradle_name
+        if not gradle_file.exists():
+            continue
+
+        is_kts = gradle_name.endswith(".kts")
+        original = gradle_file.read_text(encoding="utf-8", errors="ignore")
+        content = original
+
+        # 1. Replace deprecated jcenter() with mavenCentral()
+        content = re.sub(r"\bjcenter\s*\(\s*\)", "mavenCentral()", content)
+
+        # 2. Reorder plugins so com.android.library is applied first
+        content = reorder_plugins_block(content)
+        content = reorder_top_level_apply_plugins(content)
+
+        # 3. Upgrade compileSdk to at least 34
+        content = upgrade_compile_sdk(content, is_kts=is_kts)
+
+        # 4. Inject namespace if missing
+        has_namespace = re.search(
+            r"""(?m)^\s*namespace\s*(?:=|\s+['"])""", content
+        )
+        if not has_namespace and re.search(r"(?m)^[ \t]*android\s*\{", content):
+            ns = infer_namespace(content, manifest_pkg, android_dir)
+            ns_line = f'    namespace = "{ns}"' if is_kts else f"    namespace '{ns}'"
+            content = re.sub(
+                r"(?m)^([ \t]*android\s*\{)",
+                lambda m: f"{m.group(1)}\n{ns_line}",
+                content,
+                count=1,
+            )
+
+        if content != original:
+            gradle_file.write_text(content, encoding="utf-8")
+            log(f"Patched plugin Gradle: {gradle_file}")
+
+
+def patch_all_plugins() -> None:
+    plugin_dirs = collect_plugin_android_dirs()
+    log(f"Found {len(plugin_dirs)} plugin android directories to inspect.")
+    for android_dir in plugin_dirs:
+        patch_plugin_android_dir(android_dir)
+
+
+def configure_gradle_properties() -> None:
+    props_file = ANDROID_DIR / "gradle.properties"
+    lines = (
+        props_file.read_text(encoding="utf-8").splitlines()
+        if props_file.exists()
+        else []
+    )
+    desired = {
+        "org.gradle.jvmargs": "-Xmx4G -XX:MaxMetaspaceSize=1G -XX:+HeapDumpOnOutOfMemoryError",
+        "android.useAndroidX": "true",
+        "android.enableJetifier": "true",
+        "android.defaults.buildfeatures.buildconfig": "true",
+    }
+
+    updated_lines: list[str] = []
+    seen: set[str] = set()
+    for line in lines:
+        stripped = line.strip()
+        if stripped and not stripped.startswith("#") and "=" in stripped:
+            key = stripped.split("=", 1)[0].strip()
+            if key in desired:
+                updated_lines.append(f"{key}={desired[key]}")
+                seen.add(key)
+                continue
+        updated_lines.append(line)
+
+    for key, val in desired.items():
+        if key not in seen:
+            updated_lines.append(f"{key}={val}")
+
+    props_file.write_text("\n".join(updated_lines) + "\n", encoding="utf-8")
+    log("Configured android/gradle.properties")
+
+
+def configure_settings_gradle() -> None:
+    kts_file = ANDROID_DIR / "settings.gradle.kts"
+    groovy_file = ANDROID_DIR / "settings.gradle"
+
+    if kts_file.exists():
+        content = kts_file.read_text(encoding="utf-8")
+        gms_line = '    id("com.google.gms.google-services") version "4.4.2" apply false'
+        if "com.google.gms.google-services" not in content:
+            content = re.sub(
+                r"(?m)(plugins\s*\{[\s\S]*?)(\n\})",
+                lambda m: f"{m.group(1)}\n{gms_line}{m.group(2)}",
+                content,
+                count=1,
+            )
+
+        before_hook = """
+gradle.beforeProject {
+    if (path != ":" && name != "app" && buildFile.exists()) {
+        val text = buildFile.readText()
+        val hasPluginsDsl = Regex("(?m)^\\\\s*plugins\\\\s*\\\\{").containsMatchIn(text)
+        val usesAndroidLib = text.contains("com.android.library") || Regex("(?m)^\\\\s*android\\\\s*\\\\{").containsMatchIn(text)
+        if (!hasPluginsDsl && usesAndroidLib) {
+            try {
+                pluginManager.apply("com.android.library")
+            } catch (_: Throwable) {
+            }
+        }
+    }
+}
+"""
+        if "gradle.beforeProject" not in content:
+            content = content.rstrip() + "\n" + before_hook
+
+        kts_file.write_text(content, encoding="utf-8")
+        log("Configured android/settings.gradle.kts")
+
+    if groovy_file.exists():
+        content = groovy_file.read_text(encoding="utf-8")
+        gms_line = '    id "com.google.gms.google-services" version "4.4.2" apply false'
+        if "com.google.gms.google-services" not in content:
+            content = re.sub(
+                r"(?m)(plugins\s*\{[\s\S]*?)(\n\})",
+                lambda m: f"{m.group(1)}\n{gms_line}{m.group(2)}",
+                content,
+                count=1,
+            )
+
+        before_hook_groovy = """
+gradle.beforeProject { proj ->
+    if (proj.path != ":" && proj.name != "app" && proj.buildFile.exists()) {
+        def text = proj.buildFile.text
+        def hasPluginsDsl = (text =~ /(?m)^\\s*plugins\\s*\\{/).find()
+        def usesAndroidLib = text.contains("com.android.library") || (text =~ /(?m)^\\s*android\\s*\\{/).find()
+        if (!hasPluginsDsl && usesAndroidLib) {
+            try {
+                proj.pluginManager.apply("com.android.library")
+            } catch (Throwable ignored) {
+            }
+        }
+    }
+}
+"""
+        if "gradle.beforeProject" not in content:
+            content = content.rstrip() + "\n" + before_hook_groovy
+
+        groovy_file.write_text(content, encoding="utf-8")
+        log("Configured android/settings.gradle")
+
+
+def write_app_build_gradle_kts() -> None:
+    groovy_app = APP_DIR / "build.gradle"
+    if groovy_app.exists():
+        groovy_app.unlink()
+
+    kts_content = """plugins {
+    id("com.android.application")
+    id("kotlin-android")
+    id("dev.flutter.flutter-gradle-plugin")
+    id("com.google.gms.google-services")
+}
+
+android {
+    namespace = "com.universal.universal_messenger"
+    compileSdk = maxOf(flutter.compileSdkVersion, 35)
+    ndkVersion = flutter.ndkVersion
+
+    compileOptions {
+        isCoreLibraryDesugaringEnabled = true
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
+    }
+
+    kotlinOptions {
+        jvmTarget = JavaVersion.VERSION_17.toString()
+    }
+
+    defaultConfig {
+        applicationId = "com.universal.universal_messenger"
+        minSdk = 23
+        targetSdk = 34
+        versionCode = flutter.versionCode
+        versionName = flutter.versionName
+        multiDexEnabled = true
+    }
+
+    buildFeatures {
+        buildConfig = true
+    }
+
+    buildTypes {
+        release {
+            signingConfig = signingConfigs.getByName("debug")
+            isMinifyEnabled = false
+            isShrinkResources = false
+        }
+    }
+}
+
+flutter {
+    source = "../.."
+}
+
+dependencies {
+    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.4")
+    implementation("androidx.multidex:multidex:2.0.1")
+}
+"""
+    (APP_DIR / "build.gradle.kts").write_text(kts_content, encoding="utf-8")
+    log("Wrote android/app/build.gradle.kts")
+
+
+def copy_google_services() -> None:
+    src = ROOT / "google-services.json"
+    dst = APP_DIR / "google-services.json"
+    if not src.exists():
+        log("ERROR: google-services.json not found in repository root!")
+        sys.exit(1)
+    shutil.copy2(src, dst)
+    log("Copied google-services.json to android/app/google-services.json")
+
+
+def write_file_paths_xml() -> None:
+    xml_dir = MAIN_DIR / "res" / "xml"
+    xml_dir.mkdir(parents=True, exist_ok=True)
+    content = """<?xml version="1.0" encoding="utf-8"?>
+<paths xmlns:android="http://schemas.android.com/apk/res/android">
+    <external-path name="external_files" path="." />
+    <external-files-path name="external_app_files" path="." />
+    <external-cache-path name="external_cache" path="." />
+    <cache-path name="cache" path="." />
+    <files-path name="files" path="." />
+</paths>
+"""
+    (xml_dir / "file_paths.xml").write_text(content, encoding="utf-8")
+    log("Wrote android/app/src/main/res/xml/file_paths.xml")
+
+
+def write_android_manifest() -> None:
+    manifest_content = """<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.VIBRATE" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+    <uses-permission android:name="android.permission.BLUETOOTH" />
+    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CAMERA" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+
+    <application
+        android:label="Universal Messenger"
+        android:name="${applicationName}"
+        android:icon="@mipmap/ic_launcher"
+        android:usesCleartextTraffic="true"
+        android:requestLegacyExternalStorage="true">
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:launchMode="singleTop"
+            android:taskAffinity=""
+            android:theme="@style/LaunchTheme"
+            android:configChanges="orientation|keyboardHidden|keyboard|screenSize|smallestScreenSize|locale|layoutDirection|fontScale|screenLayout|density|uiMode"
+            android:hardwareAccelerated="true"
+            android:windowSoftInputMode="adjustResize"
+            android:supportsPictureInPicture="true"
+            android:resizeableActivity="true"
+            android:showWhenLocked="true"
+            android:turnScreenOn="true">
+            <meta-data
+                android:name="io.flutter.embedding.android.NormalTheme"
+                android:resource="@style/NormalTheme" />
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <meta-data
+            android:name="com.google.firebase.messaging.default_notification_channel_id"
+            android:value="fcm_msg_all_v1" />
+
+        <meta-data
+            android:name="flutterEmbedding"
+            android:value="2" />
+
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
+
+        <service
+            android:name="im.zego.zegoexpress.internal.ZegoScreenCaptureService"
+            android:enabled="true"
+            android:exported="false"
+            android:foregroundServiceType="mediaProjection"
+            tools:node="merge" />
+    </application>
+
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.PROCESS_TEXT" />
+            <data android:mimeType="text/plain" />
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <data android:scheme="https" />
+        </intent>
+    </queries>
+</manifest>
+"""
+    (MAIN_DIR / "AndroidManifest.xml").write_text(manifest_content, encoding="utf-8")
+    log("Wrote android/app/src/main/AndroidManifest.xml")
+
+
+def write_main_activity_kt() -> None:
+    # Remove any generated Java MainActivity to prevent duplicate classes
+    for stray in MAIN_DIR.rglob("MainActivity.java"):
+        stray.unlink()
+
+    kt_dir = MAIN_DIR / "kotlin" / "com" / "universal" / "universal_messenger"
+    kt_dir.mkdir(parents=True, exist_ok=True)
+
+    kt_content = """package com.universal.universal_messenger
 
 import android.app.PictureInPictureParams
 import android.content.Context
 import android.content.Intent
-import android.media.*
-import android.net.*
-import android.os.*
+import android.media.AudioAttributes
+import android.media.Ringtone
+import android.media.RingtoneManager
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
+import android.net.Uri
+import android.os.Build
+import android.os.Bundle
+import android.os.PowerManager
 import android.provider.Settings
 import android.util.Rational
 import android.view.WindowManager
@@ -98,156 +586,263 @@ import io.flutter.plugin.common.MethodChannel
 import java.io.File
 
 class MainActivity : FlutterActivity() {
-    private val CHANNEL = "com.universal.messenger/icon"
-    private var isCallActive = false
-    private var suppressPipOnce = false
+    companion object {
+        private const val CHANNEL = "com.universal.messenger/icon"
+    }
+
+    private var isCallActive: Boolean = false
+    private var suppressPipOnce: Boolean = false
     private var activeRingtone: Ringtone? = null
-    private var mediaPlayer: MediaPlayer? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
             setShowWhenLocked(true)
             setTurnScreenOn(true)
+            window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         } else {
             @Suppress("DEPRECATION")
-            window.addFlags(WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED or WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON)
+            window.addFlags(
+                WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED or
+                    WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON or
+                    WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON
+            )
+        }
+    }
+
+    override fun onUserLeaveHint() {
+        super.onUserLeaveHint()
+        if (suppressPipOnce) {
+            suppressPipOnce = false
+            return
+        }
+        if (isCallActive && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            try {
+                val params = PictureInPictureParams.Builder()
+                    .setAspectRatio(Rational(9, 16))
+                    .build()
+                enterPictureInPictureMode(params)
+            } catch (_: Exception) {
+            }
         }
     }
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
-        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL).setMethodCallHandler { call, result ->
-            when (call.method) {
-                "setCallActive" -> { isCallActive = call.argument<Boolean>("active") ?: false; result.success(true) }
-                "suppressPipOnce" -> { suppressPipOnce = true; result.success(true) }
-                "requestIgnoreBatteryOptimizations" -> {
-                    try {
-                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-                            val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
-                            if (!pm.isIgnoringBatteryOptimizations(packageName)) {
-                                startActivity(Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:$packageName")))
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL)
+            .setMethodCallHandler { call, result ->
+                when (call.method) {
+                    "setCallActive" -> {
+                        val active = (call.arguments as? Boolean)
+                            ?: call.argument<Boolean>("active")
+                            ?: false
+                        isCallActive = active
+                        result.success(true)
+                    }
+
+                    "suppressPipOnce" -> {
+                        suppressPipOnce = (call.arguments as? Boolean) ?: true
+                        result.success(true)
+                    }
+
+                    "requestIgnoreBatteryOptimizations" -> {
+                        result.success(requestBatteryOptimizationExemption())
+                    }
+
+                    "isNetworkConnected" -> {
+                        result.success(checkNetworkConnected())
+                    }
+
+                    "playRingtone" -> {
+                        result.success(startRingtone())
+                    }
+
+                    "stopRingtone" -> {
+                        stopActiveRingtone()
+                        result.success(true)
+                    }
+
+                    "playMessageSound" -> {
+                        result.success(playNotificationSound())
+                    }
+
+                    "getContentUri" -> {
+                        val path = extractFilePath(call.arguments, call.argument("path"), call.argument("filePath"))
+                        if (path.isNullOrBlank()) {
+                            result.error("INVALID_PATH", "File path is required", null)
+                        } else {
+                            try {
+                                val file = File(path)
+                                if (!file.exists()) {
+                                    result.error("FILE_NOT_FOUND", "File does not exist: $path", null)
+                                } else {
+                                    val uri = FileProvider.getUriForFile(
+                                        this,
+                                        "${applicationContext.packageName}.fileprovider",
+                                        file
+                                    )
+                                    result.success(uri.toString())
+                                }
+                            } catch (e: Exception) {
+                                result.error("URI_ERROR", e.message, null)
                             }
                         }
-                        result.success(true)
-                    } catch (_: Exception) { result.success(false) }
-                }
-                "isNetworkConnected" -> {
-                    val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
-                    val caps = cm.getNetworkCapabilities(cm.activeNetwork)
-                    result.success(caps != null && (caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) || caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) || caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET)))
-                }
-                "playRingtone" -> {
-                    stopRingtoneInternal()
-                    try {
-                        val path = call.argument<String>("path")
-                        val uri = if (!path.isNullOrEmpty() && File(path).exists()) Uri.fromFile(File(path)) else RingtoneManager.getDefaultUri(RingtoneManager.TYPE_RINGTONE)
-                        activeRingtone = RingtoneManager.getRingtone(applicationContext, uri)
-                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) activeRingtone?.isLooping = true
-                        activeRingtone?.play()
-                        result.success(true)
-                    } catch (_: Exception) { result.success(false) }
-                }
-                "stopRingtone" -> { stopRingtoneInternal(); result.success(true) }
-                "playMessageSound" -> {
-                    try {
-                        mediaPlayer?.release()
-                        val path = call.argument<String>("path")
-                        val uri = if (!path.isNullOrEmpty() && File(path).exists()) Uri.fromFile(File(path)) else RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION)
-                        mediaPlayer = MediaPlayer().apply {
-                            setAudioAttributes(AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_NOTIFICATION).setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION).build())
-                            setDataSource(applicationContext, uri); prepare(); start()
-                        }
-                        result.success(true)
-                    } catch (_: Exception) { result.success(false) }
-                }
-                "getContentUri" -> {
-                    try {
-                        val path = call.argument<String>("path") ?: ""
-                        result.success(FileProvider.getUriForFile(this, "$packageName.fileprovider", File(path)).toString())
-                    } catch (_: Exception) { result.success(null) }
-                }
-                "installApk" -> {
-                    try {
-                        val path = call.argument<String>("path") ?: ""
-                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && !packageManager.canRequestPackageInstalls()) {
-                            startActivity(Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:$packageName")))
-                            result.success("PERMISSION_REQUIRED")
+                    }
+
+                    "installApk" -> {
+                        val path = extractFilePath(call.arguments, call.argument("path"), call.argument("filePath"))
+                        if (path.isNullOrBlank()) {
+                            result.error("INVALID_PATH", "APK path is required", null)
                         } else {
-                            val apkUri = FileProvider.getUriForFile(this, "$packageName.fileprovider", File(path))
-                            startActivity(Intent(Intent.ACTION_VIEW).apply {
-                                setDataAndType(apkUri, "application/vnd.android.package-archive")
-                                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
-                            })
-                            result.success("STARTED")
+                            installApkFile(path, result)
                         }
-                    } catch (e: Exception) { result.error("INSTALL_ERR", e.message, null) }
+                    }
+
+                    else -> result.notImplemented()
                 }
-                else -> result.success(null)
             }
+    }
+
+    private fun extractFilePath(rawArgs: Any?, pathArg: String?, filePathArg: String?): String? {
+        return pathArg ?: filePathArg ?: (rawArgs as? String)
+    }
+
+    private fun requestBatteryOptimizationExemption(): Boolean {
+        return try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
+                if (!pm.isIgnoringBatteryOptimizations(packageName)) {
+                    val intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
+                        data = Uri.parse("package:$packageName")
+                    }
+                    startActivity(intent)
+                }
+            }
+            true
+        } catch (_: Exception) {
+            false
         }
     }
 
-    private fun stopRingtoneInternal() {
-        try { activeRingtone?.stop(); activeRingtone = null } catch (_: Exception) {}
+    private fun checkNetworkConnected(): Boolean {
+        val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            val network = cm.activeNetwork ?: return false
+            val caps = cm.getNetworkCapabilities(network) ?: return false
+            return caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) &&
+                (caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) ||
+                    caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) ||
+                    caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET) ||
+                    caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN))
+        }
+        @Suppress("DEPRECATION")
+        val info = cm.activeNetworkInfo
+        @Suppress("DEPRECATION")
+        return info != null && info.isConnected
     }
 
-    override fun onUserLeaveHint() {
-        super.onUserLeaveHint()
-        if (suppressPipOnce) { suppressPipOnce = false; return }
-        if (isCallActive && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            try { enterPictureInPictureMode(PictureInPictureParams.Builder().setAspectRatio(Rational(9, 16)).build()) } catch (_: Exception) {}
+    private fun startRingtone(): Boolean {
+        return try {
+            stopActiveRingtone()
+            val uri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_RINGTONE)
+            val ringtone = RingtoneManager.getRingtone(applicationContext, uri)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                ringtone.isLooping = true
+                ringtone.audioAttributes = AudioAttributes.Builder()
+                    .setUsage(AudioAttributes.USAGE_NOTIFICATION_RINGTONE)
+                    .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                    .build()
+            }
+            ringtone.play()
+            activeRingtone = ringtone
+            true
+        } catch (_: Exception) {
+            false
         }
     }
 
-    override fun onDestroy() { stopRingtoneInternal(); mediaPlayer?.release(); super.onDestroy() }
+    private fun stopActiveRingtone() {
+        try {
+            activeRingtone?.stop()
+        } catch (_: Exception) {
+        } finally {
+            activeRingtone = null
+        }
+    }
+
+    private fun playNotificationSound(): Boolean {
+        return try {
+            val uri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION)
+            val ringtone = RingtoneManager.getRingtone(applicationContext, uri)
+            ringtone.play()
+            true
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    private fun installApkFile(path: String, result: MethodChannel.Result) {
+        try {
+            val file = File(path)
+            if (!file.exists()) {
+                result.error("FILE_NOT_FOUND", "APK file not found: $path", null)
+                return
+            }
+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
+                !packageManager.canRequestPackageInstalls()
+            ) {
+                val permIntent = Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES).apply {
+                    data = Uri.parse("package:$packageName")
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
+                startActivity(permIntent)
+                result.success(false)
+                return
+            }
+
+            val apkUri = FileProvider.getUriForFile(
+                this,
+                "${applicationContext.packageName}.fileprovider",
+                file
+            )
+            val installIntent = Intent(Intent.ACTION_VIEW).apply {
+                setDataAndType(apkUri, "application/vnd.android.package-archive")
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            startActivity(installIntent)
+            result.success(true)
+        } catch (e: Exception) {
+            result.error("INSTALL_ERROR", e.message, null)
+        }
+    }
+
+    override fun onDestroy() {
+        stopActiveRingtone()
+        super.onDestroy()
+    }
 }
-''')
+"""
+    (kt_dir / "MainActivity.kt").write_text(kt_content, encoding="utf-8")
+    log("Wrote MainActivity.kt")
 
-for sg, gms, hook in [
-    ("android/settings.gradle.kts", 'id("com.android.application")', 'id("com.google.gms.google-services") version "4.4.2" apply false\n    id("com.android.application")'),
-    ("android/settings.gradle", 'id "com.android.application"', 'id "com.google.gms.google-services" version "4.4.2" apply false\n    id "com.android.application"'),
-]:
-    if os.path.exists(sg):
-        t = open(sg, encoding="utf-8").read()
-        if "google-services" not in t:
-            t = t.replace(gms, hook, 1)
-            open(sg, "w", encoding="utf-8").write(t)
 
-bg = "android/app/build.gradle.kts"
-if os.path.exists(bg):
-    out, inp = [], False
-    for l in open(bg, encoding="utf-8").read().splitlines():
-        s = l.strip()
-        if s.startswith("plugins") and "{" in s:
-            inp = True
-            out += [l, '    id("com.android.application")', '    id("kotlin-android")', '    id("dev.flutter.flutter-gradle-plugin")', '    id("com.google.gms.google-services")']
-            continue
-        if inp:
-            if s == "}": inp = False; out.append(l)
-            continue
-        if "minSdk =" in l or "minSdkVersion" in l:
-            out += ["        minSdk = 23", "        multiDexEnabled = true"]; continue
-        if "targetSdk =" in l or "targetSdkVersion" in l:
-            out.append("        targetSdk = 34"); continue
-        out.append(l)
-        if "sourceCompatibility" in l:
-            out.append("        isCoreLibraryDesugaringEnabled = true")
-    out += ["", "dependencies {", '    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.4")', "}"]
-    open(bg, "w", encoding="utf-8").write("\n".join(out) + "\n")
+def main() -> None:
+    if not ANDROID_DIR.is_dir():
+        log("ERROR: android/ directory not found. Run 'flutter create' first.")
+        sys.exit(1)
 
-mp = "android/app/src/main/AndroidManifest.xml"
-if os.path.exists(mp):
-    m = open(mp, encoding="utf-8").read()
-    if "xmlns:tools" not in m:
-        m = m.replace("<manifest ", '<manifest xmlns:tools="http://schemas.android.com/tools" ', 1)
-    perms = ["INTERNET","ACCESS_NETWORK_STATE","POST_NOTIFICATIONS","VIBRATE","WAKE_LOCK","RECEIVE_BOOT_COMPLETED","USE_FULL_SCREEN_INTENT","REQUEST_IGNORE_BATTERY_OPTIMIZATIONS","SYSTEM_ALERT_WINDOW","CAMERA","RECORD_AUDIO","MODIFY_AUDIO_SETTINGS","BLUETOOTH","BLUETOOTH_CONNECT","FOREGROUND_SERVICE","FOREGROUND_SERVICE_MEDIA_PROJECTION","FOREGROUND_SERVICE_CAMERA","FOREGROUND_SERVICE_MICROPHONE","REQUEST_INSTALL_PACKAGES"]
-    pt = "".join(f'    <uses-permission android:name="android.permission.{p}"/>\n' for p in perms if f"android.permission.{p}" not in m)
-    if pt:
-        m = m.replace("<application", pt + "    <application", 1)
-    m = m.replace('android:name=".MainActivity"', 'android:name=".MainActivity" android:supportsPictureInPicture="true" android:resizeableActivity="true" android:showWhenLocked="true" android:turnScreenOn="true"', 1)
-    ex = '        <service android:name="im.zego.zegoexpress.internal.ZegoScreenCaptureService" android:enabled="true" android:exported="false" android:foregroundServiceType="mediaProjection" tools:node="merge" />\n        <provider android:name="androidx.core.content.FileProvider" android:authorities="${applicationId}.fileprovider" android:exported="false" android:grantUriPermissions="true"><meta-data android:name="android.support.FILE_PROVIDER_PATHS" android:resource="@xml/file_paths" /></provider>\n        <meta-data android:name="com.google.firebase.messaging.default_notification_channel_id" android:value="fcm_msg_all_v1" />\n    </application>'
-    if "ZegoScreenCaptureService" not in m:
-        m = m.replace("</application>", ex, 1)
-    open(mp, "w", encoding="utf-8").write(m)
-print("ANDROID_CONFIG_SUCCESS")
+    patch_all_plugins()
+    configure_gradle_properties()
+    configure_settings_gradle()
+    write_app_build_gradle_kts()
+    copy_google_services()
+    write_file_paths_xml()
+    write_android_manifest()
+    write_main_activity_kt()
+    log("Android configuration and plugin patching completed successfully.")
+
+
+if __name__ == "__main__":
+    main()
