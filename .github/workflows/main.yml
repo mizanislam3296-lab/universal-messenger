@@ -25,19 +25,17 @@ jobs:
           channel: 'stable'
 
       - name: Generate Android Platform Files
-        run: |
-          flutter create . --platforms=android --org com.universal --project-name universal_messenger
+        run: flutter create . --platforms=android --org com.universal --project-name universal_messenger
 
-      - name: Configure Firebase, PiP, Android 10+ Screen Share & LockScreen Push
+      - name: Configure Firebase, PiP, Screen Share & LockScreen Push
         run: |
           mkdir -p android/app/src/main/res/xml
           mkdir -p android/app/src/main/kotlin/com/universal/universal_messenger
-
           if [ -f "google-services.json" ]; then
             cp google-services.json android/app/google-services.json
           fi
           if [ ! -f "android/app/google-services.json" ]; then
-            echo "ERROR: google-services.json ফাইলটি রিপোজিটরিতে পাওয়া যায়নি!"
+            echo "ERROR: google-services.json missing"
             exit 1
           fi
 
@@ -113,11 +111,7 @@ jobs:
                                   if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
                                       val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
                                       if (!pm.isIgnoringBatteryOptimizations(packageName)) {
-                                          val intent = Intent(
-                                              Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
-                                              Uri.parse("package:$packageName")
-                                          )
-                                          startActivity(intent)
+                                          startActivity(Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:$packageName")))
                                       }
                                   }
                                   result.success(true)
@@ -127,8 +121,7 @@ jobs:
                           }
                           "isNetworkConnected" -> {
                               val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
-                              val net = cm.activeNetwork
-                              val caps = cm.getNetworkCapabilities(net)
+                              val caps = cm.getNetworkCapabilities(cm.activeNetwork)
                               val connected = caps != null && (
                                   caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) ||
                                   caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) ||
@@ -140,18 +133,12 @@ jobs:
                               stopRingtoneInternal()
                               try {
                                   val path = call.argument<String>("path")
-                                  val uri = if (!path.isNullOrEmpty() && File(path).exists()) {
-                                      Uri.fromFile(File(path))
-                                  } else {
-                                      RingtoneManager.getDefaultUri(RingtoneManager.TYPE_RINGTONE)
-                                  }
+                                  val uri = if (!path.isNullOrEmpty() && File(path).exists()) Uri.fromFile(File(path)) else RingtoneManager.getDefaultUri(RingtoneManager.TYPE_RINGTONE)
                                   activeRingtone = RingtoneManager.getRingtone(applicationContext, uri)
-                                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-                                      activeRingtone?.isLooping = true
-                                  }
+                                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) activeRingtone?.isLooping = true
                                   activeRingtone?.play()
                                   result.success(true)
-                              } catch (e: Exception) {
+                              } catch (_: Exception) {
                                   result.success(false)
                               }
                           }
@@ -163,47 +150,34 @@ jobs:
                               try {
                                   mediaPlayer?.release()
                                   val path = call.argument<String>("path")
-                                  val uri = if (!path.isNullOrEmpty() && File(path).exists()) {
-                                      Uri.fromFile(File(path))
-                                  } else {
-                                      RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION)
-                                  }
+                                  val uri = if (!path.isNullOrEmpty() && File(path).exists()) Uri.fromFile(File(path)) else RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION)
                                   mediaPlayer = MediaPlayer().apply {
-                                      setAudioAttributes(
-                                          AudioAttributes.Builder()
-                                              .setUsage(AudioAttributes.USAGE_NOTIFICATION)
-                                              .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
-                                              .build()
-                                      )
+                                      setAudioAttributes(AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_NOTIFICATION).setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION).build())
                                       setDataSource(applicationContext, uri)
                                       prepare()
                                       start()
                                   }
                                   result.success(true)
-                              } catch (e: Exception) {
+                              } catch (_: Exception) {
                                   result.success(false)
                               }
                           }
                           "getContentUri" -> {
                               try {
                                   val path = call.argument<String>("path") ?: ""
-                                  val file = File(path)
-                                  val uri = FileProvider.getUriForFile(this, "$packageName.fileprovider", file)
-                                  result.success(uri.toString())
-                              } catch (e: Exception) {
+                                  result.success(FileProvider.getUriForFile(this, "$packageName.fileprovider", File(path)).toString())
+                              } catch (_: Exception) {
                                   result.success(null)
                               }
                           }
                           "installApk" -> {
                               try {
                                   val path = call.argument<String>("path") ?: ""
-                                  val file = File(path)
                                   if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && !packageManager.canRequestPackageInstalls()) {
-                                      val intent = Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:$packageName"))
-                                      startActivity(intent)
+                                      startActivity(Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:$packageName")))
                                       result.success("PERMISSION_REQUIRED")
                                   } else {
-                                      val apkUri = FileProvider.getUriForFile(this, "$packageName.fileprovider", file)
+                                      val apkUri = FileProvider.getUriForFile(this, "$packageName.fileprovider", File(path))
                                       val intent = Intent(Intent.ACTION_VIEW).apply {
                                           setDataAndType(apkUri, "application/vnd.android.package-archive")
                                           addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
@@ -235,10 +209,7 @@ jobs:
                   }
                   if (isCallActive && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                       try {
-                          val params = PictureInPictureParams.Builder()
-                              .setAspectRatio(Rational(9, 16))
-                              .build()
-                          enterPictureInPictureMode(params)
+                          enterPictureInPictureMode(PictureInPictureParams.Builder().setAspectRatio(Rational(9, 16)).build())
                       } catch (_: Exception) {}
                   }
               }
@@ -253,36 +224,29 @@ jobs:
 
           python3 -c '
           import os
-
           if os.path.exists("android/settings.gradle.kts"):
-              with open("android/settings.gradle.kts", "r") as f:
-                  lines = f.read().splitlines()
+              lines = open("android/settings.gradle.kts").read().splitlines()
               out = []
               for l in lines:
                   out.append(l)
                   if "com.android.application" in l and "apply false" in l:
                       out.append("    id(\"com.google.gms.google-services\") version \"4.4.2\" apply false")
-              with open("android/settings.gradle.kts", "w") as f:
-                  f.write("\n".join(out) + "\n")
+              open("android/settings.gradle.kts", "w").write("\n".join(out) + "\n")
           elif os.path.exists("android/settings.gradle"):
-              with open("android/settings.gradle", "r") as f:
-                  lines = f.read().splitlines()
+              lines = open("android/settings.gradle").read().splitlines()
               out = []
               for l in lines:
                   out.append(l)
                   if "com.android.application" in l and "apply false" in l:
                       out.append("    id \"com.google.gms.google-services\" version \"4.4.2\" apply false")
-              with open("android/settings.gradle", "w") as f:
-                  f.write("\n".join(out) + "\n")
+              open("android/settings.gradle", "w").write("\n".join(out) + "\n")
 
           if os.path.exists("android/app/build.gradle.kts"):
-              with open("android/app/build.gradle.kts", "r") as f:
-                  lines = f.read().splitlines()
+              lines = open("android/app/build.gradle.kts").read().splitlines()
               out = []
               for l in lines:
                   if "minSdk =" in l or "minSdkVersion" in l:
-                      out.append("        minSdk = 23")
-                      out.append("        multiDexEnabled = true")
+                      out.extend(["        minSdk = 23", "        multiDexEnabled = true"])
                       continue
                   if "targetSdk =" in l or "targetSdkVersion" in l:
                       out.append("        targetSdk = 34")
@@ -293,70 +257,25 @@ jobs:
                   if "sourceCompatibility" in l:
                       out.append("        isCoreLibraryDesugaringEnabled = true")
               out.append("\ndependencies {\n    coreLibraryDesugaring(\"com.android.tools:desugar_jdk_libs:2.1.4\")\n}\n")
-              with open("android/app/build.gradle.kts", "w") as f:
-                  f.write("\n".join(out) + "\n")
+              open("android/app/build.gradle.kts", "w").write("\n".join(out) + "\n")
 
-          manifest_path = "android/app/src/main/AndroidManifest.xml"
-          if os.path.exists(manifest_path):
-              with open(manifest_path, "r") as f:
-                  m = f.read()
-              perms = [
-                  "android.permission.INTERNET",
-                  "android.permission.ACCESS_NETWORK_STATE",
-                  "android.permission.POST_NOTIFICATIONS",
-                  "android.permission.VIBRATE",
-                  "android.permission.WAKE_LOCK",
-                  "android.permission.RECEIVE_BOOT_COMPLETED",
-                  "android.permission.USE_FULL_SCREEN_INTENT",
-                  "android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS",
-                  "android.permission.SYSTEM_ALERT_WINDOW",
-                  "android.permission.CAMERA",
-                  "android.permission.RECORD_AUDIO",
-                  "android.permission.MODIFY_AUDIO_SETTINGS",
-                  "android.permission.BLUETOOTH",
-                  "android.permission.BLUETOOTH_CONNECT",
-                  "android.permission.FOREGROUND_SERVICE",
-                  "android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION",
-                  "android.permission.FOREGROUND_SERVICE_CAMERA",
-                  "android.permission.FOREGROUND_SERVICE_MICROPHONE",
-                  "android.permission.REQUEST_INSTALL_PACKAGES",
-              ]
-              perm_tags = ""
-              for p in perms:
-                  if p not in m:
-                      perm_tags += f"    <uses-permission android:name=\"{p}\"/>\n"
-              if perm_tags:
-                  m = m.replace("<application", perm_tags + "    <application", 1)
-
-              m = m.replace(
-                  "android:name=\".MainActivity\"",
-                  "android:name=\".MainActivity\"\n            android:supportsPictureInPicture=\"true\"\n            android:resizeableActivity=\"true\"\n            android:showWhenLocked=\"true\"\n            android:turnScreenOn=\"true\"",
-                  1
-              )
-
-              extra_xml = """        <service
-              android:name="im.zego.zegoexpress.internal.ZegoScreenCaptureService"
-              android:enabled="true"
-              android:exported="false"
-              android:foregroundServiceType="mediaProjection" />
-          <provider
-              android:name="androidx.core.content.FileProvider"
-              android:authorities="${applicationId}.fileprovider"
-              android:exported="false"
-              android:grantUriPermissions="true">
-              <meta-data
-                  android:name="android.support.FILE_PROVIDER_PATHS"
-                  android:resource="@xml/file_paths" />
+          mp = "android/app/src/main/AndroidManifest.xml"
+          if os.path.exists(mp):
+              m = open(mp).read()
+              perms = ["INTERNET","ACCESS_NETWORK_STATE","POST_NOTIFICATIONS","VIBRATE","WAKE_LOCK","RECEIVE_BOOT_COMPLETED","USE_FULL_SCREEN_INTENT","REQUEST_IGNORE_BATTERY_OPTIMIZATIONS","SYSTEM_ALERT_WINDOW","CAMERA","RECORD_AUDIO","MODIFY_AUDIO_SETTINGS","BLUETOOTH","BLUETOOTH_CONNECT","FOREGROUND_SERVICE","FOREGROUND_SERVICE_MEDIA_PROJECTION","FOREGROUND_SERVICE_CAMERA","FOREGROUND_SERVICE_MICROPHONE","REQUEST_INSTALL_PACKAGES"]
+              pt = "".join([f"    <uses-permission android:name=\"android.permission.{p}\"/>\n" for p in perms if f"android.permission.{p}" not in m])
+              if pt:
+                  m = m.replace("<application", pt + "    <application", 1)
+              m = m.replace("android:name=\".MainActivity\"", "android:name=\".MainActivity\"\n            android:supportsPictureInPicture=\"true\"\n            android:resizeableActivity=\"true\"\n            android:showWhenLocked=\"true\"\n            android:turnScreenOn=\"true\"", 1)
+              ex = """        <service android:name="im.zego.zegoexpress.internal.ZegoScreenCaptureService" android:enabled="true" android:exported="false" android:foregroundServiceType="mediaProjection" />
+          <provider android:name="androidx.core.content.FileProvider" android:authorities="${applicationId}.fileprovider" android:exported="false" android:grantUriPermissions="true">
+              <meta-data android:name="android.support.FILE_PROVIDER_PATHS" android:resource="@xml/file_paths" />
           </provider>
-          <meta-data
-              android:name="com.google.firebase.messaging.default_notification_channel_id"
-              android:value="fcm_msg_all_v1" />
+          <meta-data android:name="com.google.firebase.messaging.default_notification_channel_id" android:value="fcm_msg_all_v1" />
       </application>"""
               if "ZegoScreenCaptureService" not in m:
-                  m = m.replace("</application>", extra_xml, 1)
-
-              with open(manifest_path, "w") as f:
-                  f.write(m)
+                  m = m.replace("</application>", ex, 1)
+              open(mp, "w").write(m)
           '
 
       - name: Get Dependencies
