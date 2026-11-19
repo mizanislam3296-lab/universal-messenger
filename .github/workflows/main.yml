@@ -1,34 +1,61 @@
-name: Build Universal Messenger APK
+name: Build & Release Universal Messenger APK
 
 on:
   push:
-    branches: [main]
+    branches:
+      - main
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
-  build:
+  build_android:
     runs-on: ubuntu-latest
+
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-java@v4
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Java 17 (Zulu)
+        uses: actions/setup-java@v4
         with:
-          distribution: zulu
+          distribution: 'zulu'
           java-version: '17'
-      - uses: subosito/flutter-action@v2
+
+      - name: Set up Flutter (stable)
+        uses: subosito/flutter-action@v2
         with:
-          channel: stable
-      - name: Run Build Script
+          channel: 'stable'
+          cache: true
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Build Android APK
         env:
           FCM_SERVICE_ACCOUNT: ${{ secrets.FCM_SERVICE_ACCOUNT }}
-        run: bash scripts/build.sh
-      - uses: actions/upload-artifact@v4
+        run: |
+          chmod +x scripts/build.sh
+          bash scripts/build.sh
+
+      - name: Upload APK Artifact
+        uses: actions/upload-artifact@v4
         with:
-          name: Universal-Messenger-v14-APK
+          name: universal-messenger-apk
           path: build/app/outputs/flutter-apk/app-release.apk
-      - uses: softprops/action-gh-release@v2
+          if-no-files-found: error
+
+      - name: Publish GitHub Release v14.0.0
+        uses: softprops/action-gh-release@v2
         with:
           tag_name: v14.0.0
           name: Universal Messenger v14.0.0
+          body: Automated Android APK release for Universal Messenger v14.0.0 (arm64-v8a).
           files: build/app/outputs/flutter-apk/app-release.apk
+          draft: false
+          prerelease: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
