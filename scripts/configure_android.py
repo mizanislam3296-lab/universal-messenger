@@ -8,6 +8,7 @@ def fix_gradle(p):
         return
     kts = p.endswith(".kts")
     orig = c
+    c = c.replace("jcenter()", "mavenCentral()")
     mp = re.search(r"(^|\n)([ \t]*plugins\s*\{)([\s\S]*?)(\n[ \t]*\})", c)
     if mp:
         lines = [l for l in mp.group(3).splitlines() if l.strip()]
@@ -17,7 +18,7 @@ def fix_gradle(p):
                 a = ['    id("com.android.library")' if kts else "    id 'com.android.library'"]
             o = [l for l in lines if "com.android.library" not in l and "com.android.application" not in l]
             c = c[:mp.start(2)] + mp.group(2) + "\n" + "\n".join(a + o) + mp.group(4) + c[mp.end(4):]
-    elif re.search(r"(flutter-gradle-plugin|flutter\.gradle|\bandroid\s*\{)", c):
+    elif re.search(r"(flutter-gradle-plugin|flutter\.gradle|^\s*android\s*\{)", c, re.M):
         lines = c.splitlines()
         ar = re.compile(r'^\s*apply[\s(]+plugin\s*[:=]\s*["\']com\.android\.(library|application)["\']')
         tr = re.compile(r'^\s*(apply[\s(]+(plugin|from)\s*[:=]|android\s*\{)')
@@ -28,15 +29,26 @@ def fix_gradle(p):
             if not al:
                 al = ['apply(plugin = "com.android.library")' if kts else "apply plugin: 'com.android.library'"]
             c = "\n".join(rem[:idx] + al + rem[idx:]) + "\n"
-    if re.search(r"\bandroid\s*\{", c) and "namespace" not in c:
-        mf = os.path.join(os.path.dirname(p), "src/main/AndroidManifest.xml")
-        if os.path.exists(mf):
-            m = re.search(r'package\s*=\s*["\']([^"\']+)["\']', open(mf, encoding="utf-8", errors="ignore").read())
-            if m:
-                ns = f'    namespace = "{m.group(1)}"' if kts else f'    namespace "{m.group(1)}"'
-                c = re.sub(r"\bandroid\s*\{", f"android {{\n{ns}", c, count=1)
+    if re.search(r"^\s*android\s*\{", c, re.M):
+        c = re.sub(r"\bcompileSdkVersion\s+\d+", "compileSdkVersion 34", c)
+        c = re.sub(r"\bcompileSdk\s*=\s*\d+", "compileSdk = 34", c)
+        if "namespace" not in c:
+            mf = os.path.join(os.path.dirname(p), "src/main/AndroidManifest.xml")
+            pkg = None
+            if os.path.exists(mf):
+                mt = open(mf, encoding="utf-8", errors="ignore").read()
+                m = re.search(r'package\s*=\s*["\']([^"\']+)["\']', mt)
+                if m:
+                    pkg = m.group(1)
+                    open(mf, "w", encoding="utf-8").write(re.sub(r'\s+package\s*=\s*["\'][^"\']+["\']', "", mt, count=1))
+            if not pkg:
+                gm = re.search(r'^\s*group\s*[:=]?\s*["\']([^"\']+)["\']', c, re.M)
+                pkg = gm.group(1) if gm else "com.universal.plugin_" + re.sub(r"[^a-zA-Z0-9]", "_", os.path.basename(os.path.dirname(os.path.dirname(p))))
+            ns = f'    namespace = "{pkg}"' if kts else f'    namespace "{pkg}"'
+            c = re.sub(r"^(\s*android\s*\{)", rf"\1\n{ns}", c, count=1, flags=re.M)
     if c != orig:
         open(p, "w", encoding="utf-8").write(c)
+        print("Fixed:", p)
 
 dirs = {os.environ.get("PUB_CACHE", ""), os.path.expanduser("~/.pub-cache"), "/root/.pub-cache", "/home/runner/.pub-cache"}
 if os.path.exists(".dart_tool/package_config.json"):
@@ -51,6 +63,12 @@ for d in dirs:
             for fn in fs:
                 if fn in ("build.gradle", "build.gradle.kts"):
                     fix_gradle(os.path.join(r, fn))
+
+gp = "android/gradle.properties"
+if os.path.exists(gp):
+    gpt = open(gp, encoding="utf-8").read()
+    if "buildfeatures.buildconfig" not in gpt:
+        open(gp, "w", encoding="utf-8").write(gpt + "\nandroid.defaults.buildfeatures.buildconfig=true\n")
 
 os.makedirs("android/app/src/main/res/xml", exist_ok=True)
 open("android/app/src/main/res/xml/file_paths.xml", "w").write(
@@ -194,9 +212,7 @@ for sg, gms, hook in [
         t = open(sg, encoding="utf-8").read()
         if "google-services" not in t:
             t = t.replace(gms, hook, 1)
-        if "beforeProject" not in t:
-            t += '\ngradle.beforeProject { p -> if (p.path != ":" && p.path != ":app" && p.buildFile.exists() && p.buildFile.text.contains("android")) p.pluginManager.apply("com.android.library") }\n' if sg.endswith(".gradle") else '\ngradle.beforeProject {\n    if (path != ":" && path != ":app" && buildFile.exists() && buildFile.readText().contains("android")) pluginManager.apply("com.android.library")\n}\n'
-        open(sg, "w", encoding="utf-8").write(t)
+            open(sg, "w", encoding="utf-8").write(t)
 
 bg = "android/app/build.gradle.kts"
 if os.path.exists(bg):
