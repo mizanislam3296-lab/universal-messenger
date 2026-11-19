@@ -1,44 +1,117 @@
+import json
 import os
+import re
+from urllib.parse import unquote, urlparse
 
-pub_cache = os.environ.get("PUB_CACHE", os.path.expanduser("~/.pub-cache"))
-if os.path.exists(pub_cache):
-    for root, _, files in os.walk(pub_cache):
-        for fn in files:
-            if fn in ("build.gradle", "build.gradle.kts"):
-                p = os.path.join(root, fn)
-                try:
-                    content = open(p, "r", encoding="utf-8", errors="ignore").read()
-                except Exception:
-                    continue
-                if "dev.flutter.flutter-gradle-plugin" in content:
-                    lines = content.splitlines()
-                    changed = False
-                    idx_flutter = next((i for i, l in enumerate(lines) if "apply plugin:" in l and "dev.flutter.flutter-gradle-plugin" in l), -1)
-                    idx_android = next((i for i, l in enumerate(lines) if "apply plugin:" in l and ("com.android.library" in l or "com.android.application" in l)), -1)
-                    if idx_flutter != -1 and idx_android != -1 and idx_flutter < idx_android:
-                        lines[idx_flutter], lines[idx_android] = lines[idx_android], lines[idx_flutter]
-                        changed = True
-                    in_plugins = False
-                    p_start = -1
-                    p_end = -1
-                    for i, l in enumerate(lines):
-                        s = l.strip()
-                        if s.startswith("plugins") and "{" in s:
-                            in_plugins = True
-                            p_start = i
-                        elif in_plugins and s == "}":
-                            p_end = i
-                            break
-                    if p_start != -1 and p_end != -1:
-                        block = lines[p_start + 1:p_end]
-                        android_lines = [l for l in block if "com.android.library" in l or "com.android.application" in l]
-                        other_lines = [l for l in block if "com.android.library" not in l and "com.android.application" not in l]
-                        if android_lines and (android_lines + other_lines) != block:
-                            lines = lines[:p_start + 1] + android_lines + other_lines + lines[p_end:]
-                            changed = True
-                    if changed:
-                        open(p, "w", encoding="utf-8").write("\n".join(lines) + "\n")
-                        print(f"Fixed plugin order in: {p}")
+
+def fix_gradle_file(p):
+    try:
+        content = open(p, "r", encoding="utf-8", errors="ignore").read()
+    except Exception:
+        return False
+
+    lines = content.splitlines()
+    changed = False
+
+    apply_indices = [
+        i for i, l in enumerate(lines)
+        if re.match(r"^\s*apply\s+plugin\s*:", l)
+    ]
+    if len(apply_indices) > 1:
+        apply_lines = [lines[i] for i in apply_indices]
+        android_first = [
+            l for l in apply_lines
+            if "com.android.library" in l or "com.android.application" in l
+        ]
+        others = [
+            l for l in apply_lines
+            if "com.android.library" not in l and "com.android.application" not in l
+        ]
+        reordered = android_first + others
+        if android_first and reordered != apply_lines:
+            for idx, new_line in zip(apply_indices, reordered):
+                lines[idx] = new_line
+            changed = True
+
+    p_start = -1
+    p_end = -1
+    for i, l in enumerate(lines):
+        s = l.strip()
+        if re.match(r"^plugins\s*\{", s):
+            p_start = i
+        elif p_start != -1 and s == "}":
+            p_end = i
+            break
+    if p_start != -1 and p_end != -1:
+        block = lines[p_start + 1:p_end]
+        android_first = [
+            l for l in block
+            if "com.android.library" in l or "com.android.application" in l
+        ]
+        others = [
+            l for l in block
+            if "com.android.library" not in l and "com.android.application" not in l
+        ]
+        reordered = android_first + others
+        if android_first and reordered != block:
+            lines = lines[:p_start + 1] + reordered + lines[p_end:]
+            changed = True
+
+    new_content = "\n".join(lines) + "\n"
+
+    if "android {" in new_content and "namespace" not in new_content:
+        manifest_file = os.path.join(os.path.dirname(p), "src", "main", "AndroidManifest.xml")
+        if os.path.exists(manifest_file):
+            m_txt = open(manifest_file, "r", encoding="utf-8", errors="ignore").read()
+            m_pkg = re.search(r'package\s*=\s*["\']([^"\']+)["\']', m_txt)
+            if m_pkg:
+                pkg_name = m_pkg.group(1)
+                new_content = new_content.replace(
+                    "android {",
+                    f'android {{\n    namespace "{pkg_name}"',
+                    1
+                )
+                changed = True
+
+    if changed:
+        open(p, "w", encoding="utf-8").write(new_content)
+        print(f"Fixed plugin gradle: {p}")
+    return changed
+
+
+pkg_dirs = set()
+pkg_cfg = ".dart_tool/package_config.json"
+if os.path.exists(pkg_cfg):
+    try:
+        data = json.load(open(pkg_cfg, "r", encoding="utf-8"))
+        for pkg in data.get("packages", []):
+            uri = pkg.get("rootUri", "")
+            if uri.startswith("file://"):
+                local_path = unquote(urlparse(uri).path)
+            else:
+                local_path = os.path.abspath(os.path.join(".dart_tool", uri))
+            if os.path.isdir(local_path):
+                pkg_dirs.add(local_path)
+    except Exception as e:
+        print(f"package_config parse warning: {e}")
+
+for cache_dir in {
+    os.environ.get("PUB_CACHE", ""),
+    os.path.expanduser("~/.pub-cache"),
+    "/root/.pub-cache",
+    "/home/runner/.pub-cache",
+}:
+    if cache_dir and os.path.exists(cache_dir):
+        for root, _, files in os.walk(cache_dir):
+            for fn in files:
+                if fn in ("build.gradle", "build.gradle.kts"):
+                    fix_gradle_file(os.path.join(root, fn))
+
+for d in pkg_dirs:
+    for fn in ("build.gradle", "build.gradle.kts"):
+        gp = os.path.join(d, "android", fn)
+        if os.path.exists(gp):
+            fix_gradle_file(gp)
 
 os.makedirs("android/app/src/main/res/xml", exist_ok=True)
 with open("android/app/src/main/res/xml/file_paths.xml", "w", encoding="utf-8") as f:
