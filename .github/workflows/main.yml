@@ -5,130 +5,57 @@ on:
     branches: [ main ]
   workflow_dispatch:
 
-permissions:
-  contents: write
-
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 50
 
     steps:
-      - name: Free Disk Space
-        run: sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost || true
-
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Setup Java 21
+      - name: Setup Java 17
         uses: actions/setup-java@v4
         with:
           distribution: 'zulu'
-          java-version: '21'
+          java-version: '17'
 
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
         with:
           channel: 'stable'
-          cache: true
 
-      - name: Cache Gradle & Build Files
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.gradle/caches
-            ~/.gradle/wrapper
-          key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
-          restore-keys: |
-            ${{ runner.os }}-gradle-
-
-      - name: Auto-Fix & Organize Dart Files
+      - name: Generate Android Platform Files
         run: |
-          cat << 'PYEOF' > organize_dart.py
-          import os, shutil
-          os.makedirs("lib_clean/screens", exist_ok=True)
-          mapping = {
-              "auth": "lib_clean/screens/auth_screen.dart",
-              "verify": "lib_clean/screens/verify_email_screen.dart",
-              "home": "lib_clean/screens/home_screen.dart",
-              "search": "lib_clean/screens/search_user_screen.dart",
-              "chat": "lib_clean/screens/chat_screen.dart",
-              "call": "lib_clean/screens/call_screen.dart",
-              "setting": "lib_clean/screens/settings_screen.dart",
-          }
-          candidates = {}
-          for root, _, files in os.walk(".", topdown=False):
-              if ".git" in root or "lib_clean" in root:
-                  continue
-              for f in files:
-                  norm = f.replace(" ", "").lower()
-                  if norm.endswith((".yml", ".yaml", ".json", ".md", ".py")):
-                      continue
-                  src = os.path.join(root, f)
-                  target = None
-                  if "main" in norm and ("dart" in norm or root.strip().endswith("lib")):
-                      target = "lib_clean/main.dart"
-                  else:
-                      for k, dst in mapping.items():
-                          if k in norm:
-                              target = dst
-                              break
-                  if target:
-                      score = (1 if "lib" in root.replace("\\", "/").split("/") else 0, os.path.getmtime(src))
-                      if target not in candidates or score > candidates[target][0]:
-                          candidates[target] = (score, src)
-          for dst, (_, src) in candidates.items():
-              shutil.copy2(src, dst)
-              print("SELECTED:", src, "->", dst)
-          for req in ["lib_clean/main.dart"] + list(mapping.values()):
-              if not os.path.exists(req):
-                  raise SystemExit("MISSING FILE: " + req)
-          PYEOF
-          python3 organize_dart.py && rm -f organize_dart.py
-
           flutter create . --platforms=android --org com.universal --project-name universal_messenger
-          rm -rf lib test && mv lib_clean lib
 
-      - name: Configure Firebase, ZegoCloud & Release Signing
-        env:
-          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
-          RUN_NUM: ${{ github.run_number }}
+      - name: Configure Firebase, PiP, Android 10+ Screen Share & LockScreen Push
         run: |
-          mkdir -p android/app
-          [ -f "google-services.json" ] && cp google-services.json android/app/google-services.json
-          [ ! -f "android/app/google-services.json" ] && exit 1
+          mkdir -p android/app/src/main/res/xml
+          mkdir -p android/app/src/main/kotlin/com/universal/universal_messenger
 
-          if [ -n "$KEYSTORE_BASE64" ]; then
-            echo "$KEYSTORE_BASE64" | base64 -d > android/app/release.jks
-            echo "Using permanent KEYSTORE_BASE64 from GitHub Secrets."
-          else
-            keytool -genkey -v -keystore android/app/release.jks -keyalg RSA -keysize 2048 -validity 10000 -alias messenger_key -storepass "Messenger@2026" -keypass "Messenger@2026" -dname "CN=Universal Messenger, OU=Mobile, O=Universal, L=Dhaka, S=Dhaka, C=BD"
-            echo "================ COPY THIS KEYSTORE_BASE64 FOR GITHUB SECRETS ================"
-            base64 -w 0 android/app/release.jks
-            echo ""
-            echo "=============================================================================="
+          if [ -f "google-services.json" ]; then
+            cp google-services.json android/app/google-services.json
+          fi
+          if [ ! -f "android/app/google-services.json" ]; then
+            echo "ERROR: google-services.json ফাইলটি রিপোজিটরিতে পাওয়া যায়নি!"
+            exit 1
           fi
 
-          cat << 'PYEOF' > configure_android.py
-          import os, re, shutil, struct, zlib, xml.etree.ElementTree as ET
+          cat << 'EOF' > android/app/src/main/res/xml/file_paths.xml
+          <?xml version="1.0" encoding="utf-8"?>
+          <paths>
+              <files-path name="app_files" path="." />
+              <cache-path name="app_cache" path="." />
+              <external-path name="external_files" path="." />
+          </paths>
+          EOF
 
-          run_num = os.environ.get("RUN_NUM", "100")
+          cat << 'EOF' > android/app/src/main/kotlin/com/universal/universal_messenger/MainActivity.kt
+          package com.universal.universal_messenger
 
-          for lang in ["kotlin", "java"]:
-              shutil.rmtree(f"android/app/src/main/{lang}", ignore_errors=True)
-          tdir = "android/app/src/main/kotlin/com/universal/messenger"
-          os.makedirs(tdir, exist_ok=True)
-          with open(f"{tdir}/MainActivity.kt", "w") as f:
-              f.write('''package com.universal.messenger
-
-          import android.content.ComponentName
+          import android.app.PictureInPictureParams
           import android.content.Context
           import android.content.Intent
-          import android.content.pm.PackageManager
-          import android.content.pm.ShortcutInfo
-          import android.content.pm.ShortcutManager
-          import android.graphics.BitmapFactory
-          import android.graphics.drawable.Icon
           import android.media.AudioAttributes
           import android.media.MediaPlayer
           import android.media.Ringtone
@@ -137,7 +64,11 @@ jobs:
           import android.net.NetworkCapabilities
           import android.net.Uri
           import android.os.Build
+          import android.os.Bundle
+          import android.os.PowerManager
           import android.provider.Settings
+          import android.util.Rational
+          import android.view.WindowManager
           import androidx.core.content.FileProvider
           import io.flutter.embedding.android.FlutterActivity
           import io.flutter.embedding.engine.FlutterEngine
@@ -146,155 +77,48 @@ jobs:
 
           class MainActivity : FlutterActivity() {
               private val CHANNEL = "com.universal.messenger/icon"
-              private var callMediaPlayer: MediaPlayer? = null
-              private var defaultCallRingtone: Ringtone? = null
-              private var msgMediaPlayer: MediaPlayer? = null
+              private var isCallActive = false
+              private var suppressPipOnce = false
+              private var activeRingtone: Ringtone? = null
+              private var mediaPlayer: MediaPlayer? = null
 
-              private fun stopAllCallAudio() {
-                  try {
-                      callMediaPlayer?.stop()
-                      callMediaPlayer?.release()
-                  } catch (_: Exception) {}
-                  callMediaPlayer = null
-                  try {
-                      defaultCallRingtone?.stop()
-                  } catch (_: Exception) {}
-                  defaultCallRingtone = null
-              }
-
-              override fun onDestroy() {
-                  stopAllCallAudio()
-                  try {
-                      msgMediaPlayer?.stop()
-                      msgMediaPlayer?.release()
-                  } catch (_: Exception) {}
-                  msgMediaPlayer = null
-                  super.onDestroy()
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
+                      setShowWhenLocked(true)
+                      setTurnScreenOn(true)
+                  } else {
+                      @Suppress("DEPRECATION")
+                      window.addFlags(
+                          WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED or
+                          WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON
+                      )
+                  }
               }
 
               override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
                   super.configureFlutterEngine(flutterEngine)
                   MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL).setMethodCallHandler { call, result ->
                       when (call.method) {
-                          "installApk" -> {
-                              val path = call.argument<String>("path")
-                              if (path != null && File(path).exists()) {
-                                  try {
-                                      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && !packageManager.canRequestPackageInstalls()) {
-                                          val permIntent = Intent(
-                                              Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
-                                              Uri.parse("package:$packageName")
-                                          ).apply {
-                                              addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                                          }
-                                          startActivity(permIntent)
-                                          result.success("PERMISSION_REQUIRED")
-                                      } else {
-                                          val apkUri = FileProvider.getUriForFile(
-                                              applicationContext,
-                                              "com.universal.messenger.fileprovider",
-                                              File(path)
-                                          )
-                                          val installIntent = Intent(Intent.ACTION_VIEW).apply {
-                                              setDataAndType(apkUri, "application/vnd.android.package-archive")
-                                              addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
-                                          }
-                                          startActivity(installIntent)
-                                          result.success("STARTED")
-                                      }
-                                  } catch (e: Exception) {
-                                      result.error("INSTALL_ERROR", e.message, null)
-                                  }
-                              } else {
-                                  result.error("FILE_NOT_FOUND", "APK file not found", null)
-                              }
-                          }
-                          "getContentUri" -> {
-                              val path = call.argument<String>("path")
-                              if (path != null && File(path).exists()) {
-                                  try {
-                                      val uri = FileProvider.getUriForFile(
-                                          applicationContext,
-                                          "com.universal.messenger.fileprovider",
-                                          File(path)
-                                      )
-                                      applicationContext.grantUriPermission(
-                                          "com.android.systemui",
-                                          uri,
-                                          Intent.FLAG_GRANT_READ_URI_PERMISSION
-                                      )
-                                      result.success(uri.toString())
-                                  } catch (_: Exception) {
-                                      result.success(null)
-                                  }
-                              } else {
-                                  result.success(null)
-                              }
-                          }
-                          "playRingtone" -> {
-                              val path = call.argument<String>("path")
-                              stopAllCallAudio()
-                              try {
-                                  if (path != null && File(path).exists()) {
-                                      val mp = MediaPlayer()
-                                      mp.setAudioAttributes(
-                                          AudioAttributes.Builder()
-                                              .setUsage(AudioAttributes.USAGE_NOTIFICATION_RINGTONE)
-                                              .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
-                                              .build()
-                                      )
-                                      mp.setDataSource(path)
-                                      mp.isLooping = true
-                                      mp.prepare()
-                                      mp.start()
-                                      callMediaPlayer = mp
-                                  } else {
-                                      val uri: Uri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_RINGTONE)
-                                      val rt = RingtoneManager.getRingtone(applicationContext, uri)
-                                      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-                                          rt?.isLooping = true
-                                      }
-                                      rt?.play()
-                                      defaultCallRingtone = rt
-                                  }
-                                  result.success(true)
-                              } catch (_: Exception) {
-                                  result.success(false)
-                              }
-                          }
-                          "stopRingtone" -> {
-                              stopAllCallAudio()
+                          "setCallActive" -> {
+                              isCallActive = call.argument<Boolean>("active") ?: false
                               result.success(true)
                           }
-                          "playMessageSound" -> {
-                              val path = call.argument<String>("path")
+                          "suppressPipOnce" -> {
+                              suppressPipOnce = true
+                              result.success(true)
+                          }
+                          "requestIgnoreBatteryOptimizations" -> {
                               try {
-                                  msgMediaPlayer?.stop()
-                                  msgMediaPlayer?.release()
-                              } catch (_: Exception) {}
-                              msgMediaPlayer = null
-                              try {
-                                  if (path != null && File(path).exists()) {
-                                      val mp = MediaPlayer()
-                                      mp.setAudioAttributes(
-                                          AudioAttributes.Builder()
-                                              .setUsage(AudioAttributes.USAGE_NOTIFICATION)
-                                              .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
-                                              .build()
-                                      )
-                                      mp.setDataSource(path)
-                                      mp.isLooping = false
-                                      mp.setOnCompletionListener { player ->
-                                          try { player.release() } catch (_: Exception) {}
-                                          if (msgMediaPlayer == player) msgMediaPlayer = null
+                                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                                      val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
+                                      if (!pm.isIgnoringBatteryOptimizations(packageName)) {
+                                          val intent = Intent(
+                                              Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                                              Uri.parse("package:$packageName")
+                                          )
+                                          startActivity(intent)
                                       }
-                                      mp.prepare()
-                                      mp.start()
-                                      msgMediaPlayer = mp
-                                  } else {
-                                      val uri: Uri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION)
-                                      val rt = RingtoneManager.getRingtone(applicationContext, uri)
-                                      rt?.play()
                                   }
                                   result.success(true)
                               } catch (_: Exception) {
@@ -302,480 +126,265 @@ jobs:
                               }
                           }
                           "isNetworkConnected" -> {
+                              val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+                              val net = cm.activeNetwork
+                              val caps = cm.getNetworkCapabilities(net)
+                              val connected = caps != null && (
+                                  caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) ||
+                                  caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) ||
+                                  caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET)
+                              )
+                              result.success(connected)
+                          }
+                          "playRingtone" -> {
+                              stopRingtoneInternal()
                               try {
-                                  val cm = applicationContext.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
-                                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-                                      val net = cm.activeNetwork
-                                      val caps = cm.getNetworkCapabilities(net)
-                                      val connected = caps != null && (
-                                          caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) ||
-                                          caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) ||
-                                          caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET)
-                                      ) && caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
-                                      result.success(connected)
+                                  val path = call.argument<String>("path")
+                                  val uri = if (!path.isNullOrEmpty() && File(path).exists()) {
+                                      Uri.fromFile(File(path))
                                   } else {
-                                      @Suppress("DEPRECATION")
-                                      val info = cm.activeNetworkInfo
-                                      @Suppress("DEPRECATION")
-                                      result.success(info != null && info.isConnected)
+                                      RingtoneManager.getDefaultUri(RingtoneManager.TYPE_RINGTONE)
                                   }
-                              } catch (_: Exception) {
+                                  activeRingtone = RingtoneManager.getRingtone(applicationContext, uri)
+                                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                                      activeRingtone?.isLooping = true
+                                  }
+                                  activeRingtone?.play()
+                                  result.success(true)
+                              } catch (e: Exception) {
                                   result.success(false)
                               }
                           }
-                          "setAppIcon" -> {
-                              val iconType = call.argument<String>("type") ?: "default"
-                              val aliases = mapOf(
-                                  "default" to "com.universal.messenger.MainActivityDefault",
-                                  "google" to "com.universal.messenger.MainActivityGoogle",
-                                  "aqua" to "com.universal.messenger.MainActivityAqua",
-                                  "dark" to "com.universal.messenger.MainActivityDark",
-                                  "sunset" to "com.universal.messenger.MainActivitySunset"
-                              )
-                              val targetClass = aliases[iconType] ?: aliases["default"]!!
+                          "stopRingtone" -> {
+                              stopRingtoneInternal()
+                              result.success(true)
+                          }
+                          "playMessageSound" -> {
                               try {
-                                  val pm = applicationContext.packageManager
-                                  pm.setComponentEnabledSetting(
-                                      ComponentName(applicationContext, targetClass),
-                                      PackageManager.COMPONENT_ENABLED_STATE_ENABLED,
-                                      PackageManager.DONT_KILL_APP
-                                  )
-                                  for ((_, cls) in aliases) {
-                                      if (cls != targetClass) {
-                                          pm.setComponentEnabledSetting(
-                                              ComponentName(applicationContext, cls),
-                                              PackageManager.COMPONENT_ENABLED_STATE_DISABLED,
-                                              PackageManager.DONT_KILL_APP
-                                          )
-                                      }
+                                  mediaPlayer?.release()
+                                  val path = call.argument<String>("path")
+                                  val uri = if (!path.isNullOrEmpty() && File(path).exists()) {
+                                      Uri.fromFile(File(path))
+                                  } else {
+                                      RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION)
+                                  }
+                                  mediaPlayer = MediaPlayer().apply {
+                                      setAudioAttributes(
+                                          AudioAttributes.Builder()
+                                              .setUsage(AudioAttributes.USAGE_NOTIFICATION)
+                                              .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                                              .build()
+                                      )
+                                      setDataSource(applicationContext, uri)
+                                      prepare()
+                                      start()
                                   }
                                   result.success(true)
                               } catch (e: Exception) {
-                                  result.error("ICON_ERROR", e.message, null)
-                              }
-                          }
-                          "pinCustomShortcut" -> {
-                              val path = call.argument<String>("path")
-                              if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && path != null) {
-                                  try {
-                                      val sm = getSystemService(ShortcutManager::class.java)
-                                      if (sm != null && sm.isRequestPinShortcutSupported) {
-                                          val bmp = BitmapFactory.decodeFile(path)
-                                          if (bmp != null) {
-                                              val launchIntent = Intent(applicationContext, MainActivity::class.java).apply {
-                                                  action = Intent.ACTION_VIEW
-                                                  addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
-                                              }
-                                              val shortcut = ShortcutInfo.Builder(applicationContext, "custom_messenger_${System.currentTimeMillis()}")
-                                                  .setShortLabel("Universal Messenger")
-                                                  .setIcon(Icon.createWithBitmap(bmp))
-                                                  .setIntent(launchIntent)
-                                                  .build()
-                                              sm.requestPinShortcut(shortcut, null)
-                                              result.success(true)
-                                          } else {
-                                              result.success(false)
-                                          }
-                                      } else {
-                                          result.success(false)
-                                      }
-                                  } catch (e: Exception) {
-                                      result.error("SHORTCUT_ERROR", e.message, null)
-                                  }
-                              } else {
                                   result.success(false)
                               }
                           }
-                          else -> result.notImplemented()
+                          "getContentUri" -> {
+                              try {
+                                  val path = call.argument<String>("path") ?: ""
+                                  val file = File(path)
+                                  val uri = FileProvider.getUriForFile(this, "$packageName.fileprovider", file)
+                                  result.success(uri.toString())
+                              } catch (e: Exception) {
+                                  result.success(null)
+                              }
+                          }
+                          "installApk" -> {
+                              try {
+                                  val path = call.argument<String>("path") ?: ""
+                                  val file = File(path)
+                                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && !packageManager.canRequestPackageInstalls()) {
+                                      val intent = Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:$packageName"))
+                                      startActivity(intent)
+                                      result.success("PERMISSION_REQUIRED")
+                                  } else {
+                                      val apkUri = FileProvider.getUriForFile(this, "$packageName.fileprovider", file)
+                                      val intent = Intent(Intent.ACTION_VIEW).apply {
+                                          setDataAndType(apkUri, "application/vnd.android.package-archive")
+                                          addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
+                                      }
+                                      startActivity(intent)
+                                      result.success("STARTED")
+                                  }
+                              } catch (e: Exception) {
+                                  result.error("INSTALL_ERR", e.message, null)
+                              }
+                          }
+                          else -> result.success(null)
                       }
                   }
               }
+
+              private fun stopRingtoneInternal() {
+                  try {
+                      activeRingtone?.stop()
+                      activeRingtone = null
+                  } catch (_: Exception) {}
+              }
+
+              override fun onUserLeaveHint() {
+                  super.onUserLeaveHint()
+                  if (suppressPipOnce) {
+                      suppressPipOnce = false
+                      return
+                  }
+                  if (isCallActive && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                      try {
+                          val params = PictureInPictureParams.Builder()
+                              .setAspectRatio(Rational(9, 16))
+                              .build()
+                          enterPictureInPictureMode(params)
+                      } catch (_: Exception) {}
+                  }
+              }
+
+              override fun onDestroy() {
+                  stopRingtoneInternal()
+                  mediaPlayer?.release()
+                  super.onDestroy()
+              }
           }
-          ''')
+          EOF
 
-          def make_png(w, h, fn):
-              raw = bytearray()
-              for y in range(h):
-                  raw.append(0)
-                  for x in range(w):
-                      raw.extend(fn(x, y, w, h))
-              def chunk(tag, data):
-                  return struct.pack(">I", len(data)) + tag + data + struct.pack(">I", zlib.crc32(tag + data) & 0xffffffff)
-              ihdr = struct.pack(">IIBBBBB", w, h, 8, 6, 0, 0, 0)
-              return b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr) + chunk(b"IDAT", zlib.compress(bytes(raw), 9)) + chunk(b"IEND", b"")
-
-          def default_px(x, y, w, h):
-              in_bubble = (0.22 * w <= x <= 0.78 * w) and (0.25 * h <= y <= 0.65 * h)
-              in_tail = (0.28 * w <= x <= 0.44 * w) and (0.65 * h <= y <= 0.76 * h) and ((x - 0.28 * w) <= (0.76 * h - y) * 1.4)
-              if in_bubble or in_tail:
-                  return (255, 255, 255, 255)
-              return (0, 128, 105, 255)
-
-          def google_px(x, y, w, h):
-              cx, cy = w * 0.5, h * 0.5
-              dx, dy = x - cx, y - cy
-              d2 = dx * dx + dy * dy
-              ro, ri = w * 0.31, w * 0.18
-              in_ring = (ri * ri <= d2 <= ro * ro) and not (dx > 0 and -ro * 0.42 < dy < 0)
-              in_bar = (0 <= dx <= ro) and (0 <= dy <= ro * 0.36)
-              if in_bar or (in_ring and dx > 0 and dy >= 0):
-                  return (66, 133, 244, 255)
-              if in_ring:
-                  if dy < -abs(dx) * 0.45:
-                      return (234, 67, 53, 255)
-                  if dx < 0 and dy <= abs(dx) * 0.45:
-                      return (251, 188, 5, 255)
-                  return (52, 168, 83, 255)
-              return (255, 255, 255, 255)
-
-          def aqua_px(x, y, w, h):
-              t = (x + y) / (w + h)
-              bg = (int(28 * (1 - t) + 0 * t), int(152 * (1 - t) + 195 * t), int(235 * (1 - t) + 185 * t), 255)
-              nx, ny = x / w, y / h
-              if 0.24 <= nx <= 0.76 and 0.28 <= ny <= 0.72:
-                  top_edge = 0.50 - 0.24 * ((nx - 0.24) / 0.52)
-                  bot_edge = 0.50 + 0.24 * ((nx - 0.24) / 0.52)
-                  if top_edge <= ny <= bot_edge:
-                      return (255, 255, 255, 255)
-              return bg
-
-          def dark_px(x, y, w, h):
-              in_bubble = (0.22 * w <= x <= 0.78 * w) and (0.25 * h <= y <= 0.65 * h)
-              in_tail = (0.28 * w <= x <= 0.44 * w) and (0.65 * h <= y <= 0.76 * h) and ((x - 0.28 * w) <= (0.76 * h - y) * 1.4)
-              if in_bubble or in_tail:
-                  return (0, 230, 118, 255)
-              return (20, 26, 33, 255)
-
-          def sunset_px(x, y, w, h):
-              t = y / h
-              bg = (int(244 * (1 - t) + 142 * t), int(81 * (1 - t) + 36 * t), int(30 * (1 - t) + 170 * t), 255)
-              cx, cy = w * 0.5, h * 0.48
-              dx, dy = abs(x - cx) / w, abs(y - cy) / h
-              if (dx + dy) <= 0.26:
-                  return (255, 255, 255, 255)
-              return bg
-
-          res_dir = "android/app/src/main/res"
-          shutil.rmtree(f"{res_dir}/mipmap-anydpi-v26", ignore_errors=True)
-          for density, size in [("mipmap-mdpi", 48), ("mipmap-hdpi", 72), ("mipmap-xhdpi", 96), ("mipmap-xxhdpi", 144), ("mipmap-xxxhdpi", 192)]:
-              ddir = f"{res_dir}/{density}"
-              os.makedirs(ddir, exist_ok=True)
-              with open(f"{ddir}/ic_launcher.png", "wb") as f:
-                  f.write(make_png(size, size, default_px))
-              with open(f"{ddir}/ic_launcher_google.png", "wb") as f:
-                  f.write(make_png(size, size, google_px))
-              with open(f"{ddir}/ic_launcher_aqua.png", "wb") as f:
-                  f.write(make_png(size, size, aqua_px))
-              with open(f"{ddir}/ic_launcher_dark.png", "wb") as f:
-                  f.write(make_png(size, size, dark_px))
-              with open(f"{ddir}/ic_launcher_sunset.png", "wb") as f:
-                  f.write(make_png(size, size, sunset_px))
-
-          xml_dir = f"{res_dir}/xml"
-          os.makedirs(xml_dir, exist_ok=True)
-          with open(f"{xml_dir}/file_paths.xml", "w", encoding="utf-8") as f:
-              f.write('<?xml version="1.0" encoding="utf-8"?>\n<paths>\n    <files-path name="app_files" path="."/>\n    <cache-path name="app_cache" path="."/>\n</paths>\n')
-
-          if os.path.exists("android/gradle.properties"):
-              with open("android/gradle.properties", "r") as f:
-                  gp = f.read()
-              gp = re.sub(r'-Xmx\S+', '-Xmx3G', gp)
-              gp += "\nandroid.enableJetifier=true\nkotlin.jvm.target.validation.mode=warning\nandroid.suppressUnsupportedCompileSdk=36\norg.gradle.workers.max=2\norg.gradle.daemon=false\n"
-              with open("android/gradle.properties", "w") as f:
-                  f.write(gp)
+          python3 -c '
+          import os
 
           if os.path.exists("android/settings.gradle.kts"):
               with open("android/settings.gradle.kts", "r") as f:
-                  s = f.read()
-              s = s.replace('apply false', 'apply false\n    id("com.google.gms.google-services") version "4.4.2" apply false', 1)
-              s += '''
-          gradle.beforeProject {
-              listOf("compileSdk", "compileSdkVersion").forEach { extensions.extraProperties.set(it, 36) }
-              listOf("targetSdk", "targetSdkVersion").forEach { extensions.extraProperties.set(it, 34) }
-              listOf("minSdk", "minSdkVersion").forEach { extensions.extraProperties.set(it, 23) }
-              extensions.extraProperties.set("javaVersion", org.gradle.api.JavaVersion.VERSION_17)
-              if (project != rootProject && project.name != "app") {
-                  project.pluginManager.apply("com.android.library")
-              }
-          }
-          '''
+                  lines = f.read().splitlines()
+              out = []
+              for l in lines:
+                  out.append(l)
+                  if "com.android.application" in l and "apply false" in l:
+                      out.append("    id(\"com.google.gms.google-services\") version \"4.4.2\" apply false")
               with open("android/settings.gradle.kts", "w") as f:
-                  f.write(s)
-
-          if os.path.exists("android/build.gradle.kts"):
-              with open("android/build.gradle.kts", "r") as f:
-                  b = f.read()
-              fix = '''
-          allprojects {
-              listOf("compileSdk", "compileSdkVersion").forEach { extensions.extraProperties.set(it, 36) }
-              listOf("targetSdk", "targetSdkVersion").forEach { extensions.extraProperties.set(it, 34) }
-              listOf("minSdk", "minSdkVersion").forEach { extensions.extraProperties.set(it, 23) }
-              extensions.extraProperties.set("javaVersion", org.gradle.api.JavaVersion.VERSION_17)
-          }
-          subprojects {
-              val configureLib = {
-                  val ext = extensions.findByName("android")
-                  if (ext != null) {
-                      try {
-                          val cur = ext.javaClass.getMethod("getNamespace").invoke(ext) as? String
-                          if (cur.isNullOrEmpty()) {
-                              val mf = file("src/main/AndroidManifest.xml")
-                              val pkg = if (mf.exists()) Regex("package\\\\s*=\\\\s*[\\"']([^\\"']+)[\\"']").find(mf.readText())?.groupValues?.get(1) else null
-                              ext.javaClass.getMethod("setNamespace", String::class.java).invoke(ext, pkg ?: ("com.universal.plugin." + project.name.replace("-", "_").replace(".", "_")))
-                          }
-                      } catch (_: Exception) {}
-                      try {
-                          ext.javaClass.getMethod("setCompileSdk", Int::class.javaObjectType).invoke(ext, 36)
-                      } catch (_: Exception) {}
-                      try {
-                          ext.javaClass.getMethod("compileSdkVersion", Int::class.javaPrimitiveType).invoke(ext, 36)
-                      } catch (_: Exception) {}
-                  }
-              }
-              plugins.withId("com.android.library") {
-                  configureLib()
-                  if (state.executed) {
-                      configureLib()
-                  } else {
-                      afterEvaluate { configureLib() }
-                  }
-              }
-          }
-          '''
-              with open("android/build.gradle.kts", "w") as f:
-                  f.write(b + "\n" + fix)
+                  f.write("\n".join(out) + "\n")
+          elif os.path.exists("android/settings.gradle"):
+              with open("android/settings.gradle", "r") as f:
+                  lines = f.read().splitlines()
+              out = []
+              for l in lines:
+                  out.append(l)
+                  if "com.android.application" in l and "apply false" in l:
+                      out.append("    id \"com.google.gms.google-services\" version \"4.4.2\" apply false")
+              with open("android/settings.gradle", "w") as f:
+                  f.write("\n".join(out) + "\n")
 
           if os.path.exists("android/app/build.gradle.kts"):
               with open("android/app/build.gradle.kts", "r") as f:
-                  c = f.read()
-              c = c.replace("com.universal.universal_messenger", "com.universal.messenger")
-              c = c.replace('id("com.android.application")', 'id("com.android.application")\n    id("com.google.gms.google-services")')
-              c = re.sub(r'compileSdk\s*=\s*\S+', 'compileSdk = 36', c, count=1)
-              c = re.sub(r'targetSdk\s*=\s*\S+', 'targetSdk = 34', c, count=1)
-              c = re.sub(r'minSdk\s*=\s*\S+', 'minSdk = 23\n        multiDexEnabled = true', c, count=1)
-              c += f'''
-          android {{
-              compileSdk = 36
-              compileOptions {{
-                  isCoreLibraryDesugaringEnabled = true
-                  sourceCompatibility = JavaVersion.VERSION_17
-                  targetCompatibility = JavaVersion.VERSION_17
-              }}
-              lint {{
-                  checkReleaseBuilds = false
-                  abortOnError = false
-              }}
-              defaultConfig {{
-                  applicationId = "com.universal.messenger"
-                  minSdk = 23
-                  targetSdk = 34
-                  versionCode = {run_num}
-                  versionName = "10.0.{run_num}"
-              }}
-              signingConfigs {{
-                  maybeCreate("release").apply {{
-                      storeFile = file("release.jks")
-                      storePassword = "Messenger@2026"
-                      keyAlias = "messenger_key"
-                      keyPassword = "Messenger@2026"
-                  }}
-              }}
-              buildTypes {{
-                  getByName("release") {{
-                      signingConfig = signingConfigs.getByName("release")
-                      isMinifyEnabled = false
-                      isShrinkResources = false
-                  }}
-              }}
-              packaging {{
-                  jniLibs {{
-                      useLegacyPackaging = true
-                  }}
-              }}
-          }}
-          dependencies {{
-              coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.4")
-          }}
-          '''
+                  lines = f.read().splitlines()
+              out = []
+              for l in lines:
+                  if "minSdk =" in l or "minSdkVersion" in l:
+                      out.append("        minSdk = 23")
+                      out.append("        multiDexEnabled = true")
+                      continue
+                  if "targetSdk =" in l or "targetSdkVersion" in l:
+                      out.append("        targetSdk = 34")
+                      continue
+                  out.append(l)
+                  if "id(\"com.android.application\")" in l:
+                      out.append("    id(\"com.google.gms.google-services\")")
+                  if "sourceCompatibility" in l:
+                      out.append("        isCoreLibraryDesugaringEnabled = true")
+              out.append("\ndependencies {\n    coreLibraryDesugaring(\"com.android.tools:desugar_jdk_libs:2.1.4\")\n}\n")
               with open("android/app/build.gradle.kts", "w") as f:
-                  f.write(c)
+                  f.write("\n".join(out) + "\n")
 
-          mp = "android/app/src/main/AndroidManifest.xml"
-          if os.path.exists(mp):
-              with open(mp, "r", encoding="utf-8") as f:
-                  m_xml = f.read()
-              m_xml = re.sub(r'\s*android:extractNativeLibs="[^"]*"', '', m_xml)
-              m_xml = m_xml.replace('android:label="universal_messenger"', 'android:label="Universal Messenger"')
-              if 'android:supportsPictureInPicture' not in m_xml:
-                  m_xml = m_xml.replace('<activity\n', '<activity\n            android:supportsPictureInPicture="true"\n            android:resizeableActivity="true"\n', 1)
-              if 'android:supportsPictureInPicture' not in m_xml:
-                  m_xml = m_xml.replace('<activity ', '<activity android:supportsPictureInPicture="true" android:resizeableActivity="true" ', 1)
-              perms = ''.join(f'    <uses-permission android:name="android.permission.{p}"/>\n' for p in [
-                  "INTERNET","CAMERA","RECORD_AUDIO","MODIFY_AUDIO_SETTINGS",
-                  "ACCESS_NETWORK_STATE","ACCESS_WIFI_STATE","BLUETOOTH",
-                  "BLUETOOTH_CONNECT","WAKE_LOCK","POST_NOTIFICATIONS",
-                  "VIBRATE","USE_FULL_SCREEN_INTENT","INSTALL_SHORTCUT",
-                  "RECEIVE_BOOT_COMPLETED","REQUEST_INSTALL_PACKAGES"
-              ])
-              perms += '    <queries><intent><action android:name="android.intent.action.VIEW"/><data android:scheme="https"/></intent></queries>\n    <application android:extractNativeLibs="true"'
-              m_xml = m_xml.replace("<application", perms, 1)
-              m_xml = re.sub(
-                  r'<intent-filter>\s*<action\s+android:name="android\.intent\.action\.MAIN"\s*/>\s*<category\s+android:name="android\.intent\.category\.LAUNCHER"\s*/>\s*</intent-filter>',
-                  '',
-                  m_xml,
-                  count=1
+          manifest_path = "android/app/src/main/AndroidManifest.xml"
+          if os.path.exists(manifest_path):
+              with open(manifest_path, "r") as f:
+                  m = f.read()
+              perms = [
+                  "android.permission.INTERNET",
+                  "android.permission.ACCESS_NETWORK_STATE",
+                  "android.permission.POST_NOTIFICATIONS",
+                  "android.permission.VIBRATE",
+                  "android.permission.WAKE_LOCK",
+                  "android.permission.RECEIVE_BOOT_COMPLETED",
+                  "android.permission.USE_FULL_SCREEN_INTENT",
+                  "android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS",
+                  "android.permission.SYSTEM_ALERT_WINDOW",
+                  "android.permission.CAMERA",
+                  "android.permission.RECORD_AUDIO",
+                  "android.permission.MODIFY_AUDIO_SETTINGS",
+                  "android.permission.BLUETOOTH",
+                  "android.permission.BLUETOOTH_CONNECT",
+                  "android.permission.FOREGROUND_SERVICE",
+                  "android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION",
+                  "android.permission.FOREGROUND_SERVICE_CAMERA",
+                  "android.permission.FOREGROUND_SERVICE_MICROPHONE",
+                  "android.permission.REQUEST_INSTALL_PACKAGES",
+              ]
+              perm_tags = ""
+              for p in perms:
+                  if p not in m:
+                      perm_tags += f"    <uses-permission android:name=\"{p}\"/>\n"
+              if perm_tags:
+                  m = m.replace("<application", perm_tags + "    <application", 1)
+
+              m = m.replace(
+                  "android:name=\".MainActivity\"",
+                  "android:name=\".MainActivity\"\n            android:supportsPictureInPicture=\"true\"\n            android:resizeableActivity=\"true\"\n            android:showWhenLocked=\"true\"\n            android:turnScreenOn=\"true\"",
+                  1
               )
-              aliases = '''
-                  <provider
-                      android:name="androidx.core.content.FileProvider"
-                      android:authorities="com.universal.messenger.fileprovider"
-                      android:exported="false"
-                      android:grantUriPermissions="true">
-                      <meta-data
-                          android:name="android.support.FILE_PROVIDER_PATHS"
-                          android:resource="@xml/file_paths"/>
-                  </provider>
-                  <meta-data android:name="com.google.firebase.messaging.default_notification_channel_id" android:value="chat_messages_sound_v3"/>
-                  <activity-alias android:name=".MainActivityDefault" android:enabled="true" android:exported="true" android:icon="@mipmap/ic_launcher" android:roundIcon="@mipmap/ic_launcher" android:label="Universal Messenger" android:targetActivity=".MainActivity">
-                      <intent-filter><action android:name="android.intent.action.MAIN"/><category android:name="android.intent.category.LAUNCHER"/></intent-filter>
-                  </activity-alias>
-                  <activity-alias android:name=".MainActivityGoogle" android:enabled="false" android:exported="true" android:icon="@mipmap/ic_launcher_google" android:roundIcon="@mipmap/ic_launcher_google" android:label="Google" android:targetActivity=".MainActivity">
-                      <intent-filter><action android:name="android.intent.action.MAIN"/><category android:name="android.intent.category.LAUNCHER"/></intent-filter>
-                  </activity-alias>
-                  <activity-alias android:name=".MainActivityAqua" android:enabled="false" android:exported="true" android:icon="@mipmap/ic_launcher_aqua" android:roundIcon="@mipmap/ic_launcher_aqua" android:label="Universal Messenger" android:targetActivity=".MainActivity">
-                      <intent-filter><action android:name="android.intent.action.MAIN"/><category android:name="android.intent.category.LAUNCHER"/></intent-filter>
-                  </activity-alias>
-                  <activity-alias android:name=".MainActivityDark" android:enabled="false" android:exported="true" android:icon="@mipmap/ic_launcher_dark" android:roundIcon="@mipmap/ic_launcher_dark" android:label="Universal Messenger" android:targetActivity=".MainActivity">
-                      <intent-filter><action android:name="android.intent.action.MAIN"/><category android:name="android.intent.category.LAUNCHER"/></intent-filter>
-                  </activity-alias>
-                  <activity-alias android:name=".MainActivitySunset" android:enabled="false" android:exported="true" android:icon="@mipmap/ic_launcher_sunset" android:roundIcon="@mipmap/ic_launcher_sunset" android:label="Universal Messenger" android:targetActivity=".MainActivity">
-                      <intent-filter><action android:name="android.intent.action.MAIN"/><category android:name="android.intent.category.LAUNCHER"/></intent-filter>
-                  </activity-alias>
-              </application>'''
-              m_xml = m_xml.replace("</application>", aliases, 1)
-              ET.fromstring(m_xml)
-              with open(mp, "w", encoding="utf-8") as f:
-                  f.write(m_xml)
-          PYEOF
-          python3 configure_android.py && rm -f configure_android.py
 
-      - name: Install Packages & Fix Plugin Order
-        run: |
-          flutter pub add dio file_picker url_launcher zego_uikit_prebuilt_call "flutter_local_notifications:^18.0.1"
-          flutter pub get
+              extra_xml = """        <service
+              android:name="im.zego.zegoexpress.internal.ZegoScreenCaptureService"
+              android:enabled="true"
+              android:exported="false"
+              android:foregroundServiceType="mediaProjection" />
+          <provider
+              android:name="androidx.core.content.FileProvider"
+              android:authorities="${applicationId}.fileprovider"
+              android:exported="false"
+              android:grantUriPermissions="true">
+              <meta-data
+                  android:name="android.support.FILE_PROVIDER_PATHS"
+                  android:resource="@xml/file_paths" />
+          </provider>
+          <meta-data
+              android:name="com.google.firebase.messaging.default_notification_channel_id"
+              android:value="fcm_msg_all_v1" />
+      </application>"""
+              if "ZegoScreenCaptureService" not in m:
+                  m = m.replace("</application>", extra_xml, 1)
 
-          cat << 'PYEOF' > fix_plugins.py
-          import json, os, re, urllib.parse
+              with open(manifest_path, "w") as f:
+                  f.write(m)
+          '
 
-          fp_ver = 0
-          if os.path.exists("pubspec.lock"):
-              with open("pubspec.lock", encoding="utf-8", errors="ignore") as f:
-                  lock_txt = f.read()
-              m_fp = re.search(r'(?m)^  file_picker:\n(?:    [^\n]+\n){1,12}    version:\s*["\']?(\d+)\.', lock_txt)
-              if m_fp:
-                  fp_ver = int(m_fp.group(1))
-          if 0 < fp_ver < 11:
-              for droot, _, dfiles in os.walk("lib"):
-                  for df in dfiles:
-                      if df.endswith(".dart"):
-                          dp = os.path.join(droot, df)
-                          with open(dp, encoding="utf-8") as f:
-                              dtxt = f.read()
-                          new_dtxt = re.sub(
-                              r'await\s+FilePicker\.pickFiles\(([^;]*)\);',
-                              r'((await FilePicker.platform.pickFiles(\1))?.files ?? []);',
-                              dtxt,
-                          )
-                          if new_dtxt != dtxt:
-                              with open(dp, "w", encoding="utf-8") as f:
-                                  f.write(new_dtxt)
-
-          proj_dir = os.path.realpath(".")
-          flutter_root = os.path.realpath(os.environ["FLUTTER_ROOT"]) if os.environ.get("FLUTTER_ROOT") else ""
-          roots = {os.path.realpath(os.environ.get("PUB_CACHE") or os.path.expanduser("~/.pub-cache"))}
-
-          if os.path.exists(".dart_tool/package_config.json"):
-              with open(".dart_tool/package_config.json", encoding="utf-8") as f:
-                  cfg = json.load(f)
-              for pkg in cfg.get("packages", []):
-                  uri = pkg.get("rootUri", "")
-                  p = urllib.parse.unquote(urllib.parse.urlparse(uri).path) if uri.startswith("file://") else os.path.join(".dart_tool", uri)
-                  rp = os.path.realpath(p)
-                  if os.path.exists(rp) and rp != proj_dir and not rp.startswith(proj_dir + os.sep):
-                      if not flutter_root or not rp.startswith(flutter_root + os.sep):
-                          roots.add(rp)
-
-          seen = set()
-          for base in roots:
-              if not os.path.exists(base):
-                  continue
-              for root, _, files in os.walk(base):
-                  for fname in files:
-                      path = os.path.realpath(os.path.join(root, fname))
-                      if path in seen:
-                          continue
-                      if path.startswith(proj_dir + os.sep) or (flutter_root and path.startswith(flutter_root + os.sep)):
-                          continue
-                      if "/example/" in path:
-                          continue
-                      seen.add(path)
-
-                      if fname.endswith((".java", ".kt")):
-                          with open(path, encoding="utf-8", errors="ignore") as f:
-                              jtxt = f.read()
-                          new_jtxt = jtxt
-                          if "sqflite_android" in path:
-                              new_jtxt = new_jtxt.replace(".threadId()", ".getId()").replace("Locale.of(", "new Locale(")
-                          if "Build.VERSION_CODES.BAKLAVA" in new_jtxt:
-                              new_jtxt = new_jtxt.replace("Build.VERSION_CODES.BAKLAVA", "36")
-                          if "Build.VERSION_CODES.CINNAMON_BUN" in new_jtxt:
-                              new_jtxt = new_jtxt.replace("Build.VERSION_CODES.CINNAMON_BUN", "37")
-                          if "Manifest.permission.ACCESS_LOCAL_NETWORK" in new_jtxt:
-                              new_jtxt = new_jtxt.replace("Manifest.permission.ACCESS_LOCAL_NETWORK", '"android.permission.ACCESS_LOCAL_NETWORK"')
-                          if new_jtxt != jtxt:
-                              with open(path, "w", encoding="utf-8") as f:
-                                  f.write(new_jtxt)
-                          continue
-
-                      if not fname.endswith((".gradle", ".gradle.kts")):
-                          continue
-
-                      with open(path, encoding="utf-8", errors="ignore") as f:
-                          text = f.read().replace("\r\n", "\n")
-                      orig = text
-                      text = re.sub(r'\bjcenter\s*\(\s*\)', 'mavenCentral()', text)
-                      text = re.sub(r'\bflutter\.(?:compileSdkVersion|compileSdk)\b', '36', text)
-                      text = re.sub(r'\bflutter\.(?:minSdkVersion|minSdk)\b', '23', text)
-                      text = re.sub(r'\bflutter\.(?:targetSdkVersion|targetSdk)\b', '34', text)
-                      text = re.sub(r'\b(compileSdkVersion|compileSdk)(\s*=\s*)[2-4]\d\b', r'\g<1>\g<2>36', text)
-                      text = re.sub(r'\b(compileSdkVersion|compileSdk)(\s+)[2-4]\d\b', r'\g<1>\g<2>36', text)
-                      text = re.sub(r'\b(compileSdkVersion|compileSdk)\s*\(\s*[2-4]\d\s*\)', r'\g<1>(36)', text)
-                      text = re.sub(r'(?m)^[ \t]*compileSdkPreview\b.*\n?', '', text)
-                      if text != orig:
-                          with open(path, "w", encoding="utf-8") as f:
-                              f.write(text)
-          PYEOF
-          python3 fix_plugins.py && rm -f fix_plugins.py
+      - name: Get Dependencies
+        run: flutter pub get
 
       - name: Build Release APK
-        timeout-minutes: 45
+        env:
+          FCM_SERVICE_ACCOUNT: ${{ secrets.FCM_SERVICE_ACCOUNT }}
         run: |
-          flutter build apk --release --no-pub --target-platform android-arm64
-          APKSIGNER=$(find "$ANDROID_HOME/build-tools" -name apksigner 2>/dev/null | sort -V | tail -n 1)
-          if [ -n "$APKSIGNER" ]; then
-            "$APKSIGNER" verify --verbose build/app/outputs/flutter-apk/app-release.apk
+          if [ -n "$FCM_SERVICE_ACCOUNT" ]; then
+            FCM_B64=$(printf '%s' "$FCM_SERVICE_ACCOUNT" | base64 -w 0)
+            flutter build apk --release --split-per-abi --dart-define=FCM_SA_B64=$FCM_B64
+          else
+            flutter build apk --release --split-per-abi
           fi
-          rm -rf build/app/intermediates
+          cp build/app/outputs/flutter-apk/app-arm64-v8a-release.apk build/app/outputs/flutter-apk/app-release.apk
 
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Universal-Messenger-APK
+          name: Universal-Messenger-v14-APK
           path: build/app/outputs/flutter-apk/app-release.apk
-          if-no-files-found: error
 
-      - name: Publish Direct APK to Releases
+      - name: Publish Release APK
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v14.0.0
+          name: Universal Messenger v14.0.0
+          files: build/app/outputs/flutter-apk/app-release.apk
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          gh release create "v10.0.${{ github.run_number }}-${{ github.run_attempt }}" "build/app/outputs/flutter-apk/app-release.apk#Universal-Messenger.apk" --target "${{ github.ref_name }}" --title "Universal Messenger v10.0.${{ github.run_number }}" --notes "Universal Messenger v10.0 with Direct In-App Update Installer" || true
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
