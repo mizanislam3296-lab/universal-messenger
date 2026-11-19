@@ -1,6 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+echo "==> Step 0: Syncing missing root *_screen.dart files into lib/screens/..."
+mkdir -p lib/screens
+for f in *_screen.dart; do
+  if [[ -f "$f" && ! -f "lib/screens/$f" ]]; then
+    echo "Copying missing screen file: $f -> lib/screens/$f"
+    cp "$f" "lib/screens/$f"
+  fi
+done
+
 echo "==> Step 1: Cleaning old android/ directory..."
 rm -rf android
 
