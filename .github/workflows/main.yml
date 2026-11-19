@@ -267,12 +267,14 @@ jobs:
               if pt:
                   m = m.replace("<application", pt + "    <application", 1)
               m = m.replace("android:name=\".MainActivity\"", "android:name=\".MainActivity\"\n            android:supportsPictureInPicture=\"true\"\n            android:resizeableActivity=\"true\"\n            android:showWhenLocked=\"true\"\n            android:turnScreenOn=\"true\"", 1)
-              ex = """        <service android:name="im.zego.zegoexpress.internal.ZegoScreenCaptureService" android:enabled="true" android:exported="false" android:foregroundServiceType="mediaProjection" />
-          <provider android:name="androidx.core.content.FileProvider" android:authorities="${applicationId}.fileprovider" android:exported="false" android:grantUriPermissions="true">
-              <meta-data android:name="android.support.FILE_PROVIDER_PATHS" android:resource="@xml/file_paths" />
-          </provider>
-          <meta-data android:name="com.google.firebase.messaging.default_notification_channel_id" android:value="fcm_msg_all_v1" />
-      </application>"""
+              ex = (
+                  "        <service android:name=\"im.zego.zegoexpress.internal.ZegoScreenCaptureService\" android:enabled=\"true\" android:exported=\"false\" android:foregroundServiceType=\"mediaProjection\" />\n"
+                  "        <provider android:name=\"androidx.core.content.FileProvider\" android:authorities=\"${applicationId}.fileprovider\" android:exported=\"false\" android:grantUriPermissions=\"true\">\n"
+                  "            <meta-data android:name=\"android.support.FILE_PROVIDER_PATHS\" android:resource=\"@xml/file_paths\" />\n"
+                  "        </provider>\n"
+                  "        <meta-data android:name=\"com.google.firebase.messaging.default_notification_channel_id\" android:value=\"fcm_msg_all_v1\" />\n"
+                  "    </application>"
+              )
               if "ZegoScreenCaptureService" not in m:
                   m = m.replace("</application>", ex, 1)
               open(mp, "w").write(m)
