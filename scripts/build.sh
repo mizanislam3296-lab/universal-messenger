@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-echo "==> Step 0: Syncing missing root *_screen.dart files into lib/screens/..."
+echo "==> Step 0: Syncing missing root *_screen.dart files & patching FilePicker..."
 mkdir -p lib/screens
 for f in *_screen.dart; do
   if [[ -f "$f" && ! -f "lib/screens/$f" ]]; then
@@ -9,6 +9,20 @@ for f in *_screen.dart; do
     cp "$f" "lib/screens/$f"
   fi
 done
+
+python3 - <<'PY'
+import pathlib, re
+pattern = re.compile(r'await\s+FilePicker\.pickFiles\(([^)]*)\)')
+for p in pathlib.Path('lib').rglob('*.dart'):
+    text = p.read_text(encoding='utf-8')
+    new_text = pattern.sub(
+        r'((await FilePicker.platform.pickFiles(\1))?.files ?? <PlatformFile>[])',
+        text,
+    )
+    if new_text != text:
+        p.write_text(new_text, encoding='utf-8')
+        print(f"Patched FilePicker in {p}")
+PY
 
 echo "==> Step 1: Cleaning old android/ directory..."
 rm -rf android
