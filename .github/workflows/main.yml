@@ -231,20 +231,12 @@ jobs:
           if os.path.exists("android/settings.gradle.kts"):
               txt = open("android/settings.gradle.kts").read()
               if "com.google.gms.google-services" not in txt:
-                  txt = txt.replace(
-                      'id("com.android.application")',
-                      'id("com.google.gms.google-services") version "4.4.2" apply false\n    id("com.android.application")',
-                      1
-                  )
+                  txt = txt.replace('id("com.android.application")', 'id("com.google.gms.google-services") version "4.4.2" apply false\n    id("com.android.application")', 1)
                   open("android/settings.gradle.kts", "w").write(txt)
           elif os.path.exists("android/settings.gradle"):
               txt = open("android/settings.gradle").read()
               if "com.google.gms.google-services" not in txt:
-                  txt = txt.replace(
-                      'id "com.android.application"',
-                      'id "com.google.gms.google-services" version "4.4.2" apply false\n    id "com.android.application"',
-                      1
-                  )
+                  txt = txt.replace('id "com.android.application"', 'id "com.google.gms.google-services" version "4.4.2" apply false\n    id "com.android.application"', 1)
                   open("android/settings.gradle", "w").write(txt)
 
           bg = "android/app/build.gradle.kts"
@@ -298,27 +290,16 @@ jobs:
                   1
               )
 
-              ex = '''        <service
-            android:name="im.zego.zegoexpress.internal.ZegoScreenCaptureService"
-            android:enabled="true"
-            android:exported="false"
-            android:foregroundServiceType="mediaProjection"
-            tools:node="merge" />
-        <provider
-            android:name="androidx.core.content.FileProvider"
-            android:authorities="${applicationId}.fileprovider"
-            android:exported="false"
-            android:grantUriPermissions="true">
-            <meta-data
-                android:name="android.support.FILE_PROVIDER_PATHS"
-                android:resource="@xml/file_paths" />
-        </provider>
-        <meta-data
-            android:name="com.google.firebase.messaging.default_notification_channel_id"
-            android:value="fcm_msg_all_v1" />
-    </application>'''
+              ex_lines = [
+                  '        <service android:name="im.zego.zegoexpress.internal.ZegoScreenCaptureService" android:enabled="true" android:exported="false" android:foregroundServiceType="mediaProjection" tools:node="merge" />',
+                  '        <provider android:name="androidx.core.content.FileProvider" android:authorities="${applicationId}.fileprovider" android:exported="false" android:grantUriPermissions="true">',
+                  '            <meta-data android:name="android.support.FILE_PROVIDER_PATHS" android:resource="@xml/file_paths" />',
+                  '        </provider>',
+                  '        <meta-data android:name="com.google.firebase.messaging.default_notification_channel_id" android:value="fcm_msg_all_v1" />',
+                  '    </application>'
+              ]
               if "ZegoScreenCaptureService" not in m:
-                  m = m.replace("</application>", ex, 1)
+                  m = m.replace("</application>", "\n".join(ex_lines), 1)
               open(mp, "w").write(m)
           PYEOF
 
