@@ -304,17 +304,17 @@ def configure_gradle_properties() -> None:
         else []
     )
 
-    # Properties removed or broken in AGP 9.0+
+    # Remove flags removed or breaking Kotlin DSL in AGP 9.0+
     removed_keys = {
         "android.defaults.buildfeatures.buildconfig",
         "android.enableJetifier",
+        "android.newDsl",
     }
 
     desired = {
         "org.gradle.jvmargs": "-Xmx4G -XX:MaxMetaspaceSize=1G -XX:+HeapDumpOnOutOfMemoryError",
         "android.useAndroidX": "true",
         "android.builtInKotlin": "false",
-        "android.newDsl": "false",
     }
 
     updated_lines: list[str] = []
@@ -413,7 +413,10 @@ def write_app_build_gradle_kts() -> None:
     if groovy_app.exists():
         groovy_app.unlink()
 
-    kts_content = """plugins {
+    kts_content = """import org.jetbrains.kotlin.gradle.dsl.JvmTarget
+import org.jetbrains.kotlin.gradle.tasks.KotlinCompile
+
+plugins {
     id("com.android.application")
     id("kotlin-android")
     id("dev.flutter.flutter-gradle-plugin")
@@ -429,10 +432,6 @@ android {
         isCoreLibraryDesugaringEnabled = true
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
-    }
-
-    kotlinOptions {
-        jvmTarget = JavaVersion.VERSION_17.toString()
     }
 
     defaultConfig {
@@ -454,6 +453,12 @@ android {
             isMinifyEnabled = false
             isShrinkResources = false
         }
+    }
+}
+
+tasks.withType<KotlinCompile>().configureEach {
+    compilerOptions {
+        jvmTarget.set(JvmTarget.JVM_17)
     }
 }
 
