@@ -32,10 +32,10 @@ def fix_gradle_file(p):
             new_block = header + "\n" + "\n".join(android_lines + other_lines) + footer
             content = content[:m_plugins.start(2)] + new_block + content[m_plugins.end(4):]
 
-    elif any(k in content for k in ("dev.flutter.flutter-gradle-plugin", "flutter.gradle", "android {")):
+    elif re.search(r"(dev\.flutter\.flutter-gradle-plugin|flutter\.gradle|\bandroid\s*\{)", content):
         lines = content.splitlines()
         top_android_re = re.compile(
-            r'^(apply\s+plugin\s*:\s*["\']com\.android\.(library|application)["\']|apply\s*\(\s*plugin\s*=\s*["\']com\.android\.(library|application)["\']\s*\))'
+            r'^\s*(apply\s+plugin\s*:\s*["\']com\.android\.(library|application)["\']|apply\s*\(\s*plugin\s*=\s*["\']com\.android\.(library\vert{}application)["\']\s*\))'
         )
         target_re = re.compile(
             r'^\s*(apply\s+plugin\s*:|apply\s*\(\s*plugin\s*=|apply\s+from\s*:|apply\s*\(\s*from\s*=|android\s*\{)'
@@ -53,7 +53,7 @@ def fix_gradle_file(p):
             remaining = remaining[:insert_idx] + android_apply_lines + remaining[insert_idx:]
             content = "\n".join(remaining) + "\n"
 
-    if "android {" in content and "namespace" not in content:
+    if re.search(r"\bandroid\s*\{", content) and "namespace" not in content:
         manifest_file = os.path.join(os.path.dirname(p), "src", "main", "AndroidManifest.xml")
         if os.path.exists(manifest_file):
             m_txt = open(manifest_file, "r", encoding="utf-8", errors="ignore").read()
@@ -61,7 +61,7 @@ def fix_gradle_file(p):
             if m_pkg:
                 pkg_name = m_pkg.group(1)
                 ns_line = f'    namespace = "{pkg_name}"' if is_kts else f'    namespace "{pkg_name}"'
-                content = content.replace("android {", f"android {{\n{ns_line}", 1)
+                content = re.sub(r"\bandroid\s*\{", f"android {{\n{ns_line}", content, count=1)
 
     if content != orig:
         open(p, "w", encoding="utf-8").write(content)
@@ -304,7 +304,9 @@ if os.path.exists("android/settings.gradle.kts"):
             'id("com.google.gms.google-services") version "4.4.2" apply false\n    id("com.android.application")',
             1
         )
-        open("android/settings.gradle.kts", "w", encoding="utf-8").write(txt)
+    if "gradle.beforeProject" not in txt:
+        txt += '\ngradle.beforeProject {\n    if (path != ":" && path != ":app") {\n        pluginManager.apply("com.android.library")\n    }\n}\n'
+    open("android/settings.gradle.kts", "w", encoding="utf-8").write(txt)
 elif os.path.exists("android/settings.gradle"):
     txt = open("android/settings.gradle", "r", encoding="utf-8").read()
     if "com.google.gms.google-services" not in txt:
@@ -313,82 +315,8 @@ elif os.path.exists("android/settings.gradle"):
             'id "com.google.gms.google-services" version "4.4.2" apply false\n    id "com.android.application"',
             1
         )
-        open("android/settings.gradle", "w", encoding="utf-8").write(txt)
+    if "gradle.beforeProject" not in txt:
+        txt += '\ngradle.beforeProject { p ->\n    if (p.path != ":" && p.path != ":app") {\n        p.pluginManager.apply("com.android.library")\n    }\n}\n'
+    open("android/settings.gradle", "w", encoding="utf-8").write(txt)
 
-bg = "android/app/build.gradle.kts"
-if os.path.exists(bg):
-    lines = open(bg, "r", encoding="utf-8").read().splitlines()
-    out = []
-    in_plugins = False
-    for l in lines:
-        s = l.strip()
-        if s.startswith("plugins") and "{" in s:
-            in_plugins = True
-            out.append(l)
-            out.append('    id("com.android.application")')
-            out.append('    id("kotlin-android")')
-            out.append('    id("dev.flutter.flutter-gradle-plugin")')
-            out.append('    id("com.google.gms.google-services")')
-            continue
-        if in_plugins:
-            if s == "}":
-                in_plugins = False
-                out.append(l)
-            continue
-        if "minSdk =" in l or "minSdkVersion" in l:
-            out.append("        minSdk = 23")
-            out.append("        multiDexEnabled = true")
-            continue
-        if "targetSdk =" in l or "targetSdkVersion" in l:
-            out.append("        targetSdk = 34")
-            continue
-        out.append(l)
-        if "sourceCompatibility" in l:
-            out.append("        isCoreLibraryDesugaringEnabled = true")
-    out.append("")
-    out.append("dependencies {")
-    out.append('    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.4")')
-    out.append("}")
-    open(bg, "w", encoding="utf-8").write("\n".join(out) + "\n")
-
-mp = "android/app/src/main/AndroidManifest.xml"
-if os.path.exists(mp):
-    m = open(mp, "r", encoding="utf-8").read()
-    if "xmlns:tools" not in m:
-        m = m.replace("<manifest ", '<manifest xmlns:tools="http://schemas.android.com/tools" ', 1)
-    perms = [
-        "INTERNET", "ACCESS_NETWORK_STATE", "POST_NOTIFICATIONS",
-        "VIBRATE", "WAKE_LOCK", "RECEIVE_BOOT_COMPLETED",
-        "USE_FULL_SCREEN_INTENT", "REQUEST_IGNORE_BATTERY_OPTIMIZATIONS",
-        "SYSTEM_ALERT_WINDOW", "CAMERA", "RECORD_AUDIO",
-        "MODIFY_AUDIO_SETTINGS", "BLUETOOTH", "BLUETOOTH_CONNECT",
-        "FOREGROUND_SERVICE", "FOREGROUND_SERVICE_MEDIA_PROJECTION",
-        "FOREGROUND_SERVICE_CAMERA", "FOREGROUND_SERVICE_MICROPHONE",
-        "REQUEST_INSTALL_PACKAGES"
-    ]
-    pt = ""
-    for p in perms:
-        if f"android.permission.{p}" not in m:
-            pt += f'    <uses-permission android:name="android.permission.{p}"/>\n'
-    if pt:
-        m = m.replace("<application", pt + "    <application", 1)
-
-    m = m.replace(
-        'android:name=".MainActivity"',
-        'android:name=".MainActivity"\n            android:supportsPictureInPicture="true"\n            android:resizeableActivity="true"\n            android:showWhenLocked="true"\n            android:turnScreenOn="true"',
-        1
-    )
-
-    ex = (
-        '        <service android:name="im.zego.zegoexpress.internal.ZegoScreenCaptureService" android:enabled="true" android:exported="false" android:foregroundServiceType="mediaProjection" tools:node="merge" />\n'
-        '        <provider android:name="androidx.core.content.FileProvider" android:authorities="${applicationId}.fileprovider" android:exported="false" android:grantUriPermissions="true">\n'
-        '            <meta-data android:name="android.support.FILE_PROVIDER_PATHS" android:resource="@xml/file_paths" />\n'
-        '        </provider>\n'
-        '        <meta-data android:name="com.google.firebase.messaging.default_notification_channel_id" android:value="fcm_msg_all_v1" />\n'
-        '    </application>'
-    )
-    if "ZegoScreenCaptureService" not in m:
-        m = m.replace("</application>", ex, 1)
-    open(mp, "w", encoding="utf-8").write(m)
-
-print("ANDROID_CONFIG_SUCCESS")
+bg = "android/app/
