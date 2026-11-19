@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Configure freshly generated Android project and patch cached Flutter plugins
-for AGP 8+ / modern Flutter compatibility on CI.
+for AGP 9+ / modern Flutter compatibility on CI.
 """
 
 import json
@@ -126,18 +126,16 @@ def reorder_top_level_apply_plugins(content: str) -> str:
     )
     lines = content.splitlines()
     depth = 0
-    matched_indices: set[int] = set()
     plugin_entries: list[tuple[str, str]] = []
     first_apply_out_idx: int | None = None
     android_block_out_idx: int | None = None
     kept_lines: list[str] = []
 
-    for idx, line in enumerate(lines):
+    for line in lines:
         code_part = re.sub(r"//.*$", "", line)
         if depth == 0:
             m = apply_re.match(line)
             if m:
-                matched_indices.add(idx)
                 plugin_entries.append((m.group(1), line.strip()))
                 if first_apply_out_idx is None:
                     first_apply_out_idx = len(kept_lines)
@@ -204,6 +202,33 @@ def upgrade_compile_sdk(content: str, is_kts: bool) -> str:
     return content
 
 
+def ensure_build_config_feature(content: str, is_kts: bool) -> str:
+    """Enable buildFeatures.buildConfig per-module (required since AGP 9 removed global flag)."""
+    if re.search(r"\bbuildConfig\b", content):
+        return content
+
+    bc_stmt = "buildConfig = true" if is_kts else "buildConfig true"
+
+    if re.search(r"(?m)^[ \t]*buildFeatures\s*\{", content):
+        return re.sub(
+            r"(?m)^([ \t]*buildFeatures\s*\{)",
+            lambda m: f"{m.group(1)}\n        {bc_stmt}",
+            content,
+            count=1,
+        )
+
+    if re.search(r"(?m)^[ \t]*android\s*\{", content):
+        block = f"    buildFeatures {{\n        {bc_stmt}\n    }}"
+        return re.sub(
+            r"(?m)^([ \t]*android\s*\{)",
+            lambda m: f"{m.group(1)}\n{block}",
+            content,
+            count=1,
+        )
+
+    return content
+
+
 def infer_namespace(content: str, manifest_pkg: str | None, android_dir: Path) -> str:
     """Resolve namespace from AndroidManifest, build.gradle group, or folder name."""
     if manifest_pkg:
@@ -242,7 +267,10 @@ def patch_plugin_android_dir(android_dir: Path) -> None:
         # 3. Upgrade compileSdk to at least 34
         content = upgrade_compile_sdk(content, is_kts=is_kts)
 
-        # 4. Inject namespace if missing
+        # 4. Inject buildFeatures { buildConfig = true } per plugin (AGP 9 safe)
+        content = ensure_build_config_feature(content, is_kts=is_kts)
+
+        # 5. Inject namespace if missing
         has_namespace = re.search(
             r"""(?m)^\s*namespace\s*(?:=|\s+['"])""", content
         )
@@ -275,11 +303,18 @@ def configure_gradle_properties() -> None:
         if props_file.exists()
         else []
     )
+
+    # Properties removed or broken in AGP 9.0+
+    removed_keys = {
+        "android.defaults.buildfeatures.buildconfig",
+        "android.enableJetifier",
+    }
+
     desired = {
         "org.gradle.jvmargs": "-Xmx4G -XX:MaxMetaspaceSize=1G -XX:+HeapDumpOnOutOfMemoryError",
         "android.useAndroidX": "true",
-        "android.enableJetifier": "true",
-        "android.defaults.buildfeatures.buildconfig": "true",
+        "android.builtInKotlin": "false",
+        "android.newDsl": "false",
     }
 
     updated_lines: list[str] = []
@@ -288,6 +323,8 @@ def configure_gradle_properties() -> None:
         stripped = line.strip()
         if stripped and not stripped.startswith("#") and "=" in stripped:
             key = stripped.split("=", 1)[0].strip()
+            if key in removed_keys:
+                continue
             if key in desired:
                 updated_lines.append(f"{key}={desired[key]}")
                 seen.add(key)
@@ -299,7 +336,7 @@ def configure_gradle_properties() -> None:
             updated_lines.append(f"{key}={val}")
 
     props_file.write_text("\n".join(updated_lines) + "\n", encoding="utf-8")
-    log("Configured android/gradle.properties")
+    log("Configured android/gradle.properties (AGP 9 compatible)")
 
 
 def configure_settings_gradle() -> None:
@@ -385,7 +422,7 @@ def write_app_build_gradle_kts() -> None:
 
 android {
     namespace = "com.universal.universal_messenger"
-    compileSdk = maxOf(flutter.compileSdkVersion, 35)
+    compileSdk = maxOf(flutter.compileSdkVersion, 36)
     ndkVersion = flutter.ndkVersion
 
     compileOptions {
