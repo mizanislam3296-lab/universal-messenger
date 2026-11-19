@@ -16,7 +16,7 @@ ROOT = Path.cwd()
 ANDROID_DIR = ROOT / "android"
 APP_DIR = ANDROID_DIR / "app"
 MAIN_DIR = APP_DIR / "src" / "main"
-MIN_COMPILE_SDK = 34
+TARGET_COMPILE_SDK = 36
 
 
 def log(msg: str) -> None:
@@ -182,23 +182,23 @@ def reorder_top_level_apply_plugins(content: str) -> str:
 
 
 def upgrade_compile_sdk(content: str, is_kts: bool) -> str:
-    """Upgrade numeric compileSdk / compileSdkVersion values below MIN_COMPILE_SDK to 34."""
+    """Force compileSdk to 36 across all plugins (prevents null ext / outdated SDK errors)."""
+    replacement = f"compileSdk = {TARGET_COMPILE_SDK}" if is_kts else f"compileSdk {TARGET_COMPILE_SDK}"
 
-    def _upgrade_num(match: re.Match) -> str:
-        val = int(match.group(1))
-        target = max(val, MIN_COMPILE_SDK)
-        return f"compileSdk = {target}" if is_kts else f"compileSdk {target}"
+    # Replace any compileSdk / compileSdkVersion line (numeric or expression like rootProject.ext / flutter.*)
+    pattern = re.compile(
+        r"(?m)^([ \t]*)(?:compileSdkVersion|compileSdk)(?:\s*=\s*|\s+|\s*\(\s*)[^\r\n]+$"
+    )
+    if pattern.search(content):
+        content = pattern.sub(lambda m: f"{m.group(1)}{replacement}", content)
+    elif re.search(r"(?m)^[ \t]*android\s*\{", content):
+        content = re.sub(
+            r"(?m)^([ \t]*android\s*\{)",
+            lambda m: f"{m.group(1)}\n    {replacement}",
+            content,
+            count=1,
+        )
 
-    content = re.sub(
-        r"\bcompileSdkVersion\s*(?:=|\()?\s*(\d+)\s*\)?",
-        _upgrade_num,
-        content,
-    )
-    content = re.sub(
-        r"\bcompileSdk\s*(?:=|\s+)\s*(\d+)",
-        _upgrade_num,
-        content,
-    )
     return content
 
 
@@ -264,7 +264,7 @@ def patch_plugin_android_dir(android_dir: Path) -> None:
         content = reorder_plugins_block(content)
         content = reorder_top_level_apply_plugins(content)
 
-        # 3. Upgrade compileSdk to at least 34
+        # 3. Force compileSdk to 36 (resolves null rootProject.ext / flutter.* issues)
         content = upgrade_compile_sdk(content, is_kts=is_kts)
 
         # 4. Inject buildFeatures { buildConfig = true } per plugin (AGP 9 safe)
@@ -356,6 +356,12 @@ def configure_settings_gradle() -> None:
 
         before_hook = """
 gradle.beforeProject {
+    if (path == ":") {
+        val ext = extensions.extraProperties
+        if (!ext.has("compileSdkVersion")) ext.set("compileSdkVersion", 36)
+        if (!ext.has("minSdkVersion")) ext.set("minSdkVersion", 23)
+        if (!ext.has("targetSdkVersion")) ext.set("targetSdkVersion", 34)
+    }
     if (path != ":" && name != "app" && buildFile.exists()) {
         val text = buildFile.readText()
         val hasPluginsDsl = Regex("(?m)^\\\\s*plugins\\\\s*\\\\{").containsMatchIn(text)
@@ -388,6 +394,11 @@ gradle.beforeProject {
 
         before_hook_groovy = """
 gradle.beforeProject { proj ->
+    if (proj.path == ":") {
+        if (!proj.ext.has("compileSdkVersion")) proj.ext.set("compileSdkVersion", 36)
+        if (!proj.ext.has("minSdkVersion")) proj.ext.set("minSdkVersion", 23)
+        if (!proj.ext.has("targetSdkVersion")) proj.ext.set("targetSdkVersion", 34)
+    }
     if (proj.path != ":" && proj.name != "app" && proj.buildFile.exists()) {
         def text = proj.buildFile.text
         def hasPluginsDsl = (text =~ /(?m)^\\s*plugins\\s*\\{/).find()
