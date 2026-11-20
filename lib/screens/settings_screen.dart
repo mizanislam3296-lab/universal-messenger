@@ -128,6 +128,137 @@ class FcmPushService {
   }
 }
 
+class ScheduledMessageService {
+  static Timer? _timer;
+  static bool _checking = false;
+  static final Set<String> _inFlightIds = {};
+
+  static void start() {
+    _timer?.cancel();
+    checkAndSendDueMessages();
+    _timer = Timer.periodic(const Duration(seconds: 10), (_) {
+      checkAndSendDueMessages();
+    });
+  }
+
+  static void stop() {
+    _timer?.cancel();
+    _timer = null;
+  }
+
+  static Future<void> checkAndSendDueMessages() async {
+    final user = FirebaseAuth.instance.currentUser;
+    if (user == null || _checking) return;
+    _checking = true;
+    try {
+      final snap = await FirebaseFirestore.instance
+          .collection('users')
+          .doc(user.uid)
+          .collection('scheduled_messages')
+          .where('status', isEqualTo: 'pending')
+          .get();
+
+      final now = DateTime.now();
+      for (final doc in snap.docs) {
+        final data = doc.data();
+        final scheduledAt = data['scheduledAt'] as Timestamp?;
+        if (scheduledAt == null) continue;
+        if (!scheduledAt.toDate().isAfter(now)) {
+          await sendScheduledDoc(doc);
+        }
+      }
+    } catch (_) {
+    } finally {
+      _checking = false;
+    }
+  }
+
+  static Future<bool> sendScheduledDoc(DocumentSnapshot> doc) async {
+    final user = FirebaseAuth.instance.currentUser;
+    if (user == null || _inFlightIds.contains(doc.id)) return false;
+    _inFlightIds.add(doc.id);
+
+    try {
+      Map<String, dynamic>? claimedData;
+      await FirebaseFirestore.instance.runTransaction((tx) async {
+        final fresh = await tx.get(doc.reference);
+        if (!fresh.exists) return;
+        final d = fresh.data();
+        if (d == null || (d['status'] ?? '') != 'pending') return;
+        claimedData = Map<String, dynamic>.from(d);
+        tx.update(doc.reference, {
+          'status': 'sent',
+          'sentAt': FieldValue.serverTimestamp(),
+        });
+      });
+
+      final data = claimedData;
+      if (data == null) return false;
+
+      final chatId = (data['chatId'] ?? '').toString();
+      final receiverId = (data['receiverId'] ?? '').toString();
+      final receiverName = (data['receiverName'] ?? 'User').toString();
+      final receiverEmail = (data['receiverEmail'] ?? '').toString();
+      final text = (data['text'] ?? '').toString().trim();
+      final replyTo = data['replyTo'] as Map<String, dynamic>?;
+
+      if (chatId.isEmpty || receiverId.isEmpty || text.isEmpty) return false;
+
+      await FirebaseFirestore.instance
+          .collection('chats')
+          .doc(chatId)
+          .collection('messages')
+          .add({
+        'senderId': user.uid,
+        'receiverId': receiverId,
+        'text': text,
+        'type': 'text',
+        'isSeen': false,
+        'isEdited': false,
+        if (replyTo != null) 'replyTo': replyTo,
+        'timestamp': FieldValue.serverTimestamp(),
+      });
+
+      await FirebaseFirestore.instance.collection('chats').doc(chatId).set({
+        'chatId': chatId,
+        'participants': [user.uid, receiverId],
+        'lastMessage': text,
+        'lastMessageTime': FieldValue.serverTimestamp(),
+        'lastSenderId': user.uid,
+        'unreadCount': {
+          receiverId: FieldValue.increment(1),
+          user.uid: 0,
+        },
+        'typing': {user.uid: false},
+        'users': {
+          user.uid: {
+            'name': user.displayName ?? user.email ?? 'User',
+            'email': user.email ?? '',
+          },
+          receiverId: {
+            'name': receiverName,
+            'email': receiverEmail,
+          },
+        },
+      }, SetOptions(merge: true));
+
+      await FcmPushService.sendPushToUser(
+        receiverId: receiverId,
+        title: user.displayName ?? user.email ?? 'নতুন মেসেজ',
+        body: text,
+        chatId: chatId,
+      );
+
+      await doc.reference.delete().catchError((_) {});
+      return true;
+    } catch (_) {
+      return false;
+    } finally {
+      _inFlightIds.remove(doc.id);
+    }
+  }
+}
+
 class AppSettingsController {
   static const MethodChannel _nativeChannel = MethodChannel('com.universal.messenger/icon');
   static const Color defaultPrimaryColor = Color(0xFF008069);
@@ -380,6 +511,7 @@ class NotificationAndPresenceService {
       if (isAppInForeground) setOnlineStatus(true);
     });
 
+    ScheduledMessageService.start();
     _listenIncomingCalls(user.uid);
     _listenIncomingMessages(user.uid);
   }
@@ -387,6 +519,9 @@ class NotificationAndPresenceService {
   static void setAppForeground(bool inForeground) {
     isAppInForeground = inForeground;
     setOnlineStatus(inForeground);
+    if (inForeground) {
+      ScheduledMessageService.checkAndSendDueMessages();
+    }
   }
 
   static Future<bool> isDataOrWifiActive() async {
@@ -417,6 +552,7 @@ class NotificationAndPresenceService {
 
   static Future<void> setOfflineAndStop() async {
     _stopCallRing();
+    ScheduledMessageService.stop();
     await setOnlineStatus(false);
     _heartbeatTimer?.cancel();
     await _callSub?.cancel();
