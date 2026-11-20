@@ -8,6 +8,7 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:dio/dio.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:url_launcher/url_launcher.dart';
+import 'package:video_player/video_player.dart';
 import 'package:universal_messenger/screens/call_screen.dart';
 import 'package:universal_messenger/screens/settings_screen.dart';
 
@@ -31,6 +32,15 @@ class _ChatScreenState extends State<ChatScreen> {
   static const String _cloudName = 'tcdkckrl';
   static const String _uploadPreset = 'ml_default';
   static const int _pageSize = 40;
+  static const MethodChannel _nativeChannel =
+      MethodChannel('com.universal.messenger/icon');
+  static final Dio _sharedDio = Dio(
+    BaseOptions(
+      connectTimeout: const Duration(seconds: 25),
+      receiveTimeout: const Duration(minutes: 5),
+      sendTimeout: const Duration(minutes: 5),
+    ),
+  );
   static const List<String> _reactionEmojis = [
     '❤️',
     '😂',
@@ -50,7 +60,7 @@ class _ChatScreenState extends State<ChatScreen> {
 
   late final Stream<DocumentSnapshot> _receiverUserStream;
   late final Stream<DocumentSnapshot> _chatDocStream;
-  late final Stream<QuerySnapshot>> _scheduledStream;
+  late final Stream<QuerySnapshot> _scheduledStream;
   late Stream<QuerySnapshot> _messagesStream;
 
   int _messageLimit = _pageSize;
@@ -70,6 +80,15 @@ class _ChatScreenState extends State<ChatScreen> {
   @override
   void initState() {
     super.initState();
+    // Cap RAM image cache so long app sessions never lag or crash
+    final imageCache = PaintingBinding.instance.imageCache;
+    if (imageCache.maximumSize > 80) {
+      imageCache.maximumSize = 80;
+    }
+    if (imageCache.maximumSizeBytes > (60 << 20)) {
+      imageCache.maximumSizeBytes = 60 << 20;
+    }
+
     _currentUser = FirebaseAuth.instance.currentUser!;
     final ids = [_currentUser.uid, widget.receiverId]..sort();
     _chatId = '${ids[0]}_${ids[1]}';
@@ -599,8 +618,7 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   void _openPendingScheduledList(
-      List<QueryDocumentSnapshot>> pendingDocs,
-      Color barColor) {
+      List<QueryDocumentSnapshot> pendingDocs, Color barColor) {
     showModalBottomSheet(
       context: context,
       shape: const RoundedRectangleBorder(
@@ -632,7 +650,8 @@ class _ChatScreenState extends State<ChatScreen> {
                   separatorBuilder: (_, __) => const Divider(height: 12),
                   itemBuilder: (_, idx) {
                     final doc = pendingDocs[idx];
-                    final d = doc.data();
+                    final d = (doc.data() as Map<String, dynamic>?) ??
+                        <String, dynamic>{};
                     final ts = (d['scheduledAt'] as Timestamp?)?.toDate();
                     final msgText = (d['text'] ?? '').toString();
                     return ListTile(
@@ -655,8 +674,10 @@ class _ChatScreenState extends State<ChatScreen> {
                                 color: barColor, size: 20),
                             onPressed: () async {
                               Navigator.pop(ctx);
-                              await ScheduledMessageService.sendScheduledDoc(
-                                  doc);
+                              if (doc is DocumentSnapshot>) {
+                                await ScheduledMessageService.sendScheduledDoc(
+                                    doc);
+                              }
                             },
                           ),
                           IconButton(
@@ -875,7 +896,7 @@ class _ChatScreenState extends State<ChatScreen> {
         'folder': 'universal_messenger/$_chatId',
       });
 
-      final response = await Dio().post(
+      final response = await _sharedDio.post(
         'https://api.cloudinary.com/v1_1/$_cloudName/auto/upload',
         data: formData,
         onSendProgress: (sent, total) {
@@ -929,6 +950,89 @@ class _ChatScreenState extends State<ChatScreen> {
         });
       }
     }
+  }
+
+  Future<void> _downloadMediaToPhone({
+    required String url,
+    required String fileName,
+    required String mediaType,
+  }) async {
+    if (url.isEmpty) return;
+    ScaffoldMessenger.of(context).hideCurrentSnackBar();
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text('ডাউনলোড হচ্ছে: $fileName'),
+        duration: const Duration(seconds: 2),
+      ),
+    );
+
+    final safeTempName =
+        'dl_${DateTime.now().millisecondsSinceEpoch}_${fileName.replaceAll(RegExp(r'[^a-zA-Z0-9._-]'), '_')}';
+    final tempFile = File('${Directory.systemTemp.path}/$safeTempName');
+
+    try {
+      await _sharedDio.download(
+        url,
+        tempFile.path,
+        options: Options(followRedirects: true, maxRedirects: 6),
+      );
+
+      final saved = await _nativeChannel.invokeMethod<bool>('saveMediaFile', {
+        'path': tempFile.path,
+        'fileName': fileName,
+        'mediaType': mediaType,
+      });
+
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).hideCurrentSnackBar();
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            saved == true
+                ? (mediaType == 'image'
+                    ? 'ছবি গ্যালারিতে সেভ হয়েছে!'
+                    : (mediaType == 'video'
+                        ? 'ভিডিও গ্যালারিতে সেভ হয়েছে!'
+                        : 'ফাইল Downloads ফোল্ডারে সেভ হয়েছে!'))
+                : 'ফাইল সেভ করা যায়নি।',
+          ),
+          backgroundColor:
+              saved == true ? const Color(0xFF2E7D32) : Colors.red.shade700,
+        ),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('ডাউনলোড করতে সমস্যা হয়েছে: $e'),
+          backgroundColor: Colors.red.shade700,
+        ),
+      );
+    } finally {
+      try {
+        if (await tempFile.exists()) await tempFile.delete();
+      } catch (_) {}
+    }
+  }
+
+  void _openInAppMediaViewer({
+    required String url,
+    required String fileName,
+    required bool isVideo,
+    required Color accentColor,
+  }) {
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => _InAppMediaViewerScreen(
+          url: url,
+          fileName: fileName,
+          isVideo: isVideo,
+          accentColor: accentColor,
+          dio: _sharedDio,
+        ),
+      ),
+    );
   }
 
   void _showMessageOptions(DocumentSnapshot doc, Map<String, dynamic> data,
@@ -1184,22 +1288,70 @@ class _ChatScreenState extends State<ChatScreen> {
 
     if (type == 'image') {
       return GestureDetector(
-        onTap: () => _openFileUrl(fileUrl),
+        onTap: () => _openInAppMediaViewer(
+          url: fileUrl,
+          fileName: fileName.isNotEmpty ? fileName : 'image.jpg',
+          isVideo: false,
+          accentColor: accentColor,
+        ),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            ClipRRect(
-              borderRadius: BorderRadius.circular(10),
-              child: Image.network(
-                fileUrl,
-                width: 220,
-                height: 220,
-                cacheWidth: 600,
-                fit: BoxFit.cover,
-                errorBuilder: (_, __, ___) => const Padding(
-                    padding: EdgeInsets.all(12),
-                    child: Icon(Icons.broken_image, size: 40)),
-              ),
+            Stack(
+              children: [
+                ClipRRect(
+                  borderRadius: BorderRadius.circular(10),
+                  child: Image.network(
+                    fileUrl,
+                    width: 220,
+                    height: 220,
+                    cacheWidth: 480,
+                    filterQuality: FilterQuality.medium,
+                    fit: BoxFit.cover,
+                    loadingBuilder: (context, child, loadingProgress) {
+                      if (loadingProgress == null) return child;
+                      return Container(
+                        width: 220,
+                        height: 220,
+                        color: Colors.black12,
+                        alignment: Alignment.center,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2.5,
+                          color: accentColor,
+                        ),
+                      );
+                    },
+                    errorBuilder: (_, __, ___) => const SizedBox(
+                      width: 220,
+                      height: 140,
+                      child: Center(child: Icon(Icons.broken_image, size: 40)),
+                    ),
+                  ),
+                ),
+                Positioned(
+                  right: 6,
+                  bottom: 6,
+                  child: GestureDetector(
+                    onTap: () => _downloadMediaToPhone(
+                      url: fileUrl,
+                      fileName: fileName.isNotEmpty ? fileName : 'image.jpg',
+                      mediaType: 'image',
+                    ),
+                    child: Container(
+                      padding: const EdgeInsets.all(6),
+                      decoration: const BoxDecoration(
+                        color: Colors.black54,
+                        shape: BoxShape.circle,
+                      ),
+                      child: const Icon(
+                        Icons.download_rounded,
+                        color: Colors.white,
+                        size: 18,
+                      ),
+                    ),
+                  ),
+                ),
+              ],
             ),
             if (fileSize.isNotEmpty) ...[
               const SizedBox(height: 4),
@@ -1211,14 +1363,98 @@ class _ChatScreenState extends State<ChatScreen> {
       );
     }
 
+    if (type == 'video') {
+      return GestureDetector(
+        onTap: () => _openInAppMediaViewer(
+          url: fileUrl,
+          fileName: fileName.isNotEmpty ? fileName : 'video.mp4',
+          isVideo: true,
+          accentColor: accentColor,
+        ),
+        child: Container(
+          width: 225,
+          decoration: BoxDecoration(
+            color: const Color(0xFF141A21),
+            borderRadius: BorderRadius.circular(12),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              SizedBox(
+                height: 130,
+                width: double.infinity,
+                child: Stack(
+                  alignment: Alignment.center,
+                  children: [
+                    const Icon(Icons.movie_rounded,
+                        size: 56, color: Colors.white24),
+                    Container(
+                      padding: const EdgeInsets.all(10),
+                      decoration: BoxDecoration(
+                        color: accentColor.withOpacity(0.9),
+                        shape: BoxShape.circle,
+                      ),
+                      child: const Icon(Icons.play_arrow_rounded,
+                          color: Colors.white, size: 32),
+                    ),
+                    Positioned(
+                      right: 8,
+                      bottom: 8,
+                      child: GestureDetector(
+                        onTap: () => _downloadMediaToPhone(
+                          url: fileUrl,
+                          fileName:
+                              fileName.isNotEmpty ? fileName : 'video.mp4',
+                          mediaType: 'video',
+                        ),
+                        child: Container(
+                          padding: const EdgeInsets.all(6),
+                          decoration: const BoxDecoration(
+                            color: Colors.black54,
+                            shape: BoxShape.circle,
+                          ),
+                          child: const Icon(Icons.download_rounded,
+                              color: Colors.white, size: 18),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              Padding(
+                padding: const EdgeInsets.fromLTRB(10, 6, 10, 8),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      fileName,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontWeight: FontWeight.w600,
+                        fontSize: 13,
+                      ),
+                    ),
+                    Text(
+                      '${fileSize.isNotEmpty ? '$fileSize • ' : ''}ট্যাপ করে প্লে করুন',
+                      style:
+                          const TextStyle(color: Colors.white70, fontSize: 11),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+      );
+    }
+
     IconData iconData = Icons.insert_drive_file;
     Color iconColor = accentColor;
     if (type == 'pdf') {
       iconData = Icons.picture_as_pdf;
       iconColor = Colors.red.shade700;
-    } else if (type == 'video') {
-      iconData = Icons.video_file;
-      iconColor = Colors.deepPurple;
     }
 
     return InkWell(
@@ -1255,7 +1491,16 @@ class _ChatScreenState extends State<ChatScreen> {
               ),
             ),
             const SizedBox(width: 6),
-            Icon(Icons.download_rounded, size: 20, color: iconColor),
+            IconButton(
+              icon: Icon(Icons.download_rounded, size: 22, color: iconColor),
+              padding: EdgeInsets.zero,
+              constraints: const BoxConstraints(),
+              onPressed: () => _downloadMediaToPhone(
+                url: fileUrl,
+                fileName: fileName,
+                mediaType: 'file',
+              ),
+            ),
           ],
         ),
       ),
@@ -1445,6 +1690,9 @@ class _ChatScreenState extends State<ChatScreen> {
                           return ListView.builder(
                             controller: _scrollController,
                             reverse: true,
+                            addAutomaticKeepAlives: false,
+                            addRepaintBoundaries: true,
+                            cacheExtent: 600,
                             padding: const EdgeInsets.symmetric(
                                 horizontal: 12, vertical: 16),
                             itemCount: messages.length,
@@ -1683,12 +1931,13 @@ class _ChatScreenState extends State<ChatScreen> {
                         );
                       },
                     ),
-                    StreamBuilder<QuerySnapshot>>(
+                    StreamBuilder<QuerySnapshot>(
                       stream: _scheduledStream,
                       builder: (context, snap) {
-                        final docs = (snap.data?.docs ?? [])
-                            .where((d) => (d.data()['chatId'] ?? '') == _chatId)
-                            .toList();
+                        final docs = (snap.data?.docs ?? []).where((d) {
+                          final map = d.data() as Map<String, dynamic>?;
+                          return (map?['chatId'] ?? '') == _chatId;
+                        }).toList();
                         if (docs.isEmpty) return const SizedBox.shrink();
                         return GestureDetector(
                           onTap: () =>
@@ -1863,6 +2112,362 @@ class _ChatScreenState extends State<ChatScreen> {
           },
         );
       },
+    );
+  }
+}
+
+class _InAppMediaViewerScreen extends StatefulWidget {
+  final String url;
+  final String fileName;
+  final bool isVideo;
+  final Color accentColor;
+  final Dio dio;
+
+  const _InAppMediaViewerScreen({
+    required this.url,
+    required this.fileName,
+    required this.isVideo,
+    required this.accentColor,
+    required this.dio,
+  });
+
+  @override
+  State<_InAppMediaViewerScreen> createState() =>
+      _InAppMediaViewerScreenState();
+}
+
+class _InAppMediaViewerScreenState extends State<_InAppMediaViewerScreen> {
+  static const MethodChannel _nativeChannel =
+      MethodChannel('com.universal.messenger/icon');
+
+  VideoPlayerController? _videoController;
+  bool _videoReady = false;
+  bool _videoError = false;
+  bool _isMuted = false;
+
+  bool _isDownloading = false;
+  double _downloadProgress = 0.0;
+
+  @override
+  void initState() {
+    super.initState();
+    if (widget.isVideo) {
+      _initVideo();
+    }
+  }
+
+  Future<void> _initVideo() async {
+    try {
+      final ctrl = VideoPlayerController.networkUrl(Uri.parse(widget.url));
+      _videoController = ctrl;
+      await ctrl.initialize();
+      ctrl.addListener(_onVideoTick);
+      await ctrl.play();
+      if (mounted) {
+        setState(() => _videoReady = true);
+      }
+    } catch (_) {
+      if (mounted) {
+        setState(() => _videoError = true);
+      }
+    }
+  }
+
+  void _onVideoTick() {
+    if (mounted) setState(() {});
+  }
+
+  @override
+  void dispose() {
+    _videoController?.removeListener(_onVideoTick);
+    _videoController?.dispose();
+    super.dispose();
+  }
+
+  String _fmtDuration(Duration d) {
+    final mins = d.inMinutes.remainder(60).toString().padLeft(2, '0');
+    final secs = d.inSeconds.remainder(60).toString().padLeft(2, '0');
+    if (d.inHours > 0) {
+      return '${d.inHours}:$mins:$secs';
+    }
+    return '$mins:$secs';
+  }
+
+  Future<void> _downloadToGallery() async {
+    if (_isDownloading) return;
+    setState(() {
+      _isDownloading = true;
+      _downloadProgress = 0.0;
+    });
+
+    final safeTempName =
+        'viewer_${DateTime.now().millisecondsSinceEpoch}_${widget.fileName.replaceAll(RegExp(r'[^a-zA-Z0-9._-]'), '_')}';
+    final tempFile = File('${Directory.systemTemp.path}/$safeTempName');
+
+    try {
+      await widget.dio.download(
+        widget.url,
+        tempFile.path,
+        options: Options(followRedirects: true, maxRedirects: 6),
+        onReceiveProgress: (received, total) {
+          if (total > 0 && mounted) {
+            setState(() => _downloadProgress = received / total);
+          }
+        },
+      );
+
+      final saved = await _nativeChannel.invokeMethod<bool>('saveMediaFile', {
+        'path': tempFile.path,
+        'fileName': widget.fileName,
+        'mediaType': widget.isVideo ? 'video' : 'image',
+      });
+
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            saved == true
+                ? (widget.isVideo
+                    ? 'ভিডিও গ্যালারিতে সেভ হয়েছে!'
+                    : 'ছবি গ্যালারিতে সেভ হয়েছে!')
+                : 'সেভ করতে সমস্যা হয়েছে।',
+          ),
+          backgroundColor:
+              saved == true ? const Color(0xFF2E7D32) : Colors.red.shade700,
+        ),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('ডাউনলোড ব্যর্থ হয়েছে: $e'),
+          backgroundColor: Colors.red.shade700,
+        ),
+      );
+    } finally {
+      try {
+        if (await tempFile.exists()) await tempFile.delete();
+      } catch (_) {}
+      if (mounted) {
+        setState(() {
+          _isDownloading = false;
+          _downloadProgress = 0.0;
+        });
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final vc = _videoController;
+    final isPlaying = vc?.value.isPlaying == true;
+
+    return Scaffold(
+      backgroundColor: Colors.black,
+      appBar: AppBar(
+        backgroundColor: Colors.black87,
+        foregroundColor: Colors.white,
+        title: Text(
+          widget.fileName,
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+          style: const TextStyle(fontSize: 15),
+        ),
+        actions: [
+          if (_isDownloading)
+            Center(
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 14),
+                child: Text(
+                  _downloadProgress > 0
+                      ? '${(_downloadProgress * 100).toStringAsFixed(0)}%'
+                      : '...',
+                  style: const TextStyle(
+                      color: Colors.lightGreenAccent,
+                      fontWeight: FontWeight.bold),
+                ),
+              ),
+            )
+          else
+            IconButton(
+              icon: const Icon(Icons.download_rounded),
+              tooltip: 'গ্যালারিতে সেভ করুন',
+              onPressed: _downloadToGallery,
+            ),
+        ],
+      ),
+      body: Column(
+        children: [
+          if (_isDownloading)
+            LinearProgressIndicator(
+              value: _downloadProgress > 0 ? _downloadProgress : null,
+              color: widget.accentColor,
+              minHeight: 3,
+            ),
+          Expanded(
+            child: Center(
+              child: widget.isVideo
+                  ? _buildVideoBody(vc, isPlaying)
+                  : InteractiveViewer(
+                      minScale: 0.8,
+                      maxScale: 4.0,
+                      child: Image.network(
+                        widget.url,
+                        fit: BoxFit.contain,
+                        loadingBuilder: (context, child, loadingProgress) {
+                          if (loadingProgress == null) return child;
+                          final expected = loadingProgress.expectedTotalBytes;
+                          final val = expected != null && expected > 0
+                              ? loadingProgress.cumulativeBytesLoaded / expected
+                              : null;
+                          return CircularProgressIndicator(
+                            value: val,
+                            color: widget.accentColor,
+                          );
+                        },
+                        errorBuilder: (_, __, ___) => const Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Icon(Icons.broken_image,
+                                color: Colors.white54, size: 54),
+                            SizedBox(height: 8),
+                            Text('ছবিটি লোড করা যায়নি',
+                                style: TextStyle(color: Colors.white70)),
+                          ],
+                        ),
+                      ),
+                    ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildVideoBody(VideoPlayerController? vc, bool isPlaying) {
+    if (_videoError) {
+      return Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const Icon(Icons.error_outline, color: Colors.redAccent, size: 48),
+          const SizedBox(height: 10),
+          const Text('ভিডিও প্লে করা যায়নি',
+              style: TextStyle(color: Colors.white70)),
+          const SizedBox(height: 12),
+          ElevatedButton.icon(
+            style: ElevatedButton.styleFrom(
+                backgroundColor: widget.accentColor,
+                foregroundColor: Colors.white),
+            icon: const Icon(Icons.download_rounded),
+            label: const Text('ডাউনলোড করে দেখুন'),
+            onPressed: _downloadToGallery,
+          ),
+        ],
+      );
+    }
+
+    if (!_videoReady || vc == null) {
+      return CircularProgressIndicator(color: widget.accentColor);
+    }
+
+    return Column(
+      mainAxisAlignment: MainAxisAlignment.center,
+      children: [
+        Expanded(
+          child: Center(
+            child: GestureDetector(
+              onTap: () {
+                if (vc.value.isPlaying) {
+                  vc.pause();
+                } else {
+                  vc.play();
+                }
+              },
+              child: AspectRatio(
+                aspectRatio: vc.value.aspectRatio > 0
+                    ? vc.value.aspectRatio
+                    : (16 / 9),
+                child: Stack(
+                  alignment: Alignment.center,
+                  children: [
+                    VideoPlayer(vc),
+                    if (!isPlaying)
+                      Container(
+                        padding: const EdgeInsets.all(14),
+                        decoration: const BoxDecoration(
+                          color: Colors.black54,
+                          shape: BoxShape.circle,
+                        ),
+                        child: const Icon(Icons.play_arrow_rounded,
+                            color: Colors.white, size: 42),
+                      ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ),
+        SafeArea(
+          top: false,
+          child: Container(
+            color: Colors.black87,
+            padding: const EdgeInsets.fromLTRB(12, 6, 12, 10),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                VideoProgressIndicator(
+                  vc,
+                  allowScrubbing: true,
+                  colors: VideoProgressColors(
+                    playedColor: widget.accentColor,
+                    bufferedColor: Colors.white30,
+                    backgroundColor: Colors.white12,
+                  ),
+                ),
+                const SizedBox(height: 6),
+                Row(
+                  children: [
+                    IconButton(
+                      icon: Icon(
+                        isPlaying
+                            ? Icons.pause_circle_filled
+                            : Icons.play_circle_filled,
+                        color: Colors.white,
+                        size: 30,
+                      ),
+                      onPressed: () {
+                        if (vc.value.isPlaying) {
+                          vc.pause();
+                        } else {
+                          vc.play();
+                        }
+                      },
+                    ),
+                    Text(
+                      '${_fmtDuration(vc.value.position)} / ${_fmtDuration(vc.value.duration)}',
+                      style:
+                          const TextStyle(color: Colors.white70, fontSize: 12),
+                    ),
+                    const Spacer(),
+                    IconButton(
+                      icon: Icon(
+                        _isMuted ? Icons.volume_off : Icons.volume_up,
+                        color: Colors.white,
+                      ),
+                      onPressed: () {
+                        setState(() {
+                          _isMuted = !_isMuted;
+                          vc.setVolume(_isMuted ? 0.0 : 1.0);
+                        });
+                      },
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        ),
+      ],
     );
   }
 }
