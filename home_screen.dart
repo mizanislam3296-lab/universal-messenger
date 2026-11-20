@@ -125,6 +125,119 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     return '$hour:$min $period';
   }
 
+  Widget _buildChatSubtitle({
+    required bool isOtherTyping,
+    required Color themeColor,
+    required bool isDark,
+    required bool hasUnread,
+    required int unreadCount,
+    required int missedCount,
+    required String lastMsg,
+    required String lastMessageType,
+    required String lastCallStatus,
+    required bool lastCallIsVideo,
+    required int lastCallDurationSec,
+  }) {
+    if (isOtherTyping) {
+      return Text(
+        'wait...',
+        style: TextStyle(
+          fontWeight: FontWeight.bold,
+          color: themeColor,
+        ),
+      );
+    }
+
+    if (lastMessageType == 'call') {
+      final isMissed = lastCallStatus == 'missed';
+      if (isMissed) {
+        final baseLabel =
+            lastCallIsVideo ? 'Missed video call' : 'Missed voice call';
+        final label =
+            missedCount > 1 ? '$baseLabel ($missedCount)' : baseLabel;
+        return Row(
+          children: [
+            const Icon(Icons.call_missed, size: 16, color: Colors.redAccent),
+            const SizedBox(width: 5),
+            Expanded(
+              child: Text(
+                label,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(
+                  fontWeight: FontWeight.bold,
+                  color: Colors.redAccent,
+                ),
+              ),
+            ),
+          ],
+        );
+      }
+
+      final callLabel = lastCallIsVideo ? 'Video call' : 'Voice call';
+      final durationText = CallLogHelper.formatDuration(lastCallDurationSec);
+      return Row(
+        children: [
+          Icon(
+            lastCallIsVideo ? Icons.videocam_rounded : Icons.call_rounded,
+            size: 15,
+            color: const Color(0xFF2E7D32),
+          ),
+          const SizedBox(width: 5),
+          Expanded(
+            child: Text(
+              '$callLabel • $durationText',
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                fontWeight: hasUnread ? FontWeight.bold : FontWeight.w500,
+                color: isDark ? Colors.white70 : Colors.grey.shade700,
+              ),
+            ),
+          ),
+        ],
+      );
+    }
+
+    if (missedCount > 0) {
+      return Row(
+        children: [
+          const Icon(Icons.call_missed, size: 15, color: Colors.redAccent),
+          const SizedBox(width: 4),
+          Expanded(
+            child: Text(
+              missedCount == 1
+                  ? 'Missed call • $lastMsg'
+                  : '$missedCount missed calls • $lastMsg',
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(
+                fontWeight: FontWeight.bold,
+                color: Colors.redAccent,
+              ),
+            ),
+          ),
+        ],
+      );
+    }
+
+    return Text(
+      hasUnread
+          ? (unreadCount == 1
+              ? '1 new message • $lastMsg'
+              : '$unreadCount new messages • $lastMsg')
+          : lastMsg,
+      maxLines: 1,
+      overflow: TextOverflow.ellipsis,
+      style: TextStyle(
+        fontWeight: hasUnread ? FontWeight.bold : FontWeight.normal,
+        color: hasUnread
+            ? (isDark ? Colors.white : Colors.black87)
+            : Colors.grey.shade600,
+      ),
+    );
+  }
+
   Widget _buildIncomingCallBanner(
       BuildContext context, User currentUser, Color primaryColor) {
     return StreamBuilder<DocumentSnapshot>(
@@ -143,7 +256,10 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         }
 
         final callId = (data['callId'] ?? '').toString();
+        final chatId = (data['chatId'] ?? '').toString();
+        final callerId = (data['callerId'] ?? '').toString();
         final callerName = (data['callerName'] ?? 'কেউ একজন').toString();
+        final callerEmail = (data['callerEmail'] ?? '').toString();
         final isVideo = data['isVideo'] == true;
 
         return Container(
@@ -185,7 +301,8 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                     ),
                     Text(
                       isVideo ? 'ইনকামিং ভিডিও কল...' : 'ইনকামিং অডিও কল...',
-                      style: const TextStyle(color: Colors.white70, fontSize: 12),
+                      style:
+                          const TextStyle(color: Colors.white70, fontSize: 12),
                     ),
                   ],
                 ),
@@ -195,6 +312,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                 icon: const Icon(Icons.call_end, color: Colors.white),
                 tooltip: 'কল কাটুন',
                 onPressed: () {
+                  NotificationAndPresenceService.stopNativeCallRingtone();
                   FirebaseFirestore.instance
                       .collection('calls')
                       .doc(currentUser.uid)
@@ -202,6 +320,20 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                     'callId': callId,
                     'status': 'declined',
                   }, SetOptions(merge: true));
+
+                  CallLogHelper.finalizeCall(
+                    callId: callId,
+                    isVideo: isVideo,
+                    forceMissed: true,
+                    fallbackChatId: chatId,
+                    fallbackCallerId: callerId,
+                    fallbackCallerName: callerName,
+                    fallbackCallerEmail: callerEmail,
+                    fallbackReceiverId: currentUser.uid,
+                    fallbackReceiverName:
+                        currentUser.displayName ?? currentUser.email ?? 'User',
+                    fallbackReceiverEmail: currentUser.email ?? '',
+                  );
                 },
               ),
               const SizedBox(width: 8),
@@ -210,6 +342,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                 icon: const Icon(Icons.call, color: Colors.white),
                 tooltip: 'কল রিসিভ করুন',
                 onPressed: () {
+                  NotificationAndPresenceService.stopNativeCallRingtone();
                   FirebaseFirestore.instance
                       .collection('calls')
                       .doc(currentUser.uid)
@@ -217,6 +350,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                     'callId': callId,
                     'status': 'accepted',
                   }, SetOptions(merge: true));
+                  CallLogHelper.markConnected(callId);
                   Navigator.push(
                     context,
                     MaterialPageRoute(
@@ -224,6 +358,11 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                         callID: callId,
                         isVideoCall: isVideo,
                         callDocId: currentUser.uid,
+                        chatId: chatId.isNotEmpty ? chatId : null,
+                        otherUserId: callerId.isNotEmpty ? callerId : null,
+                        otherUserName: callerName,
+                        otherUserEmail: callerEmail,
+                        isCaller: false,
                       ),
                     ),
                   );
@@ -383,6 +522,18 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                                   (otherUser['email'] ?? '').toString();
                               final lastMsg =
                                   (data['lastMessage'] ?? '').toString();
+                              final lastMessageType =
+                                  (data['lastMessageType'] ?? 'text')
+                                      .toString();
+                              final lastCallStatus =
+                                  (data['lastCallStatus'] ?? '').toString();
+                              final lastCallIsVideo =
+                                  data['lastCallIsVideo'] == true;
+                              final lastCallDurationSec =
+                                  (data['lastCallDurationSec'] as num?)
+                                          ?.toInt() ??
+                                      0;
+
                               final timeText = _formatDate(
                                   data['lastMessageTime'] as Timestamp?);
 
@@ -394,6 +545,15 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                                           ?.toInt() ??
                                       0;
                               final hasUnread = unreadCount > 0;
+
+                              final missedMap = (data['missedCallCount']
+                                      as Map<String, dynamic>?) ??
+                                  {};
+                              final missedCount =
+                                  (missedMap[currentUser.uid] as num?)
+                                          ?.toInt() ??
+                                      0;
+                              final hasMissed = missedCount > 0;
 
                               final typingMap =
                                   (data['typing'] as Map<String, dynamic>?) ??
@@ -427,33 +587,19 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                                     fontSize: 16,
                                   ),
                                 ),
-                                subtitle: isOtherTyping
-                                    ? Text(
-                                        'wait...',
-                                        style: TextStyle(
-                                          fontWeight: FontWeight.bold,
-                                          color: themeColor,
-                                        ),
-                                      )
-                                    : Text(
-                                        hasUnread
-                                            ? (unreadCount == 1
-                                                ? '1 new message • $lastMsg'
-                                                : '$unreadCount new messages • $lastMsg')
-                                            : lastMsg,
-                                        maxLines: 1,
-                                        overflow: TextOverflow.ellipsis,
-                                        style: TextStyle(
-                                          fontWeight: hasUnread
-                                              ? FontWeight.bold
-                                              : FontWeight.normal,
-                                          color: hasUnread
-                                              ? (isDark
-                                                  ? Colors.white
-                                                  : Colors.black87)
-                                              : Colors.grey.shade600,
-                                        ),
-                                      ),
+                                subtitle: _buildChatSubtitle(
+                                  isOtherTyping: isOtherTyping,
+                                  themeColor: themeColor,
+                                  isDark: isDark,
+                                  hasUnread: hasUnread,
+                                  unreadCount: unreadCount,
+                                  missedCount: missedCount,
+                                  lastMsg: lastMsg,
+                                  lastMessageType: lastMessageType,
+                                  lastCallStatus: lastCallStatus,
+                                  lastCallIsVideo: lastCallIsVideo,
+                                  lastCallDurationSec: lastCallDurationSec,
+                                ),
                                 trailing: Column(
                                   mainAxisAlignment: MainAxisAlignment.center,
                                   crossAxisAlignment: CrossAxisAlignment.end,
@@ -462,32 +608,98 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                                       timeText,
                                       style: TextStyle(
                                         fontSize: 12,
-                                        fontWeight: hasUnread
+                                        fontWeight: (hasUnread || hasMissed)
                                             ? FontWeight.bold
                                             : FontWeight.normal,
-                                        color: hasUnread
-                                            ? const Color(0xFF1A73E8)
-                                            : Colors.grey.shade600,
+                                        color: hasMissed
+                                            ? Colors.redAccent
+                                            : (hasUnread
+                                                ? const Color(0xFF1A73E8)
+                                                : Colors.grey.shade600),
                                       ),
                                     ),
-                                    if (hasUnread) ...[
+                                    if (hasMissed || hasUnread) ...[
                                       const SizedBox(height: 5),
-                                      Container(
-                                        padding: const EdgeInsets.symmetric(
-                                            horizontal: 7, vertical: 2),
-                                        decoration: BoxDecoration(
-                                          color: const Color(0xFF1A73E8),
-                                          borderRadius:
-                                              BorderRadius.circular(12),
-                                        ),
-                                        child: Text(
-                                          '$unreadCount',
-                                          style: const TextStyle(
-                                            color: Colors.white,
-                                            fontSize: 11,
-                                            fontWeight: FontWeight.bold,
-                                          ),
-                                        ),
+                                      Row(
+                                        mainAxisSize: MainAxisSize.min,
+                                        children: [
+                                          if (hasMissed)
+                                            Container(
+                                              padding:
+                                                  const EdgeInsets.symmetric(
+                                                      horizontal: 6,
+                                                      vertical: 2),
+                                              decoration: BoxDecoration(
+                                                color: Colors.redAccent,
+                                                borderRadius:
+                                                    BorderRadius.circular(12),
+                                              ),
+                                              child: Row(
+                                                mainAxisSize: MainAxisSize.min,
+                                                children: [
+                                                  const Icon(
+                                                    Icons.call_missed,
+                                                    color: Colors.white,
+                                                    size: 11,
+                                                  ),
+                                                  const SizedBox(width: 2),
+                                                  Text(
+                                                    '$missedCount',
+                                                    style: const TextStyle(
+                                                      color: Colors.white,
+                                                      fontSize: 11,
+                                                      fontWeight:
+                                                          FontWeight.bold,
+                                                    ),
+                                                  ),
+                                                ],
+                                              ),
+                                            ),
+                                          if (hasMissed &&
+                                              unreadCount > missedCount)
+                                            const SizedBox(width: 4),
+                                          if (!hasMissed && hasUnread)
+                                            Container(
+                                              padding:
+                                                  const EdgeInsets.symmetric(
+                                                      horizontal: 7,
+                                                      vertical: 2),
+                                              decoration: BoxDecoration(
+                                                color: const Color(0xFF1A73E8),
+                                                borderRadius:
+                                                    BorderRadius.circular(12),
+                                              ),
+                                              child: Text(
+                                                '$unreadCount',
+                                                style: const TextStyle(
+                                                  color: Colors.white,
+                                                  fontSize: 11,
+                                                  fontWeight: FontWeight.bold,
+                                                ),
+                                              ),
+                                            )
+                                          else if (hasMissed &&
+                                              unreadCount > missedCount)
+                                            Container(
+                                              padding:
+                                                  const EdgeInsets.symmetric(
+                                                      horizontal: 6,
+                                                      vertical: 2),
+                                              decoration: BoxDecoration(
+                                                color: const Color(0xFF1A73E8),
+                                                borderRadius:
+                                                    BorderRadius.circular(12),
+                                              ),
+                                              child: Text(
+                                                '${unreadCount - missedCount}',
+                                                style: const TextStyle(
+                                                  color: Colors.white,
+                                                  fontSize: 11,
+                                                  fontWeight: FontWeight.bold,
+                                                ),
+                                              ),
+                                            ),
+                                        ],
                                       ),
                                     ],
                                   ],
@@ -563,13 +775,20 @@ class _InAppUpdateDialogState extends State<_InAppUpdateDialog> {
   bool _hasError = false;
 
   String get _targetApkPath {
-    final dir = Directory('/data/user/0/com.universal.messenger/files');
-    try {
-      if (!dir.existsSync()) dir.createSync(recursive: true);
-      return '${dir.path}/universal_messenger_update.apk';
-    } catch (_) {
-      return '${Directory.systemTemp.path}/universal_messenger_update.apk';
+    for (final pkg in const [
+      'com.universal.universal_messenger',
+      'com.universal.messenger',
+    ]) {
+      try {
+        final dir = Directory('/data/user/0/$pkg/files');
+        if (!dir.existsSync()) dir.createSync(recursive: true);
+        final probe = File('${dir.path}/.probe_apk');
+        probe.writeAsStringSync('ok');
+        probe.deleteSync();
+        return '${dir.path}/universal_messenger_update.apk';
+      } catch (_) {}
     }
+    return '${Directory.systemTemp.path}/universal_messenger_update.apk';
   }
 
   Future<void> _downloadAndInstall() async {
@@ -635,10 +854,10 @@ class _InAppUpdateDialogState extends State<_InAppUpdateDialog> {
 
   Future<void> _triggerInstall(String path) async {
     try {
-      final res =
-          await _nativeChannel.invokeMethod<String>('installApk', {'path': path});
+      final dynamic res =
+          await _nativeChannel.invokeMethod('installApk', {'path': path});
       if (!mounted) return;
-      if (res == 'PERMISSION_REQUIRED') {
+      if (res == 'PERMISSION_REQUIRED' || res == false) {
         setState(() {
           _statusMessage =
               'অনুগ্রহ করে সেটিংস থেকে "Allow from this source" চালু করে ফিরে আসুন, তারপর নিচের Install Now বাটনে চাপুন।';
