@@ -4,6 +4,8 @@ import 'package:flutter/services.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:zego_uikit_prebuilt_call/zego_uikit_prebuilt_call.dart';
+import 'package:zego_uikit/zego_uikit.dart';
+import 'package:zego_express_engine/zego_express_engine.dart';
 
 class CallLogHelper {
   static String formatDuration(int totalSeconds) {
@@ -121,8 +123,8 @@ class CallLogHelper {
         final connectedTs = data['connectedAt'] as Timestamp?;
         final DateTime? connectedTime =
             connectedTs?.toDate() ?? localConnectedAt;
-        final wasAccepted =
-            !forceMissed && (connectedTime != null || data['status'] == 'accepted');
+        final wasAccepted = !forceMissed &&
+            (connectedTime != null || data['status'] == 'accepted');
 
         int durationSec = 0;
         if (wasAccepted) {
@@ -135,9 +137,8 @@ class CallLogHelper {
         }
 
         final callStatus = wasAccepted ? 'completed' : 'missed';
-        final endedStatus = wasAccepted
-            ? 'ended'
-            : (forceMissed ? 'declined' : 'ended');
+        final endedStatus =
+            wasAccepted ? 'ended' : (forceMissed ? 'declined' : 'ended');
 
         tx.set(
           sessionRef,
@@ -288,6 +289,7 @@ class _CallScreenState extends State<CallScreen> {
   StreamSubscription<DocumentSnapshot>? _callDocSub;
   StreamSubscription<DocumentSnapshot>? _sessionDocSub;
   late final ValueNotifier<bool> _screenShareNotifier;
+  Timer? _audioTuneTimer;
 
   bool _allowPop = false;
   bool _cleanedUp = false;
@@ -318,10 +320,18 @@ class _CallScreenState extends State<CallScreen> {
     _setNativeCallState(true);
     _stopNativeRingtone();
     _listenForRemoteHangUp();
+
+    // Apply clear voice DSP + hardware acceleration after Zego engine boots
+    _audioTuneTimer = Timer(const Duration(milliseconds: 1200), () {
+      if (mounted && !_cleanedUp) {
+        _applyClearAudioAndHardwareSettings();
+      }
+    });
   }
 
   @override
   void dispose() {
+    _audioTuneTimer?.cancel();
     _screenShareNotifier.removeListener(_onScreenShareStateChanged);
     _callDocSub?.cancel();
     _sessionDocSub?.cancel();
@@ -332,9 +342,46 @@ class _CallScreenState extends State<CallScreen> {
     super.dispose();
   }
 
+  Future<void> _applyClearAudioAndHardwareSettings() async {
+    try {
+      final engine = ZegoExpressEngine.instance;
+      // Hardware acceleration keeps video & screen share real-time and lag-free
+      await engine.enableHardwareEncoder(true);
+      await engine.enableHardwareDecoder(true);
+      // Aggressive echo cancellation + noise suppression + auto gain for clear soft speech
+      await engine.enableAEC(true);
+      await engine.enableHeadphoneAEC(true);
+      await engine.setAECMode(ZegoAECMode.Aggressive);
+      await engine.enableANS(true);
+      await engine.setANSMode(ZegoANSMode.Aggressive);
+      await engine.enableAGC(true);
+      await engine.setCaptureVolume(155);
+    } catch (_) {}
+  }
+
+  Future<void> _optimizeScreenShareStream() async {
+    try {
+      final engine = ZegoExpressEngine.instance;
+      await engine.enableHardwareEncoder(true);
+      await engine.enableHardwareDecoder(true);
+      // 540P @ 20fps / 1000kbps gives crisp, low-latency real-time screen share on mobile data
+      final auxConfig = ZegoVideoConfig.preset(ZegoVideoConfigPreset.Preset540P);
+      auxConfig.fps = 20;
+      auxConfig.bitrate = 1000;
+      await engine.setVideoConfig(auxConfig, channel: ZegoPublishChannel.Aux);
+    } catch (_) {}
+  }
+
   void _onScreenShareStateChanged() {
     final sharing = _screenShareNotifier.value;
     _setNativeScreenSharing(sharing);
+    if (sharing) {
+      Future.delayed(const Duration(milliseconds: 500), () {
+        if (mounted && _screenShareNotifier.value && !_cleanedUp) {
+          _optimizeScreenShareStream();
+        }
+      });
+    }
   }
 
   Future<void> _setNativeCallState(bool active) async {
@@ -376,11 +423,19 @@ class _CallScreenState extends State<CallScreen> {
       await _nativeChannel.invokeMethod('setScreenSharing', {'active': true});
     } catch (_) {}
 
+    await _optimizeScreenShareStream();
+
     try {
-      await ZegoUIKit().startSharingScreen();
+      ZegoUIKit().startSharingScreen();
     } catch (_) {
       await _setNativeScreenSharing(false);
     }
+
+    Future.delayed(const Duration(milliseconds: 900), () {
+      if (mounted && _screenShareNotifier.value && !_cleanedUp) {
+        _optimizeScreenShareStream();
+      }
+    });
 
     Future.delayed(const Duration(seconds: 4), () {
       if (mounted && !_screenShareNotifier.value) {
@@ -455,8 +510,10 @@ class _CallScreenState extends State<CallScreen> {
     final myEmail = user?.email ?? '';
 
     final callerId = widget.isCaller ? myUid : (widget.otherUserId ?? '');
-    final callerName = widget.isCaller ? myName : (widget.otherUserName ?? 'User');
-    final callerEmail = widget.isCaller ? myEmail : (widget.otherUserEmail ?? '');
+    final callerName =
+        widget.isCaller ? myName : (widget.otherUserName ?? 'User');
+    final callerEmail =
+        widget.isCaller ? myEmail : (widget.otherUserEmail ?? '');
 
     final receiverId = widget.isCaller
         ? (widget.otherUserId ?? widget.receiverIdForCleanup ?? '')
@@ -664,6 +721,7 @@ class _CallScreenState extends State<CallScreen> {
                 if (user.id != currentUser.uid && _connectedAt == null) {
                   _connectedAt = DateTime.now();
                   CallLogHelper.markConnected(widget.callID);
+                  _applyClearAudioAndHardwareSettings();
                 }
               },
               onLeave: (user) {
