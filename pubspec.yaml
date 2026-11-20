@@ -15,6 +15,7 @@ dependencies:
   firebase_messaging: ^15.1.3
   googleapis_auth: ^1.6.0
   flutter_local_notifications: ^19.0.0
+  video_player: ^2.9.2
   zego_uikit_prebuilt_call: any
   dio: any
   file_picker: any
@@ -27,4 +28,3 @@ dev_dependencies:
 
 flutter:
   uses-material-design: true
- 
