@@ -32,24 +32,38 @@ class _CallScreenState extends State<CallScreen> {
       MethodChannel('com.universal.messenger/icon');
 
   StreamSubscription<DocumentSnapshot>? _callDocSub;
+  StreamSubscription<DocumentSnapshot>? _sessionDocSub;
   bool _allowPop = false;
   bool _cleanedUp = false;
   bool _remoteEnded = false;
+  bool _isMinimizing = false;
+  bool _callDocExisted = false;
 
   String? get _effectiveCallDocId =>
       widget.callDocId ?? widget.receiverIdForCleanup;
+
+  bool _isEndedStatus(String status) {
+    return status == 'ended' ||
+        status == 'declined' ||
+        status == 'rejected' ||
+        status == 'cancelled';
+  }
 
   @override
   void initState() {
     super.initState();
     _setNativeCallState(true);
+    _stopNativeRingtone();
     _listenForRemoteHangUp();
   }
 
   @override
   void dispose() {
     _callDocSub?.cancel();
-    _cleanupCallStatus();
+    _sessionDocSub?.cancel();
+    if (!_isMinimizing) {
+      _cleanupCallStatus();
+    }
     super.dispose();
   }
 
@@ -59,46 +73,82 @@ class _CallScreenState extends State<CallScreen> {
     } catch (_) {}
   }
 
+  Future<void> _stopNativeRingtone() async {
+    try {
+      await _nativeChannel.invokeMethod('stopRingtone');
+    } catch (_) {}
+  }
+
   void _listenForRemoteHangUp() {
-    final docId = _effectiveCallDocId;
-    if (docId == null || docId.isEmpty) return;
+    final currentUid = FirebaseAuth.instance.currentUser?.uid;
+
+    // 1. Shared session listener by callID (works reliably for BOTH caller & receiver)
+    _sessionDocSub = FirebaseFirestore.instance
+        .collection('call_sessions')
+        .doc(widget.callID)
+        .snapshots()
+        .listen((snap) {
+      if (_remoteEnded || _cleanedUp || !snap.exists) return;
+      final data = snap.data();
+      if (data == null) return;
+      final status = (data['status'] ?? '').toString();
+      if (_isEndedStatus(status)) {
+        _endCallFromRemote();
+      }
+    });
+
+    // 2. Direct calls/{docId} listener (handles ring-time decline/cancel/delete)
+    final docId = (_effectiveCallDocId != null && _effectiveCallDocId!.isNotEmpty)
+        ? _effectiveCallDocId!
+        : (currentUid ?? '');
+    if (docId.isEmpty) return;
 
     _callDocSub = FirebaseFirestore.instance
         .collection('calls')
         .doc(docId)
         .snapshots()
         .listen((snap) {
-      if (!snap.exists || _remoteEnded || _cleanedUp) return;
+      if (_remoteEnded || _cleanedUp) return;
+
+      if (!snap.exists) {
+        if (_callDocExisted) {
+          _endCallFromRemote();
+        }
+        return;
+      }
+
       final data = snap.data();
       if (data == null) return;
 
       final docCallId = (data['callId'] ?? '').toString();
       final status = (data['status'] ?? '').toString();
 
-      if (docCallId == widget.callID &&
-          (status == 'ended' || status == 'declined')) {
-        _endCallFromRemote();
+      if (docCallId == widget.callID) {
+        _callDocExisted = true;
+        if (_isEndedStatus(status)) {
+          _endCallFromRemote();
+        }
       }
     });
   }
 
-  void _endCallFromRemote() {
+  Future<void> _endCallFromRemote() async {
     if (_remoteEnded) return;
     _remoteEnded = true;
     _cleanedUp = true;
     _setNativeCallState(false);
+    _stopNativeRingtone();
 
     if (!mounted) return;
     setState(() => _allowPop = true);
 
-    WidgetsBinding.instance.addPostFrameCallback((_) {
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
       if (!mounted) return;
       try {
-        ZegoUIKitPrebuiltCallController().hangUp(context);
-      } catch (_) {
-        if (Navigator.of(context).canPop()) {
-          Navigator.of(context).pop();
-        }
+        await ZegoUIKitPrebuiltCallController().hangUp(context);
+      } catch (_) {}
+      if (mounted && Navigator.of(context).canPop()) {
+        Navigator.of(context).pop();
       }
     });
   }
@@ -107,19 +157,47 @@ class _CallScreenState extends State<CallScreen> {
     if (_cleanedUp) return;
     _cleanedUp = true;
     _setNativeCallState(false);
+    _stopNativeRingtone();
 
+    final currentUid = FirebaseAuth.instance.currentUser?.uid ?? '';
+    final payload = {
+      'callId': widget.callID,
+      'status': 'ended',
+      'endedBy': currentUid,
+      'endedAt': FieldValue.serverTimestamp(),
+    };
+
+    // Always broadcast hang-up on the shared call_sessions doc
+    FirebaseFirestore.instance
+        .collection('call_sessions')
+        .doc(widget.callID)
+        .set(payload, SetOptions(merge: true))
+        .catchError((_) {});
+
+    // Also update calls/{docId} so ringing/incoming UI stops immediately
     final docId = _effectiveCallDocId;
     if (docId != null && docId.isNotEmpty) {
-      FirebaseFirestore.instance.collection('calls').doc(docId).set({
-        'callId': widget.callID,
-        'status': 'ended',
-        'endedAt': FieldValue.serverTimestamp(),
-      }, SetOptions(merge: true));
+      FirebaseFirestore.instance
+          .collection('calls')
+          .doc(docId)
+          .set(payload, SetOptions(merge: true))
+          .catchError((_) {});
+    }
+
+    // If receiver didn't have callDocId passed, also mark their own calls/{uid} doc ended
+    if (currentUid.isNotEmpty && currentUid != docId) {
+      final ownRef = FirebaseFirestore.instance.collection('calls').doc(currentUid);
+      ownRef.get().then((snap) {
+        if (snap.exists && (snap.data()?['callId'] ?? '') == widget.callID) {
+          ownRef.set(payload, SetOptions(merge: true)).catchError((_) {});
+        }
+      }).catchError((_) {});
     }
   }
 
   void _minimizeCall() {
     if (_allowPop || _remoteEnded) return;
+    _isMinimizing = true;
     setState(() => _allowPop = true);
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) {
@@ -188,8 +266,11 @@ class _CallScreenState extends State<CallScreen> {
           config: config,
           events: ZegoUIKitPrebuiltCallEvents(
             onCallEnd: (event, defaultAction) {
-              setState(() => _allowPop = true);
+              _isMinimizing = false;
               _cleanupCallStatus();
+              if (mounted) {
+                setState(() => _allowPop = true);
+              }
               WidgetsBinding.instance.addPostFrameCallback((_) {
                 defaultAction.call();
               });
@@ -197,6 +278,7 @@ class _CallScreenState extends State<CallScreen> {
             user: ZegoCallUserEvents(
               onLeave: (user) {
                 if (user.id != currentUser.uid) {
+                  _isMinimizing = false;
                   _cleanupCallStatus();
                   _endCallFromRemote();
                 }
