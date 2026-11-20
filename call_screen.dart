@@ -8,6 +8,139 @@ import 'package:zego_uikit_prebuilt_call/zego_uikit_prebuilt_call.dart';
 import 'package:zego_uikit/zego_uikit.dart';
 import 'package:universal_messenger/screens/settings_screen.dart';
 
+class CallCleanupCoordinator {
+  static const MethodChannel _nativeChannel =
+      MethodChannel('com.universal.messenger/icon');
+  static bool _handlerRegistered = false;
+  static Future<void> Function()? _activeCallKillHandler;
+
+  static void ensureRegistered() {
+    if (_handlerRegistered) return;
+    _handlerRegistered = true;
+    _nativeChannel.setMethodCallHandler((call) async {
+      if (call.method == 'onAppSwipedFromRecents') {
+        await handleForceKill(call.arguments);
+      }
+      return true;
+    });
+  }
+
+  static void attachActiveCall(Future<void> Function() handler) {
+    ensureRegistered();
+    _activeCallKillHandler = handler;
+  }
+
+  static void detachActiveCall(Future<void> Function() handler) {
+    if (_activeCallKillHandler == handler) {
+      _activeCallKillHandler = null;
+    }
+  }
+
+  static Future<void> releaseAllHardwareAndRoom() async {
+    try {
+      ZegoUIKit().stopSharingScreen();
+    } catch (_) {}
+    try {
+      ZegoUIKit().turnCameraOn(false);
+    } catch (_) {}
+    try {
+      ZegoUIKit().turnMicrophoneOn(false);
+    } catch (_) {}
+    try {
+      await ZegoUIKit().leaveRoom();
+    } catch (_) {}
+  }
+
+  static Future<void> handleForceKill(dynamic args) async {
+    NotificationAndPresenceService.isInActiveCall = false;
+    NotificationAndPresenceService.stopNativeCallRingtone();
+    NotificationAndPresenceService.clearCallNotifications();
+
+    await releaseAllHardwareAndRoom();
+
+    if (_activeCallKillHandler != null) {
+      try {
+        await _activeCallKillHandler!();
+      } catch (_) {}
+      return;
+    }
+
+    if (args is Map) {
+      final callId = (args['callId'] ?? '').toString();
+      final callDocId = (args['callDocId'] ?? '').toString();
+      await endStaleCallInFirestore(callId: callId, callDocId: callDocId);
+    }
+  }
+
+  static Future<void> cleanupOnFreshAppLaunch() async {
+    ensureRegistered();
+    NotificationAndPresenceService.isInActiveCall = false;
+
+    // Guarantee camera, microphone, screen share & old Zego room are OFF on reopen
+    await releaseAllHardwareAndRoom();
+
+    try {
+      await _nativeChannel.invokeMethod('stopScreenShareService');
+      await _nativeChannel.invokeMethod('setCallAudioMode', {'active': false});
+    } catch (_) {}
+
+    // Finalize any call that was killed from Recents on the previous run
+    try {
+      final dynamic killed =
+          await _nativeChannel.invokeMethod('consumeKilledCallState');
+      if (killed is Map) {
+        final callId = (killed['callId'] ?? '').toString();
+        final callDocId = (killed['callDocId'] ?? '').toString();
+        await endStaleCallInFirestore(callId: callId, callDocId: callDocId);
+      }
+    } catch (_) {}
+  }
+
+  static Future<void> endStaleCallInFirestore({
+    required String callId,
+    required String callDocId,
+  }) async {
+    final uid = FirebaseAuth.instance.currentUser?.uid ?? '';
+    if (callId.isEmpty && callDocId.isEmpty) return;
+
+    final payload = {
+      if (callId.isNotEmpty) 'callId': callId,
+      'status': 'ended',
+      if (uid.isNotEmpty) 'endedBy': uid,
+      'endedAt': FieldValue.serverTimestamp(),
+    };
+
+    if (callId.isNotEmpty) {
+      await FirebaseFirestore.instance
+          .collection('call_sessions')
+          .doc(callId)
+          .set(payload, SetOptions(merge: true))
+          .catchError((_) {});
+      await CallLogHelper.finalizeCall(callId: callId, isVideo: false)
+          .catchError((_) {});
+    }
+
+    if (callDocId.isNotEmpty) {
+      await FirebaseFirestore.instance
+          .collection('calls')
+          .doc(callDocId)
+          .set(payload, SetOptions(merge: true))
+          .catchError((_) {});
+    }
+
+    if (uid.isNotEmpty && uid != callDocId) {
+      try {
+        final ownRef = FirebaseFirestore.instance.collection('calls').doc(uid);
+        final snap = await ownRef.get();
+        if (snap.exists &&
+            (callId.isEmpty || (snap.data()?['callId'] ?? '') == callId)) {
+          await ownRef.set(payload, SetOptions(merge: true));
+        }
+      } catch (_) {}
+    }
+  }
+}
+
 class CallLogHelper {
   static String formatDuration(int totalSeconds) {
     if (totalSeconds <= 0) return '00:00';
@@ -686,7 +819,7 @@ class CallScreen extends StatefulWidget {
   State<CallScreen> createState() => _CallScreenState();
 }
 
-class _CallScreenState extends State<CallScreen> {
+class _CallScreenState extends State<CallScreen> with WidgetsBindingObserver {
   static const MethodChannel _nativeChannel =
       MethodChannel('com.universal.messenger/icon');
 
@@ -714,6 +847,9 @@ class _CallScreenState extends State<CallScreen> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    CallCleanupCoordinator.attachActiveCall(_handleAppKilledDuringCall);
+
     NotificationAndPresenceService.isInActiveCall = true;
     NotificationAndPresenceService.stopNativeCallRingtone();
     NotificationAndPresenceService.showOngoingCallNotification(
@@ -734,12 +870,27 @@ class _CallScreenState extends State<CallScreen> {
   }
 
   @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.detached) {
+      _handleAppKilledDuringCall();
+    }
+  }
+
+  Future<void> _handleAppKilledDuringCall() async {
+    _isMinimizing = false;
+    await CallCleanupCoordinator.releaseAllHardwareAndRoom();
+    _cleanupCallStatus();
+  }
+
+  @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    CallCleanupCoordinator.detachActiveCall(_handleAppKilledDuringCall);
     _screenShareNotifier.removeListener(_onScreenShareStateChanged);
     _callDocSub?.cancel();
     _sessionDocSub?.cancel();
     if (!_isMinimizing) {
-      _stopScreenSharingImmediately();
+      CallCleanupCoordinator.releaseAllHardwareAndRoom();
       _cleanupCallStatus();
     }
     super.dispose();
@@ -749,14 +900,21 @@ class _CallScreenState extends State<CallScreen> {
     final sharing = _screenShareNotifier.value;
     _setNativeScreenSharing(sharing);
 
-    // Pause local camera while screen sharing to free upload bandwidth & eliminate lag
-    try {
-      if (sharing) {
-        ZegoUIKit().turnCameraOn(false);
-      } else if (widget.isVideoCall && !_cleanedUp) {
+    // Wait 600ms after MediaProjection starts before turning off local camera
+    // so screen capture starts smoothly and remote user ONLY sees the shared screen
+    if (sharing) {
+      Future.delayed(const Duration(milliseconds: 600), () {
+        if (mounted && _screenShareNotifier.value && !_cleanedUp) {
+          try {
+            ZegoUIKit().turnCameraOn(false);
+          } catch (_) {}
+        }
+      });
+    } else if (widget.isVideoCall && !_cleanedUp) {
+      try {
         ZegoUIKit().turnCameraOn(true);
-      }
-    } catch (_) {}
+      } catch (_) {}
+    }
 
     if (!_cleanedUp) {
       NotificationAndPresenceService.showOngoingCallNotification(
@@ -771,7 +929,11 @@ class _CallScreenState extends State<CallScreen> {
 
   Future<void> _setNativeCallState(bool active) async {
     try {
-      await _nativeChannel.invokeMethod('setCallActive', {'active': active});
+      await _nativeChannel.invokeMethod('setCallActive', {
+        'active': active,
+        'callId': widget.callID,
+        'callDocId': _effectiveCallDocId ?? '',
+      });
     } catch (_) {}
   }
 
@@ -815,13 +977,12 @@ class _CallScreenState extends State<CallScreen> {
     } catch (_) {}
 
     try {
-      ZegoUIKit().turnCameraOn(false);
       ZegoUIKit().startSharingScreen();
     } catch (_) {
       await _setNativeScreenSharing(false);
     }
 
-    Future.delayed(const Duration(seconds: 4), () {
+    Future.delayed(const Duration(seconds: 5), () {
       if (mounted && !_screenShareNotifier.value) {
         _setNativeScreenSharing(false);
       }
@@ -927,7 +1088,7 @@ class _CallScreenState extends State<CallScreen> {
     _cleanedUp = true;
     NotificationAndPresenceService.isInActiveCall = false;
     NotificationAndPresenceService.clearCallNotifications();
-    _stopScreenSharingImmediately();
+    await CallCleanupCoordinator.releaseAllHardwareAndRoom();
     _setNativeCallState(false);
     _stopNativeRingtone();
     _recordCallLog();
@@ -1032,7 +1193,6 @@ class _CallScreenState extends State<CallScreen> {
     );
   }
 
-  // Messenger-style clean screen-sharing overlay — prevents infinity mirror & cuts encoder lag
   Widget _buildMessengerScreenSharingOverlay() {
     return Container(
       width: double.infinity,
@@ -1067,7 +1227,7 @@ class _CallScreenState extends State<CallScreen> {
           ),
           const SizedBox(height: 8),
           Text(
-            '${widget.otherUserName ?? 'অপর প্রান্তের ব্যক্তি'} এখন রিয়েল-টাইমে আপনার স্ক্রিন দেখতে পাচ্ছেন।\nযেকোনো অ্যাপ ওপেন করে দেখাতে নিচের বাটনে চাপুন।',
+            '${widget.otherUserName ?? 'প্রতিপক্ষ'} এখন শুধু আপনার শেয়ার করা লাইভ স্ক্রিনটিই দেখতে পাচ্ছেন।\nঅন্য অ্যাপ দেখাতে নিচের বাটনে চাপুন।',
             textAlign: TextAlign.center,
             style: const TextStyle(color: Colors.white70, fontSize: 13.5),
           ),
@@ -1118,9 +1278,9 @@ class _CallScreenState extends State<CallScreen> {
               'কল কেটে দিন',
               style: TextStyle(color: Colors.redAccent),
             ),
-            onPressed: () {
+            onPressed: () async {
               _isMinimizing = false;
-              _stopScreenSharingImmediately();
+              await CallCleanupCoordinator.releaseAllHardwareAndRoom();
               _cleanupCallStatus();
               if (mounted) setState(() => _allowPop = true);
               WidgetsBinding.instance.addPostFrameCallback((_) async {
@@ -1207,7 +1367,7 @@ class _CallScreenState extends State<CallScreen> {
               events: ZegoUIKitPrebuiltCallEvents(
                 onCallEnd: (event, defaultAction) {
                   _isMinimizing = false;
-                  _stopScreenSharingImmediately();
+                  CallCleanupCoordinator.releaseAllHardwareAndRoom();
                   _cleanupCallStatus();
                   if (mounted) {
                     setState(() => _allowPop = true);
@@ -1227,7 +1387,7 @@ class _CallScreenState extends State<CallScreen> {
                   onLeave: (user) {
                     if (user.id != currentUser.uid) {
                       _isMinimizing = false;
-                      _stopScreenSharingImmediately();
+                      CallCleanupCoordinator.releaseAllHardwareAndRoom();
                       _cleanupCallStatus();
                       _endCallFromRemote();
                     }
