@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Configure freshly generated Android project and patch cached Flutter plugins
-for AGP 9+ / modern Flutter compatibility on CI.
+Configure freshly generated Android project, generate adaptive launcher aliases,
+and patch cached Flutter plugins for AGP 9+ / modern Flutter compatibility on CI.
 """
 
 import json
@@ -540,6 +540,148 @@ def write_file_paths_xml() -> None:
     log("Wrote android/app/src/main/res/xml/file_paths.xml")
 
 
+def write_launcher_icon_resources() -> None:
+    """Generate adaptive icons + fallback drawables for all home-screen icon aliases."""
+    res_dir = MAIN_DIR / "res"
+    values_dir = res_dir / "values"
+    drawable_dir = res_dir / "drawable"
+    drawable_v26_dir = res_dir / "drawable-v26"
+
+    values_dir.mkdir(parents=True, exist_ok=True)
+    drawable_dir.mkdir(parents=True, exist_ok=True)
+    drawable_v26_dir.mkdir(parents=True, exist_ok=True)
+
+    colors_xml = """<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="ic_bg_default">#008069</color>
+    <color name="ic_bg_google">#FFFFFF</color>
+    <color name="ic_bg_chatgpt">#0D0D0D</color>
+    <color name="ic_bg_playstore">#FFFFFF</color>
+    <color name="ic_bg_aqua">#00BFA5</color>
+    <color name="ic_bg_dark">#141A21</color>
+    <color name="ic_bg_sunset">#F4511E</color>
+</resources>
+"""
+    (values_dir / "icon_colors.xml").write_text(colors_xml, encoding="utf-8")
+
+    # Foreground vector contents (108x108 adaptive icon viewport, safe zone 21..87)
+    fg_bodies = {
+        "default": (
+            "#008069",
+            """    <group android:translateX="28" android:translateY="28" android:scaleX="2.16" android:scaleY="2.16">
+        <path
+            android:fillColor="#FFFFFF"
+            android:pathData="M20,6h-1v8c0,0.55 -0.45,1 -1,1H6v1c0,1.1 0.9,2 2,2h10l4,4V8c0,-1.1 -0.9,-2 -2,-2zM17,12V4c0,-1.1 -0.9,-2 -2,-2H4c-1.1,0 -2,0.9 -2,2v13l4,-4h9c1.1,0 2,-0.9 2,-2z" />
+    </group>""",
+        ),
+        "google": (
+            "#FFFFFF",
+            """    <group android:translateX="30" android:translateY="30">
+        <path
+            android:fillColor="#EA4335"
+            android:pathData="M24,9.5 c3.54,0 6.71,1.22 9.21,3.6 l6.85,-6.85 C35.9,2.38 30.47,0 24,0 C14.62,0 6.51,5.38 2.56,13.22 l7.98,6.19 C12.43,13.72 17.74,9.5 24,9.5 z" />
+        <path
+            android:fillColor="#4285F4"
+            android:pathData="M46.98,24.55 c0,-1.57 -0.15,-3.09 -0.38,-4.55 H24 v9.02 h12.94 c-0.58,2.96 -2.26,5.48 -4.78,7.18 l7.73,6 c4.51,-4.18 7.09,-10.36 7.09,-17.65 z" />
+        <path
+            android:fillColor="#FBBC05"
+            android:pathData="M10.53,28.59 c-0.48,-1.45 -0.76,-2.99 -0.76,-4.59 s0.27,-3.14 0.76,-4.59 l-7.98,-6.19 C0.92,16.46 0,20.12 0,24 c0,3.88 0.92,7.54 2.56,10.78 l7.97,-6.19 z" />
+        <path
+            android:fillColor="#34A853"
+            android:pathData="M24,48 c6.48,0 11.93,-2.13 15.89,-5.81 l-7.73,-6 c-2.15,1.45 -4.92,2.3 -8.16,2.3 c-6.26,0 -11.57,-4.22 -13.47,-9.91 l-7.98,6.19 C6.51,42.62 14.62,48 24,48 z" />
+    </group>""",
+        ),
+        "chatgpt": (
+            "#0D0D0D",
+            """    <group android:translateX="28.8" android:translateY="28.8" android:scaleX="2.1" android:scaleY="2.1">
+        <path
+            android:fillColor="#FFFFFF"
+            android:pathData="M22.2819,9.8211 a5.9847,5.9847 0 0 0 -0.5157,-4.9108 a6.0462,6.0462 0 0 0 -6.5098,-2.9 A6.0651,6.0651 0 0 0 4.9807,4.1818 a5.9847,5.9847 0 0 0 -3.9977,2.9 a6.0462,6.0462 0 0 0 0.7427,7.0966 a5.98,5.98 0 0 0 0.511,4.9107 a6.051,6.051 0 0 0 6.5146,2.9001 A5.9847,5.9847 0 0 0 13.2599,24 a6.0557,6.0557 0 0 0 5.7718,-4.2058 a5.9894,5.9894 0 0 0 3.9977,-2.9001 a6.0557,6.0557 0 0 0 -0.7475,-7.0729 z m-9.022,12.6081 a4.4755,4.4755 0 0 1 -2.8764,-1.0408 l0.1419,-0.0804 l4.7783,-2.7582 a0.7948,0.7948 0 0 0 0.3927,-0.6813 v-6.7369 l2.02,1.1686 a0.071,0.071 0 0 1 0.038,0.052 v5.5826 a4.504,4.504 0 0 1 -4.4945,4.4944 z m-9.6607,-4.1254 a4.4708,4.4708 0 0 1 -0.5346,-3.0137 l0.142,0.0852 l4.783,2.7582 a0.7712,0.7712 0 0 0 0.7806,0 l5.8428,-3.3685 v2.3324 a0.0804,0.0804 0 0 1 -0.0332,0.0615 L9.74,19.9502 a4.4992,4.4992 0 0 1 -6.1408,-1.6464 z M2.3408,7.8956 a4.485,4.485 0 0 1 2.3655,-1.9728 V11.6 a0.7664,0.7664 0 0 0 0.3879,0.6765 l5.8144,3.3543 l-2.0201,1.1685 a0.0757,0.0757 0 0 1 -0.071,0 l-4.8303,-2.7865 A4.504,4.504 0 0 1 2.3408,7.872 z m16.5963,3.8558 L13.1038,8.364 L15.1192,7.2 a0.0757,0.0757 0 0 1 0.071,0 l4.8303,2.7913 a4.4944,4.4944 0 0 1 -0.6765,8.1042 v-5.6772 a0.79,0.79 0 0 0 -0.407,-0.667 z m2.0107,-3.0231 l-0.142,-0.0852 l-4.7735,-2.7818 a0.7759,0.7759 0 0 0 -0.7854,0 L9.409,9.2297 V6.8974 a0.0662,0.0662 0 0 1 0.0284,-0.0615 l4.8303,-2.7866 a4.4992,4.4992 0 0 1 6.6802,4.66 z M8.3065,12.863 l-2.02,-1.1638 a0.0804,0.0804 0 0 1 -0.038,-0.0567 V6.0742 a4.4992,4.4992 0 0 1 7.3757,-3.4537 l-0.142,0.0805 L8.704,5.459 a0.7948,0.7948 0 0 0 -0.3927,0.6813 z m1.0976,-2.3654 l2.602,-1.4998 l2.6069,1.4998 v2.9994 l-2.5974,1.4997 l-2.6067,-1.4997 Z" />
+    </group>""",
+        ),
+        "playstore": (
+            "#FFFFFF",
+            """    <group android:translateX="32" android:translateY="30">
+        <path
+            android:fillColor="#4285F4"
+            android:pathData="M5,4 L25,24 L5,44 Z" />
+        <path
+            android:fillColor="#34A853"
+            android:pathData="M5,4 L31.5,19.1 L25,24 Z" />
+        <path
+            android:fillColor="#EA4335"
+            android:pathData="M5,44 L25,24 L31.5,28.9 Z" />
+        <path
+            android:fillColor="#FBBC04"
+            android:pathData="M25,24 L31.5,19.1 L40,24 L31.5,28.9 Z" />
+    </group>""",
+        ),
+        "aqua": (
+            "#00BFA5",
+            """    <group android:translateX="30" android:translateY="30" android:scaleX="2.0" android:scaleY="2.0">
+        <path
+            android:fillColor="#FFFFFF"
+            android:pathData="M2.01,21 L23,12 L2.01,3 L2,10 L17,12 L2,14 Z" />
+    </group>""",
+        ),
+        "dark": (
+            "#141A21",
+            """    <group android:translateX="28" android:translateY="28" android:scaleX="2.16" android:scaleY="2.16">
+        <path
+            android:fillColor="#00E676"
+            android:pathData="M20,6h-1v8c0,0.55 -0.45,1 -1,1H6v1c0,1.1 0.9,2 2,2h10l4,4V8c0,-1.1 -0.9,-2 -2,-2zM17,12V4c0,-1.1 -0.9,-2 -2,-2H4c-1.1,0 -2,0.9 -2,2v13l4,-4h9c1.1,0 2,-0.9 2,-2z" />
+    </group>""",
+        ),
+        "sunset": (
+            "#F4511E",
+            """    <group android:translateX="28" android:translateY="28" android:scaleX="2.16" android:scaleY="2.16">
+        <path
+            android:fillColor="#FFFFFF"
+            android:pathData="M12,17.27 L18.18,21 L16.54,13.97 L22,9.24 L14.81,8.63 L12,2 L9.19,8.63 L2,9.24 L7.46,13.97 L5.82,21 Z" />
+    </group>""",
+        ),
+    }
+
+    for key, (bg_hex, body) in fg_bodies.items():
+        # Foreground-only vector for Android 8+ adaptive icon
+        fg_xml = f"""<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+{body}
+</vector>
+"""
+        (drawable_dir / f"ic_alias_{key}_fg.xml").write_text(fg_xml, encoding="utf-8")
+
+        # Fallback full icon for API < 26
+        fallback_xml = f"""<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path
+        android:fillColor="{bg_hex}"
+        android:pathData="M0,0 h108 v108 h-108 z" />
+{body}
+</vector>
+"""
+        (drawable_dir / f"ic_alias_{key}.xml").write_text(fallback_xml, encoding="utf-8")
+
+        # Adaptive icon for API 26+ (clean rounded/squircle home screen look)
+        adaptive_xml = f"""<?xml version="1.0" encoding="utf-8"?>
+<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+    <background android:drawable="@color/ic_bg_{key}" />
+    <foreground android:drawable="@drawable/ic_alias_{key}_fg" />
+</adaptive-icon>
+"""
+        (drawable_v26_dir / f"ic_alias_{key}.xml").write_text(adaptive_xml, encoding="utf-8")
+
+    log("Generated adaptive launcher icon resources for all aliases")
+
+
 def write_android_manifest() -> None:
     manifest_content = """<manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
@@ -567,7 +709,8 @@ def write_android_manifest() -> None:
     <application
         android:label="Universal Messenger"
         android:name="${applicationName}"
-        android:icon="@mipmap/ic_launcher"
+        android:icon="@drawable/ic_alias_default"
+        android:roundIcon="@drawable/ic_alias_default"
         android:usesCleartextTraffic="true"
         android:requestLegacyExternalStorage="true">
 
@@ -587,11 +730,112 @@ def write_android_manifest() -> None:
             <meta-data
                 android:name="io.flutter.embedding.android.NormalTheme"
                 android:resource="@style/NormalTheme" />
+        </activity>
+
+        <!-- Default Launcher Alias -->
+        <activity-alias
+            android:name="com.universal.universal_messenger.AliasDefault"
+            android:targetActivity="com.universal.universal_messenger.MainActivity"
+            android:label="Universal Messenger"
+            android:icon="@drawable/ic_alias_default"
+            android:roundIcon="@drawable/ic_alias_default"
+            android:enabled="true"
+            android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
-        </activity>
+        </activity-alias>
+
+        <!-- Google Disguise Alias -->
+        <activity-alias
+            android:name="com.universal.universal_messenger.AliasGoogle"
+            android:targetActivity="com.universal.universal_messenger.MainActivity"
+            android:label="Google"
+            android:icon="@drawable/ic_alias_google"
+            android:roundIcon="@drawable/ic_alias_google"
+            android:enabled="false"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
+
+        <!-- ChatGPT Disguise Alias -->
+        <activity-alias
+            android:name="com.universal.universal_messenger.AliasChatgpt"
+            android:targetActivity="com.universal.universal_messenger.MainActivity"
+            android:label="ChatGPT"
+            android:icon="@drawable/ic_alias_chatgpt"
+            android:roundIcon="@drawable/ic_alias_chatgpt"
+            android:enabled="false"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
+
+        <!-- Play Store Disguise Alias -->
+        <activity-alias
+            android:name="com.universal.universal_messenger.AliasPlaystore"
+            android:targetActivity="com.universal.universal_messenger.MainActivity"
+            android:label="Play Store"
+            android:icon="@drawable/ic_alias_playstore"
+            android:roundIcon="@drawable/ic_alias_playstore"
+            android:enabled="false"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
+
+        <!-- Aqua Alias -->
+        <activity-alias
+            android:name="com.universal.universal_messenger.AliasAqua"
+            android:targetActivity="com.universal.universal_messenger.MainActivity"
+            android:label="Universal Messenger"
+            android:icon="@drawable/ic_alias_aqua"
+            android:roundIcon="@drawable/ic_alias_aqua"
+            android:enabled="false"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
+
+        <!-- Dark Alias -->
+        <activity-alias
+            android:name="com.universal.universal_messenger.AliasDark"
+            android:targetActivity="com.universal.universal_messenger.MainActivity"
+            android:label="Universal Messenger"
+            android:icon="@drawable/ic_alias_dark"
+            android:roundIcon="@drawable/ic_alias_dark"
+            android:enabled="false"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
+
+        <!-- Sunset Alias -->
+        <activity-alias
+            android:name="com.universal.universal_messenger.AliasSunset"
+            android:targetActivity="com.universal.universal_messenger.MainActivity"
+            android:label="Universal Messenger"
+            android:icon="@drawable/ic_alias_sunset"
+            android:roundIcon="@drawable/ic_alias_sunset"
+            android:enabled="false"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
 
         <meta-data
             android:name="com.google.firebase.messaging.default_notification_channel_id"
@@ -632,7 +876,7 @@ def write_android_manifest() -> None:
 </manifest>
 """
     (MAIN_DIR / "AndroidManifest.xml").write_text(manifest_content, encoding="utf-8")
-    log("Wrote android/app/src/main/AndroidManifest.xml")
+    log("Wrote android/app/src/main/AndroidManifest.xml with launcher aliases")
 
 
 def write_main_activity_kt() -> None:
@@ -645,8 +889,15 @@ def write_main_activity_kt() -> None:
     kt_content = """package com.universal.universal_messenger
 
 import android.app.PictureInPictureParams
+import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
+import android.content.pm.ShortcutInfo
+import android.content.pm.ShortcutManager
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.graphics.drawable.Icon
 import android.media.AudioAttributes
 import android.media.Ringtone
 import android.media.RingtoneManager
@@ -668,6 +919,15 @@ import java.io.File
 class MainActivity : FlutterActivity() {
     companion object {
         private const val CHANNEL = "com.universal.messenger/icon"
+        private val ICON_ALIASES = mapOf(
+            "default" to "com.universal.universal_messenger.AliasDefault",
+            "google" to "com.universal.universal_messenger.AliasGoogle",
+            "chatgpt" to "com.universal.universal_messenger.AliasChatgpt",
+            "playstore" to "com.universal.universal_messenger.AliasPlaystore",
+            "aqua" to "com.universal.universal_messenger.AliasAqua",
+            "dark" to "com.universal.universal_messenger.AliasDark",
+            "sunset" to "com.universal.universal_messenger.AliasSunset"
+        )
     }
 
     private var isCallActive: Boolean = false
@@ -712,6 +972,23 @@ class MainActivity : FlutterActivity() {
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL)
             .setMethodCallHandler { call, result ->
                 when (call.method) {
+                    "setAppIcon" -> {
+                        val type = call.argument<String>("type")
+                            ?: (call.arguments as? String)
+                            ?: "default"
+                        result.success(switchLauncherIcon(type))
+                    }
+
+                    "pinCustomShortcut" -> {
+                        val path = extractFilePath(call.arguments, call.argument("path"), call.argument("filePath"))
+                        val label = call.argument<String>("label") ?: "Universal Messenger"
+                        if (path.isNullOrBlank()) {
+                            result.success(false)
+                        } else {
+                            result.success(pinCustomHomeShortcut(path, label))
+                        }
+                    }
+
                     "setCallActive" -> {
                         val active = (call.arguments as? Boolean)
                             ?: call.argument<Boolean>("active")
@@ -781,6 +1058,69 @@ class MainActivity : FlutterActivity() {
                     else -> result.notImplemented()
                 }
             }
+    }
+
+    private fun switchLauncherIcon(type: String): Boolean {
+        val normalized = type.lowercase().trim()
+        if (normalized == "custom") {
+            return true
+        }
+        val targetClass = ICON_ALIASES[normalized] ?: ICON_ALIASES["default"]!!
+        return try {
+            val pm = applicationContext.packageManager
+            val pkg = applicationContext.packageName
+
+            // Enable new alias FIRST so Android launcher never sees 0 active icons
+            pm.setComponentEnabledSetting(
+                ComponentName(pkg, targetClass),
+                PackageManager.COMPONENT_ENABLED_STATE_ENABLED,
+                PackageManager.DONT_KILL_APP
+            )
+
+            for ((_, aliasClass) in ICON_ALIASES) {
+                if (aliasClass != targetClass) {
+                    pm.setComponentEnabledSetting(
+                        ComponentName(pkg, aliasClass),
+                        PackageManager.COMPONENT_ENABLED_STATE_DISABLED,
+                        PackageManager.DONT_KILL_APP
+                    )
+                }
+            }
+            true
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    private fun pinCustomHomeShortcut(path: String, label: String): Boolean {
+        return try {
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return false
+            val file = File(path)
+            if (!file.exists()) return false
+
+            val shortcutManager = getSystemService(ShortcutManager::class.java) ?: return false
+            if (!shortcutManager.isRequestPinShortcutSupported) return false
+
+            val rawBitmap = BitmapFactory.decodeFile(file.absolutePath) ?: return false
+            val scaled = Bitmap.createScaledBitmap(rawBitmap, 192, 192, true)
+
+            val launchIntent = Intent(this, MainActivity::class.java).apply {
+                action = Intent.ACTION_MAIN
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+            }
+
+            val shortcut = ShortcutInfo.Builder(this, "custom_icon_${System.currentTimeMillis()}")
+                .setShortLabel(label)
+                .setLongLabel(label)
+                .setIcon(Icon.createWithBitmap(scaled))
+                .setIntent(launchIntent)
+                .build()
+
+            shortcutManager.requestPinShortcut(shortcut, null)
+            true
+        } catch (_: Exception) {
+            false
+        }
     }
 
     private fun extractFilePath(rawArgs: Any?, pathArg: String?, filePathArg: String?): String? {
@@ -905,7 +1245,7 @@ class MainActivity : FlutterActivity() {
 }
 """
     (kt_dir / "MainActivity.kt").write_text(kt_content, encoding="utf-8")
-    log("Wrote MainActivity.kt")
+    log("Wrote MainActivity.kt with launcher icon switcher")
 
 
 def main() -> None:
@@ -920,6 +1260,7 @@ def main() -> None:
     write_app_build_gradle_kts(app_id)
     copy_google_services()
     write_file_paths_xml()
+    write_launcher_icon_resources()
     write_android_manifest()
     write_main_activity_kt()
     log("Android configuration and plugin patching completed successfully.")
