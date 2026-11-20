@@ -15,6 +15,13 @@ import pathlib, re
 
 file_picker_pat = re.compile(r'await\s+FilePicker\.pickFiles\(([^)]*)\)')
 double_gt_pat = re.compile(r'StreamBuilder<\s*(QuerySnapshot|DocumentSnapshot)\s*>>\s*\(')
+sched_field_pat = re.compile(r'late\s+final\s+Stream<[^\n;]+_scheduledStream;')
+open_sched_sig_pat = re.compile(
+    r'void\s+_openPendingScheduledList\s*\([\s\S]*?\)\s*\{'
+)
+sched_builder_pat = re.compile(
+    r'StreamBuilder<[^\n(]+>\s*\(\s*\n(\s*stream:\s*_scheduledStream)'
+)
 
 for p in pathlib.Path('lib').rglob('*.dart'):
     text = p.read_text(encoding='utf-8')
@@ -32,6 +39,39 @@ for p in pathlib.Path('lib').rglob('*.dart'):
         new_text = new_text.replace(
             'await ZegoUIKit().startSharingScreen();',
             'ZegoUIKit().startSharingScreen();',
+        )
+
+    if p.name == 'settings_screen.dart':
+        new_text = new_text.replace(
+            'static Future<bool> sendScheduledDoc(DocumentSnapshot> doc) async {',
+            'static Future<bool> sendScheduledDoc(DocumentSnapshot doc) async {',
+        )
+        new_text = new_text.replace(
+            'final d = fresh.data();',
+            'final d = fresh.data() as Map<String, dynamic>?;',
+        )
+
+    if p.name == 'chat_screen.dart':
+        new_text = sched_field_pat.sub(
+            'late final Stream<QuerySnapshot> _scheduledStream;',
+            new_text,
+        )
+        new_text = open_sched_sig_pat.sub(
+            'void _openPendingScheduledList(List<QueryDocumentSnapshot> pendingDocs, Color barColor) {',
+            new_text,
+            count=1,
+        )
+        new_text = new_text.replace(
+            'final d = doc.data();',
+            'final d = (doc.data() as Map<String, dynamic>?) ?? <String, dynamic>{};',
+        )
+        new_text = sched_builder_pat.sub(
+            r'StreamBuilder<QuerySnapshot>(\n\1',
+            new_text,
+        )
+        new_text = new_text.replace(
+            "d.data()['chatId']",
+            "((d.data() as Map<String, dynamic>?)?['chatId'])",
         )
 
     if new_text != text:
