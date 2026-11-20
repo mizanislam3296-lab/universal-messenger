@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-echo "==> Step 0: Syncing missing root *_screen.dart files & patching FilePicker..."
+echo "==> Step 0: Syncing missing root *_screen.dart files & auto-patching Dart code..."
 mkdir -p lib/screens
 for f in *_screen.dart; do
   if [[ -f "$f" && ! -f "lib/screens/$f" ]]; then
@@ -12,16 +12,31 @@ done
 
 python3 - <<'PY'
 import pathlib, re
-pattern = re.compile(r'await\s+FilePicker\.pickFiles\(([^)]*)\)')
+
+file_picker_pat = re.compile(r'await\s+FilePicker\.pickFiles\(([^)]*)\)')
+double_gt_pat = re.compile(r'StreamBuilder<\s*(QuerySnapshot|DocumentSnapshot)\s*>>\s*\(')
+
 for p in pathlib.Path('lib').rglob('*.dart'):
     text = p.read_text(encoding='utf-8')
-    new_text = pattern.sub(
+    new_text = file_picker_pat.sub(
         r'((await FilePicker.platform.pickFiles(\1))?.files ?? <PlatformFile>[])',
         text,
     )
+    new_text = double_gt_pat.sub(r'StreamBuilder<\1>(', new_text)
+
+    if p.name == 'call_screen.dart':
+        prebuilt_imp = "import 'package:zego_uikit_prebuilt_call/zego_uikit_prebuilt_call.dart';"
+        uikit_imp = "import 'package:zego_uikit/zego_uikit.dart';"
+        if prebuilt_imp in new_text and uikit_imp not in new_text:
+            new_text = new_text.replace(prebuilt_imp, f"{prebuilt_imp}\n{uikit_imp}", 1)
+        new_text = new_text.replace(
+            'await ZegoUIKit().startSharingScreen();',
+            'ZegoUIKit().startSharingScreen();',
+        )
+
     if new_text != text:
         p.write_text(new_text, encoding='utf-8')
-        print(f"Patched FilePicker in {p}")
+        print(f"Patched {p}")
 PY
 
 echo "==> Step 1: Cleaning old android/ directory..."
