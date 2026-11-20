@@ -1,11 +1,12 @@
 import 'dart:async';
+import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:zego_uikit_prebuilt_call/zego_uikit_prebuilt_call.dart';
 import 'package:zego_uikit/zego_uikit.dart';
-import 'package:zego_express_engine/zego_express_engine.dart';
+import 'package:universal_messenger/screens/settings_screen.dart';
 
 class CallLogHelper {
   static String formatDuration(int totalSeconds) {
@@ -250,6 +251,409 @@ class CallLogHelper {
   }
 }
 
+class IncomingCallScreen extends StatefulWidget {
+  final String callID;
+  final bool isVideoCall;
+  final String callerId;
+  final String callerName;
+  final String callerEmail;
+  final String chatId;
+  final String callDocId;
+
+  const IncomingCallScreen({
+    super.key,
+    required this.callID,
+    required this.isVideoCall,
+    required this.callerId,
+    required this.callerName,
+    required this.callerEmail,
+    required this.chatId,
+    required this.callDocId,
+  });
+
+  @override
+  State<IncomingCallScreen> createState() => _IncomingCallScreenState();
+}
+
+class _IncomingCallScreenState extends State<IncomingCallScreen>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _pulseCtrl;
+  StreamSubscription<DocumentSnapshot>? _callSub;
+  StreamSubscription<DocumentSnapshot>? _sessionSub;
+  bool _handled = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _pulseCtrl = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 1400),
+    )..repeat(reverse: true);
+    _listenForCancel();
+  }
+
+  void _listenForCancel() {
+    _callSub = FirebaseFirestore.instance
+        .collection('calls')
+        .doc(widget.callDocId)
+        .snapshots()
+        .listen((snap) {
+      if (_handled || !mounted) return;
+      final data = snap.data();
+      if (!snap.exists || data == null) {
+        _closeBecauseEnded();
+        return;
+      }
+      final docCallId = (data['callId'] ?? '').toString();
+      final status = (data['status'] ?? '').toString();
+      if (docCallId != widget.callID || status != 'ringing') {
+        _closeBecauseEnded();
+      }
+    });
+
+    _sessionSub = FirebaseFirestore.instance
+        .collection('call_sessions')
+        .doc(widget.callID)
+        .snapshots()
+        .listen((snap) {
+      if (_handled || !mounted || !snap.exists) return;
+      final status = (snap.data()?['status'] ?? '').toString();
+      if (status == 'ended' ||
+          status == 'declined' ||
+          status == 'rejected' ||
+          status == 'cancelled') {
+        _closeBecauseEnded();
+      }
+    });
+  }
+
+  void _closeBecauseEnded() {
+    if (_handled) return;
+    _handled = true;
+    NotificationAndPresenceService.stopNativeCallRingtone();
+    NotificationAndPresenceService.clearCallNotifications();
+    if (mounted && Navigator.of(context).canPop()) {
+      Navigator.of(context).pop();
+    }
+  }
+
+  Future<void> _acceptCall() async {
+    if (_handled) return;
+    _handled = true;
+    HapticFeedback.mediumImpact();
+    NotificationAndPresenceService.stopNativeCallRingtone();
+    await NotificationAndPresenceService.clearCallNotifications();
+
+    await FirebaseFirestore.instance
+        .collection('calls')
+        .doc(widget.callDocId)
+        .set({
+      'callId': widget.callID,
+      'status': 'accepted',
+    }, SetOptions(merge: true));
+
+    await CallLogHelper.markConnected(widget.callID);
+
+    if (!mounted) return;
+    Navigator.of(context).pushReplacement(
+      MaterialPageRoute(
+        builder: (_) => CallScreen(
+          callID: widget.callID,
+          isVideoCall: widget.isVideoCall,
+          callDocId: widget.callDocId,
+          chatId: widget.chatId.isNotEmpty ? widget.chatId : null,
+          otherUserId: widget.callerId.isNotEmpty ? widget.callerId : null,
+          otherUserName: widget.callerName,
+          otherUserEmail: widget.callerEmail,
+          isCaller: false,
+        ),
+      ),
+    );
+  }
+
+  Future<void> _declineCall() async {
+    if (_handled) return;
+    _handled = true;
+    HapticFeedback.mediumImpact();
+    NotificationAndPresenceService.stopNativeCallRingtone();
+    await NotificationAndPresenceService.clearCallNotifications();
+
+    final currentUser = FirebaseAuth.instance.currentUser;
+    await FirebaseFirestore.instance
+        .collection('calls')
+        .doc(widget.callDocId)
+        .set({
+      'callId': widget.callID,
+      'status': 'declined',
+    }, SetOptions(merge: true));
+
+    CallLogHelper.finalizeCall(
+      callId: widget.callID,
+      isVideo: widget.isVideoCall,
+      forceMissed: true,
+      fallbackChatId: widget.chatId,
+      fallbackCallerId: widget.callerId,
+      fallbackCallerName: widget.callerName,
+      fallbackCallerEmail: widget.callerEmail,
+      fallbackReceiverId: currentUser?.uid ?? widget.callDocId,
+      fallbackReceiverName:
+          currentUser?.displayName ?? currentUser?.email ?? 'User',
+      fallbackReceiverEmail: currentUser?.email ?? '',
+    );
+
+    if (mounted && Navigator.of(context).canPop()) {
+      Navigator.of(context).pop();
+    }
+  }
+
+  @override
+  void dispose() {
+    _pulseCtrl.dispose();
+    _callSub?.cancel();
+    _sessionSub?.cancel();
+    super.dispose();
+  }
+
+  Widget _buildCallerAvatar() {
+    final initial = widget.callerName.isNotEmpty
+        ? widget.callerName[0].toUpperCase()
+        : 'U';
+
+    if (widget.callerId.isEmpty) {
+      return CircleAvatar(
+        radius: 62,
+        backgroundColor: Colors.white24,
+        child: Text(
+          initial,
+          style: const TextStyle(
+              fontSize: 46, color: Colors.white, fontWeight: FontWeight.bold),
+        ),
+      );
+    }
+
+    return StreamBuilder<DocumentSnapshot>(
+      stream: FirebaseFirestore.instance
+          .collection('users')
+          .doc(widget.callerId)
+          .snapshots(),
+      builder: (context, snap) {
+        final data = snap.data?.data() as Map<String, dynamic>?;
+        final photoUrl =
+            (data?['photoUrl'] ?? data?['profilePic'] ?? '').toString().trim();
+
+        ImageProvider? img;
+        if (photoUrl.startsWith('http')) {
+          img = NetworkImage(photoUrl);
+        } else if (photoUrl.startsWith('data:image')) {
+          try {
+            img = MemoryImage(base64Decode(photoUrl.split(',').last));
+          } catch (_) {}
+        }
+
+        return CircleAvatar(
+          radius: 62,
+          backgroundColor: Colors.white24,
+          backgroundImage: img,
+          child: img == null
+              ? Text(
+                  initial,
+                  style: const TextStyle(
+                      fontSize: 46,
+                      color: Colors.white,
+                      fontWeight: FontWeight.bold),
+                )
+              : null,
+        );
+      },
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return PopScope(
+      canPop: false,
+      child: Scaffold(
+        body: Container(
+          width: double.infinity,
+          height: double.infinity,
+          decoration: const BoxDecoration(
+            gradient: LinearGradient(
+              colors: [Color(0xFF0A192F), Color(0xFF0F2B46), Color(0xFF07131F)],
+              begin: Alignment.topCenter,
+              end: Alignment.bottomCenter,
+            ),
+          ),
+          child: SafeArea(
+            child: Column(
+              children: [
+                const SizedBox(height: 22),
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Icon(
+                      widget.isVideoCall
+                          ? Icons.videocam_rounded
+                          : Icons.call_rounded,
+                      color: Colors.white70,
+                      size: 18,
+                    ),
+                    const SizedBox(width: 6),
+                    Text(
+                      widget.isVideoCall
+                          ? 'Universal Messenger Video Call'
+                          : 'Universal Messenger Voice Call',
+                      style: const TextStyle(
+                        color: Colors.white70,
+                        fontSize: 13,
+                        letterSpacing: 0.4,
+                      ),
+                    ),
+                  ],
+                ),
+                const Spacer(flex: 2),
+                AnimatedBuilder(
+                  animation: _pulseCtrl,
+                  builder: (_, child) {
+                    final scale = 1.0 + (_pulseCtrl.value * 0.14);
+                    final alpha = 0.28 - (_pulseCtrl.value * 0.2);
+                    return Stack(
+                      alignment: Alignment.center,
+                      children: [
+                        Transform.scale(
+                          scale: scale,
+                          child: Container(
+                            width: 152,
+                            height: 152,
+                            decoration: BoxDecoration(
+                              shape: BoxShape.circle,
+                              color: Colors.lightBlueAccent.withOpacity(alpha),
+                            ),
+                          ),
+                        ),
+                        child!,
+                      ],
+                    );
+                  },
+                  child: _buildCallerAvatar(),
+                ),
+                const SizedBox(height: 24),
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 24),
+                  child: Text(
+                    widget.callerName,
+                    textAlign: TextAlign.center,
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 28,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 8),
+                Text(
+                  widget.isVideoCall
+                      ? 'ইনকামিং ভিডিও কল...'
+                      : 'ইনকামিং অডিও কল...',
+                  style: const TextStyle(
+                    color: Colors.white70,
+                    fontSize: 16,
+                  ),
+                ),
+                const Spacer(flex: 3),
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 42),
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          GestureDetector(
+                            onTap: _declineCall,
+                            child: Container(
+                              width: 72,
+                              height: 72,
+                              decoration: const BoxDecoration(
+                                color: Color(0xFFE53935),
+                                shape: BoxShape.circle,
+                                boxShadow: [
+                                  BoxShadow(
+                                    color: Colors.black38,
+                                    blurRadius: 12,
+                                    offset: Offset(0, 4),
+                                  ),
+                                ],
+                              ),
+                              child: const Icon(
+                                Icons.call_end_rounded,
+                                color: Colors.white,
+                                size: 34,
+                              ),
+                            ),
+                          ),
+                          const SizedBox(height: 10),
+                          const Text(
+                            'Decline',
+                            style: TextStyle(
+                                color: Colors.white,
+                                fontSize: 14,
+                                fontWeight: FontWeight.w500),
+                          ),
+                        ],
+                      ),
+                      Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          GestureDetector(
+                            onTap: _acceptCall,
+                            child: Container(
+                              width: 72,
+                              height: 72,
+                              decoration: const BoxDecoration(
+                                color: Color(0xFF2E9E47),
+                                shape: BoxShape.circle,
+                                boxShadow: [
+                                  BoxShadow(
+                                    color: Colors.black38,
+                                    blurRadius: 12,
+                                    offset: Offset(0, 4),
+                                  ),
+                                ],
+                              ),
+                              child: Icon(
+                                widget.isVideoCall
+                                    ? Icons.videocam_rounded
+                                    : Icons.call_rounded,
+                                color: Colors.white,
+                                size: 34,
+                              ),
+                            ),
+                          ),
+                          const SizedBox(height: 10),
+                          const Text(
+                            'Accept',
+                            style: TextStyle(
+                                color: Colors.white,
+                                fontSize: 14,
+                                fontWeight: FontWeight.w500),
+                          ),
+                        ],
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(height: 44),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 class CallScreen extends StatefulWidget {
   static const int zegoAppID = 1555115721;
   static const String zegoAppSign =
@@ -289,7 +693,6 @@ class _CallScreenState extends State<CallScreen> {
   StreamSubscription<DocumentSnapshot>? _callDocSub;
   StreamSubscription<DocumentSnapshot>? _sessionDocSub;
   late final ValueNotifier<bool> _screenShareNotifier;
-  Timer? _audioTuneTimer;
 
   bool _allowPop = false;
   bool _cleanedUp = false;
@@ -311,6 +714,14 @@ class _CallScreenState extends State<CallScreen> {
   @override
   void initState() {
     super.initState();
+    NotificationAndPresenceService.isInActiveCall = true;
+    NotificationAndPresenceService.stopNativeCallRingtone();
+    NotificationAndPresenceService.showOngoingCallNotification(
+      isVideo: widget.isVideoCall,
+      otherName: widget.otherUserName ?? 'Call',
+      isScreenSharing: false,
+    );
+
     if (!widget.isCaller) {
       _connectedAt = DateTime.now();
       CallLogHelper.markConnected(widget.callID);
@@ -320,18 +731,10 @@ class _CallScreenState extends State<CallScreen> {
     _setNativeCallState(true);
     _stopNativeRingtone();
     _listenForRemoteHangUp();
-
-    // Apply clear voice DSP + hardware acceleration after Zego engine boots
-    _audioTuneTimer = Timer(const Duration(milliseconds: 1200), () {
-      if (mounted && !_cleanedUp) {
-        _applyClearAudioAndHardwareSettings();
-      }
-    });
   }
 
   @override
   void dispose() {
-    _audioTuneTimer?.cancel();
     _screenShareNotifier.removeListener(_onScreenShareStateChanged);
     _callDocSub?.cancel();
     _sessionDocSub?.cancel();
@@ -342,46 +745,28 @@ class _CallScreenState extends State<CallScreen> {
     super.dispose();
   }
 
-  Future<void> _applyClearAudioAndHardwareSettings() async {
-    try {
-      final engine = ZegoExpressEngine.instance;
-      // Hardware acceleration keeps video & screen share real-time and lag-free
-      await engine.enableHardwareEncoder(true);
-      await engine.enableHardwareDecoder(true);
-      // Aggressive echo cancellation + noise suppression + auto gain for clear soft speech
-      await engine.enableAEC(true);
-      await engine.enableHeadphoneAEC(true);
-      await engine.setAECMode(ZegoAECMode.Aggressive);
-      await engine.enableANS(true);
-      await engine.setANSMode(ZegoANSMode.Aggressive);
-      await engine.enableAGC(true);
-      await engine.setCaptureVolume(155);
-    } catch (_) {}
-  }
-
-  Future<void> _optimizeScreenShareStream() async {
-    try {
-      final engine = ZegoExpressEngine.instance;
-      await engine.enableHardwareEncoder(true);
-      await engine.enableHardwareDecoder(true);
-      // 540P @ 20fps / 1000kbps gives crisp, low-latency real-time screen share on mobile data
-      final auxConfig = ZegoVideoConfig.preset(ZegoVideoConfigPreset.Preset540P);
-      auxConfig.fps = 20;
-      auxConfig.bitrate = 1000;
-      await engine.setVideoConfig(auxConfig, channel: ZegoPublishChannel.Aux);
-    } catch (_) {}
-  }
-
   void _onScreenShareStateChanged() {
     final sharing = _screenShareNotifier.value;
     _setNativeScreenSharing(sharing);
-    if (sharing) {
-      Future.delayed(const Duration(milliseconds: 500), () {
-        if (mounted && _screenShareNotifier.value && !_cleanedUp) {
-          _optimizeScreenShareStream();
-        }
-      });
+
+    // Pause local camera while screen sharing to free upload bandwidth & eliminate lag
+    try {
+      if (sharing) {
+        ZegoUIKit().turnCameraOn(false);
+      } else if (widget.isVideoCall && !_cleanedUp) {
+        ZegoUIKit().turnCameraOn(true);
+      }
+    } catch (_) {}
+
+    if (!_cleanedUp) {
+      NotificationAndPresenceService.showOngoingCallNotification(
+        isVideo: widget.isVideoCall,
+        otherName: widget.otherUserName ?? 'Call',
+        isScreenSharing: sharing,
+      );
     }
+
+    if (mounted) setState(() {});
   }
 
   Future<void> _setNativeCallState(bool active) async {
@@ -399,6 +784,12 @@ class _CallScreenState extends State<CallScreen> {
   Future<void> _stopNativeRingtone() async {
     try {
       await _nativeChannel.invokeMethod('stopRingtone');
+    } catch (_) {}
+  }
+
+  Future<void> _moveToBackgroundForScreenShare() async {
+    try {
+      await _nativeChannel.invokeMethod('moveToBackground');
     } catch (_) {}
   }
 
@@ -423,19 +814,12 @@ class _CallScreenState extends State<CallScreen> {
       await _nativeChannel.invokeMethod('setScreenSharing', {'active': true});
     } catch (_) {}
 
-    await _optimizeScreenShareStream();
-
     try {
+      ZegoUIKit().turnCameraOn(false);
       ZegoUIKit().startSharingScreen();
     } catch (_) {
       await _setNativeScreenSharing(false);
     }
-
-    Future.delayed(const Duration(milliseconds: 900), () {
-      if (mounted && _screenShareNotifier.value && !_cleanedUp) {
-        _optimizeScreenShareStream();
-      }
-    });
 
     Future.delayed(const Duration(seconds: 4), () {
       if (mounted && !_screenShareNotifier.value) {
@@ -541,6 +925,8 @@ class _CallScreenState extends State<CallScreen> {
     if (_remoteEnded) return;
     _remoteEnded = true;
     _cleanedUp = true;
+    NotificationAndPresenceService.isInActiveCall = false;
+    NotificationAndPresenceService.clearCallNotifications();
     _stopScreenSharingImmediately();
     _setNativeCallState(false);
     _stopNativeRingtone();
@@ -564,6 +950,8 @@ class _CallScreenState extends State<CallScreen> {
   void _cleanupCallStatus() {
     if (_cleanedUp) return;
     _cleanedUp = true;
+    NotificationAndPresenceService.isInActiveCall = false;
+    NotificationAndPresenceService.clearCallNotifications();
     _stopScreenSharingImmediately();
     _setNativeCallState(false);
     _stopNativeRingtone();
@@ -605,6 +993,10 @@ class _CallScreenState extends State<CallScreen> {
 
   void _minimizeCall() {
     if (_allowPop || _remoteEnded) return;
+    if (_screenShareNotifier.value) {
+      _moveToBackgroundForScreenShare();
+      return;
+    }
     _isMinimizing = true;
     setState(() => _allowPop = true);
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -637,6 +1029,113 @@ class _CallScreenState extends State<CallScreen> {
           ),
         );
       },
+    );
+  }
+
+  // Messenger-style clean screen-sharing overlay — prevents infinity mirror & cuts encoder lag
+  Widget _buildMessengerScreenSharingOverlay() {
+    return Container(
+      width: double.infinity,
+      height: double.infinity,
+      color: const Color(0xFF0E141B),
+      padding: const EdgeInsets.symmetric(horizontal: 28),
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Container(
+            width: 92,
+            height: 92,
+            decoration: BoxDecoration(
+              color: const Color(0xFF1A73E8).withOpacity(0.18),
+              shape: BoxShape.circle,
+            ),
+            child: const Icon(
+              Icons.screen_share_rounded,
+              color: Color(0xFF42A5F5),
+              size: 46,
+            ),
+          ),
+          const SizedBox(height: 22),
+          const Text(
+            'You\'re sharing your screen',
+            textAlign: TextAlign.center,
+            style: TextStyle(
+              color: Colors.white,
+              fontSize: 22,
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+          const SizedBox(height: 8),
+          Text(
+            '${widget.otherUserName ?? 'অপর প্রান্তের ব্যক্তি'} এখন রিয়েল-টাইমে আপনার স্ক্রিন দেখতে পাচ্ছেন।\nযেকোনো অ্যাপ ওপেন করে দেখাতে নিচের বাটনে চাপুন।',
+            textAlign: TextAlign.center,
+            style: const TextStyle(color: Colors.white70, fontSize: 13.5),
+          ),
+          const SizedBox(height: 28),
+          SizedBox(
+            width: double.infinity,
+            height: 48,
+            child: ElevatedButton.icon(
+              style: ElevatedButton.styleFrom(
+                backgroundColor: const Color(0xFF1A73E8),
+                foregroundColor: Colors.white,
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(24),
+                ),
+              ),
+              icon: const Icon(Icons.open_in_new_rounded),
+              label: const Text(
+                'অন্য অ্যাপ খুলুন (হোম)',
+                style: TextStyle(fontSize: 15, fontWeight: FontWeight.bold),
+              ),
+              onPressed: _moveToBackgroundForScreenShare,
+            ),
+          ),
+          const SizedBox(height: 12),
+          SizedBox(
+            width: double.infinity,
+            height: 48,
+            child: ElevatedButton.icon(
+              style: ElevatedButton.styleFrom(
+                backgroundColor: const Color(0xFFE53935),
+                foregroundColor: Colors.white,
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(24),
+                ),
+              ),
+              icon: const Icon(Icons.stop_screen_share_rounded),
+              label: const Text(
+                'Stop Sharing',
+                style: TextStyle(fontSize: 15, fontWeight: FontWeight.bold),
+              ),
+              onPressed: _stopScreenSharingImmediately,
+            ),
+          ),
+          const SizedBox(height: 16),
+          TextButton.icon(
+            icon: const Icon(Icons.call_end_rounded, color: Colors.redAccent),
+            label: const Text(
+              'কল কেটে দিন',
+              style: TextStyle(color: Colors.redAccent),
+            ),
+            onPressed: () {
+              _isMinimizing = false;
+              _stopScreenSharingImmediately();
+              _cleanupCallStatus();
+              if (mounted) setState(() => _allowPop = true);
+              WidgetsBinding.instance.addPostFrameCallback((_) async {
+                if (!mounted) return;
+                try {
+                  await ZegoUIKitPrebuiltCallController().hangUp(context);
+                } catch (_) {}
+                if (mounted && Navigator.of(context).canPop()) {
+                  Navigator.of(context).pop();
+                }
+              });
+            },
+          ),
+        ],
+      ),
     );
   }
 
@@ -696,44 +1195,54 @@ class _CallScreenState extends State<CallScreen> {
         }
       },
       child: SafeArea(
-        child: ZegoUIKitPrebuiltCall(
-          appID: CallScreen.zegoAppID,
-          appSign: CallScreen.zegoAppSign,
-          userID: currentUser.uid,
-          userName: userName,
-          callID: widget.callID,
-          config: config,
-          events: ZegoUIKitPrebuiltCallEvents(
-            onCallEnd: (event, defaultAction) {
-              _isMinimizing = false;
-              _stopScreenSharingImmediately();
-              _cleanupCallStatus();
-              if (mounted) {
-                setState(() => _allowPop = true);
-              }
-              WidgetsBinding.instance.addPostFrameCallback((_) {
-                defaultAction.call();
-                _stopScreenSharingImmediately();
-              });
-            },
-            user: ZegoCallUserEvents(
-              onEnter: (user) {
-                if (user.id != currentUser.uid && _connectedAt == null) {
-                  _connectedAt = DateTime.now();
-                  CallLogHelper.markConnected(widget.callID);
-                  _applyClearAudioAndHardwareSettings();
-                }
-              },
-              onLeave: (user) {
-                if (user.id != currentUser.uid) {
+        child: Stack(
+          children: [
+            ZegoUIKitPrebuiltCall(
+              appID: CallScreen.zegoAppID,
+              appSign: CallScreen.zegoAppSign,
+              userID: currentUser.uid,
+              userName: userName,
+              callID: widget.callID,
+              config: config,
+              events: ZegoUIKitPrebuiltCallEvents(
+                onCallEnd: (event, defaultAction) {
                   _isMinimizing = false;
                   _stopScreenSharingImmediately();
                   _cleanupCallStatus();
-                  _endCallFromRemote();
-                }
+                  if (mounted) {
+                    setState(() => _allowPop = true);
+                  }
+                  WidgetsBinding.instance.addPostFrameCallback((_) {
+                    defaultAction.call();
+                    _stopScreenSharingImmediately();
+                  });
+                },
+                user: ZegoCallUserEvents(
+                  onEnter: (user) {
+                    if (user.id != currentUser.uid && _connectedAt == null) {
+                      _connectedAt = DateTime.now();
+                      CallLogHelper.markConnected(widget.callID);
+                    }
+                  },
+                  onLeave: (user) {
+                    if (user.id != currentUser.uid) {
+                      _isMinimizing = false;
+                      _stopScreenSharingImmediately();
+                      _cleanupCallStatus();
+                      _endCallFromRemote();
+                    }
+                  },
+                ),
+              ),
+            ),
+            ValueListenableBuilder<bool>(
+              valueListenable: _screenShareNotifier,
+              builder: (_, isSharing, __) {
+                if (!isSharing) return const SizedBox.shrink();
+                return _buildMessengerScreenSharingOverlay();
               },
             ),
-          ),
+          ],
         ),
       ),
     );
