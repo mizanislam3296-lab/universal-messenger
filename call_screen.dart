@@ -76,7 +76,6 @@ class CallCleanupCoordinator {
     ensureRegistered();
     NotificationAndPresenceService.isInActiveCall = false;
 
-    // Guarantee camera, microphone, screen share & old Zego room are OFF on reopen
     await releaseAllHardwareAndRoom();
 
     try {
@@ -84,7 +83,6 @@ class CallCleanupCoordinator {
       await _nativeChannel.invokeMethod('setCallAudioMode', {'active': false});
     } catch (_) {}
 
-    // Finalize any call that was killed from Recents on the previous run
     try {
       final dynamic killed =
           await _nativeChannel.invokeMethod('consumeKilledCallState');
@@ -687,8 +685,8 @@ class _IncomingCallScreenState extends State<IncomingCallScreen>
                 const SizedBox(height: 8),
                 Text(
                   widget.isVideoCall
-                      ? 'ইনকামিং ভিডিও কল...'
-                      : 'ইনকামিং অডিও কল...',
+                      ? 'Incoming video call...'
+                      : 'Incoming voice call...',
                   style: const TextStyle(
                     color: Colors.white70,
                     fontSize: 16,
@@ -832,6 +830,7 @@ class _CallScreenState extends State<CallScreen> with WidgetsBindingObserver {
   bool _remoteEnded = false;
   bool _isMinimizing = false;
   bool _callDocExisted = false;
+  bool _wasScreenSharing = false;
   DateTime? _connectedAt;
 
   String? get _effectiveCallDocId =>
@@ -898,22 +897,12 @@ class _CallScreenState extends State<CallScreen> with WidgetsBindingObserver {
 
   void _onScreenShareStateChanged() {
     final sharing = _screenShareNotifier.value;
-    _setNativeScreenSharing(sharing);
-
-    // Wait 600ms after MediaProjection starts before turning off local camera
-    // so screen capture starts smoothly and remote user ONLY sees the shared screen
     if (sharing) {
-      Future.delayed(const Duration(milliseconds: 600), () {
-        if (mounted && _screenShareNotifier.value && !_cleanedUp) {
-          try {
-            ZegoUIKit().turnCameraOn(false);
-          } catch (_) {}
-        }
-      });
-    } else if (widget.isVideoCall && !_cleanedUp) {
-      try {
-        ZegoUIKit().turnCameraOn(true);
-      } catch (_) {}
+      _wasScreenSharing = true;
+      _setNativeScreenSharing(true);
+    } else if (_wasScreenSharing) {
+      _wasScreenSharing = false;
+      _setNativeScreenSharing(false);
     }
 
     if (!_cleanedUp) {
@@ -956,6 +945,7 @@ class _CallScreenState extends State<CallScreen> with WidgetsBindingObserver {
   }
 
   void _stopScreenSharingImmediately() {
+    _wasScreenSharing = false;
     try {
       ZegoUIKit().stopSharingScreen();
     } catch (_) {}
@@ -965,8 +955,7 @@ class _CallScreenState extends State<CallScreen> with WidgetsBindingObserver {
   }
 
   Future<void> _toggleScreenSharing() async {
-    final currentlySharing = _screenShareNotifier.value;
-    if (currentlySharing) {
+    if (_screenShareNotifier.value) {
       _stopScreenSharingImmediately();
       return;
     }
@@ -978,15 +967,7 @@ class _CallScreenState extends State<CallScreen> with WidgetsBindingObserver {
 
     try {
       ZegoUIKit().startSharingScreen();
-    } catch (_) {
-      await _setNativeScreenSharing(false);
-    }
-
-    Future.delayed(const Duration(seconds: 5), () {
-      if (mounted && !_screenShareNotifier.value) {
-        _setNativeScreenSharing(false);
-      }
-    });
+    } catch (_) {}
   }
 
   void _listenForRemoteHangUp() {
@@ -1193,6 +1174,7 @@ class _CallScreenState extends State<CallScreen> with WidgetsBindingObserver {
     );
   }
 
+  // Clean English-only Messenger-style screen sharing view
   Widget _buildMessengerScreenSharingOverlay() {
     return Container(
       width: double.infinity,
@@ -1226,10 +1208,10 @@ class _CallScreenState extends State<CallScreen> with WidgetsBindingObserver {
             ),
           ),
           const SizedBox(height: 8),
-          Text(
-            '${widget.otherUserName ?? 'প্রতিপক্ষ'} এখন শুধু আপনার শেয়ার করা লাইভ স্ক্রিনটিই দেখতে পাচ্ছেন।\nঅন্য অ্যাপ দেখাতে নিচের বাটনে চাপুন।',
+          const Text(
+            'Everyone in this call can see your screen.',
             textAlign: TextAlign.center,
-            style: const TextStyle(color: Colors.white70, fontSize: 13.5),
+            style: TextStyle(color: Colors.white70, fontSize: 14),
           ),
           const SizedBox(height: 28),
           SizedBox(
@@ -1245,7 +1227,7 @@ class _CallScreenState extends State<CallScreen> with WidgetsBindingObserver {
               ),
               icon: const Icon(Icons.open_in_new_rounded),
               label: const Text(
-                'অন্য অ্যাপ খুলুন (হোম)',
+                'Open another app',
                 style: TextStyle(fontSize: 15, fontWeight: FontWeight.bold),
               ),
               onPressed: _moveToBackgroundForScreenShare,
@@ -1265,7 +1247,7 @@ class _CallScreenState extends State<CallScreen> with WidgetsBindingObserver {
               ),
               icon: const Icon(Icons.stop_screen_share_rounded),
               label: const Text(
-                'Stop Sharing',
+                'Stop sharing',
                 style: TextStyle(fontSize: 15, fontWeight: FontWeight.bold),
               ),
               onPressed: _stopScreenSharingImmediately,
@@ -1275,7 +1257,7 @@ class _CallScreenState extends State<CallScreen> with WidgetsBindingObserver {
           TextButton.icon(
             icon: const Icon(Icons.call_end_rounded, color: Colors.redAccent),
             label: const Text(
-              'কল কেটে দিন',
+              'End call',
               style: TextStyle(color: Colors.redAccent),
             ),
             onPressed: () async {
