@@ -6,11 +6,152 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:dio/dio.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:googleapis_auth/auth_io.dart';
+
+@pragma('vm:entry-point')
+Future<void> universalFcmBackgroundHandler(RemoteMessage message) async {
+  try {
+    await Firebase.initializeApp();
+  } catch (_) {}
+
+  final data = message.data;
+  final type = (data['type'] ?? '').toString();
+  if (type.isEmpty) return;
+
+  final plugin = FlutterLocalNotificationsPlugin();
+  await plugin.initialize(
+    const InitializationSettings(
+      android: AndroidInitializationSettings('@mipmap/ic_launcher'),
+    ),
+  );
+
+  final androidPlugin = plugin.resolvePlatformSpecificImplementation<
+      AndroidFlutterLocalNotificationsPlugin>();
+  if (androidPlugin != null) {
+    await androidPlugin.createNotificationChannel(AndroidNotificationChannel(
+      'call_ch_master_v1',
+      'Incoming Calls',
+      importance: Importance.max,
+      playSound: true,
+      sound: const UriAndroidNotificationSound('content://settings/system/ringtone'),
+      audioAttributesUsage: AudioAttributesUsage.notificationRingtone,
+      enableVibration: true,
+      vibrationPattern: Int64List.fromList([0, 800, 400, 800]),
+      enableLights: true,
+      showBadge: true,
+    ));
+    await androidPlugin.createNotificationChannel(AndroidNotificationChannel(
+      'msg_ch_master_v1',
+      'Chat Messages',
+      importance: Importance.max,
+      playSound: true,
+      sound: const UriAndroidNotificationSound('content://settings/system/notification_sound'),
+      audioAttributesUsage: AudioAttributesUsage.notification,
+      enableVibration: true,
+      vibrationPattern: Int64List.fromList([0, 250, 150, 250]),
+      enableLights: true,
+      showBadge: true,
+    ));
+  }
+
+  if (type == 'call') {
+    final callId = (data['callId'] ?? '').toString();
+    final callerName = (data['callerName'] ?? data['title'] ?? 'Incoming Call').toString();
+    final isVideo = data['isVideo'] == 'true' || data['isVideo'] == true;
+    final title = (data['title'] ?? (isVideo ? 'Incoming Video Call' : 'Incoming Voice Call')).toString();
+    final body = (data['body'] ?? '$callerName is calling...').toString();
+
+    final payload = <String, dynamic>{
+      'type': 'call',
+      'callId': callId,
+      'chatId': (data['chatId'] ?? '').toString(),
+      'callerId': (data['callerId'] ?? '').toString(),
+      'callerName': callerName,
+      'callerEmail': (data['callerEmail'] ?? '').toString(),
+      'isVideo': isVideo,
+    };
+
+    await plugin.cancel(
+      NotificationAndPresenceService.incomingCallNotificationId,
+      tag: NotificationAndPresenceService.incomingCallNotificationTag,
+    );
+    await plugin.cancel(NotificationAndPresenceService.incomingCallNotificationId);
+
+    await plugin.show(
+      NotificationAndPresenceService.incomingCallNotificationId,
+      title,
+      body,
+      NotificationDetails(
+        android: AndroidNotificationDetails(
+          'call_ch_master_v1',
+          'Incoming Calls',
+          tag: NotificationAndPresenceService.incomingCallNotificationTag,
+          importance: Importance.max,
+          priority: Priority.max,
+          category: AndroidNotificationCategory.call,
+          fullScreenIntent: true,
+          ongoing: true,
+          autoCancel: false,
+          onlyAlertOnce: false,
+          playSound: true,
+          sound: const UriAndroidNotificationSound('content://settings/system/ringtone'),
+          audioAttributesUsage: AudioAttributesUsage.notificationRingtone,
+          enableVibration: true,
+          vibrationPattern: Int64List.fromList([0, 800, 400, 800]),
+          additionalFlags: Int32List.fromList([4]),
+          visibility: NotificationVisibility.public,
+          actions: const [
+            AndroidNotificationAction(
+              'decline',
+              'Decline',
+              titleColor: Color(0xFFFF5252),
+              showsUserInterface: true,
+              cancelNotification: true,
+            ),
+            AndroidNotificationAction(
+              'accept',
+              'Accept',
+              titleColor: Color(0xFF4CAF50),
+              showsUserInterface: true,
+              cancelNotification: true,
+            ),
+          ],
+        ),
+      ),
+      payload: jsonEncode(payload),
+    );
+  } else if (type == 'message' && message.notification == null) {
+    final title = (data['title'] ?? 'New Message').toString();
+    final body = (data['body'] ?? 'You have a new message').toString();
+    final chatId = (data['chatId'] ?? 'msg').toString();
+
+    await plugin.show(
+      chatId.hashCode,
+      title,
+      body,
+      NotificationDetails(
+        android: AndroidNotificationDetails(
+          'msg_ch_master_v1',
+          'Chat Messages',
+          importance: Importance.max,
+          priority: Priority.max,
+          category: AndroidNotificationCategory.message,
+          playSound: true,
+          sound: const UriAndroidNotificationSound('content://settings/system/notification_sound'),
+          audioAttributesUsage: AudioAttributesUsage.notification,
+          enableVibration: true,
+          vibrationPattern: Int64List.fromList([0, 250, 150, 250]),
+          visibility: NotificationVisibility.public,
+        ),
+      ),
+    );
+  }
+}
 
 class FcmPushService {
   static const String _fcmSaB64 = String.fromEnvironment('FCM_SA_B64');
@@ -93,45 +234,56 @@ class FcmPushService {
       final prefs = (data['notifPrefs'] as Map<String, dynamic>?) ?? {};
       if (prefs['enabled'] == false) return;
 
-      final channelId = isCall ? 'fcm_call_all_v1' : 'fcm_msg_all_v1';
-      // Fixed tag for calls guarantees Android replaces previous call notification (never duplicates)
       final tagId = isCall
           ? NotificationAndPresenceService.incomingCallNotificationTag
           : (chatId ?? 'msg');
 
+      final messagePayload = <String, dynamic>{
+        'token': targetToken,
+        'data': {
+          'type': isCall ? 'call' : 'message',
+          'title': title,
+          'body': body,
+          'chatId': chatId ?? '',
+          'callId': callId ?? '',
+          'callerId': callerId ?? '',
+          'callerName': callerName ?? '',
+          'callerEmail': callerEmail ?? '',
+          'isVideo': isVideo ? 'true' : 'false',
+        },
+      };
+
+      if (isCall) {
+        // High-priority data-only push wakes universalFcmBackgroundHandler even when killed,
+        // triggering fullScreenIntent + Accept/Decline + ringtone with a single notification.
+        messagePayload['android'] = {
+          'priority': 'HIGH',
+          'ttl': '45s',
+        };
+      } else {
+        // Clean notification + data payload so Google Play Services delivers messages even when killed.
+        messagePayload['notification'] = {
+          'title': title,
+          'body': body,
+        };
+        messagePayload['android'] = {
+          'priority': 'HIGH',
+          'ttl': '86400s',
+          'notification': {
+            'channel_id': 'fcm_msg_all_v1',
+            'default_sound': true,
+            'default_vibrate_timings': true,
+            'notification_priority': 'PRIORITY_MAX',
+            'visibility': 'PUBLIC',
+            'tag': tagId,
+          },
+        };
+      }
+
       await Dio().post(
         'https://fcm.googleapis.com/v1/projects/$_projectId/messages:send',
         options: Options(headers: {'Authorization': 'Bearer $accessToken', 'Content-Type': 'application/json'}),
-        data: {
-          'message': {
-            'token': targetToken,
-            'notification': {'title': title, 'body': body},
-            'android': {
-              'priority': 'HIGH',
-              'ttl': isCall ? '45s' : '86400s',
-              'notification': {
-                'channel_id': channelId,
-                'sound': 'default',
-                'default_sound': true,
-                'default_vibrate_timings': true,
-                'notification_priority': 'PRIORITY_MAX',
-                'visibility': 'PUBLIC',
-                'tag': tagId,
-              },
-            },
-            'data': {
-              'type': isCall ? 'call' : 'message',
-              'title': title,
-              'body': body,
-              'chatId': chatId ?? '',
-              'callId': callId ?? '',
-              'callerId': callerId ?? '',
-              'callerName': callerName ?? '',
-              'callerEmail': callerEmail ?? '',
-              'isVideo': isVideo ? 'true' : 'false',
-            },
-          },
-        },
+        data: {'message': messagePayload},
       );
     } catch (_) {}
   }
@@ -449,9 +601,9 @@ class NotificationAndPresenceService {
     if (!AppSettingsController.notificationsEnabled.value) return;
     try {
       final title = isScreenSharing
-          ? 'স্ক্রিন শেয়ার চলছে'
-          : (isVideo ? 'ভিডিও কল চলছে' : 'অডিও কল চলছে');
-      final body = '$otherName • ট্যাপ করে কলের ভেতর ফিরে যান';
+          ? 'Screen sharing active'
+          : (isVideo ? 'Video call in progress' : 'Voice call in progress');
+      final body = '$otherName • Tap to return to call';
       await _notifications.show(
         incomingCallNotificationId,
         title,
@@ -752,7 +904,6 @@ class NotificationAndPresenceService {
         'isVideo': isVideo,
       };
 
-      // Clear any previous/duplicate FCM call notifications so ONLY 1 ever shows
       await clearCallNotifications();
 
       if (AppSettingsController.notificationsEnabled.value) {
@@ -761,8 +912,8 @@ class NotificationAndPresenceService {
 
         await _notifications.show(
           incomingCallNotificationId,
-          isVideo ? 'ইনকামিং ভিডিও কল' : 'ইনকামিং অডিও কল',
-          '$callerName আপনাকে কল দিচ্ছেন...',
+          isVideo ? 'Incoming Video Call' : 'Incoming Voice Call',
+          '$callerName is calling...',
           NotificationDetails(
             android: AndroidNotificationDetails(
               'call_ch_master_v1',
@@ -804,7 +955,6 @@ class NotificationAndPresenceService {
         );
       }
 
-      // Immediately open full-screen Messenger-style incoming call UI
       if (onIncomingCallTrigger != null) {
         onIncomingCallTrigger!(callPayload, autoAccept: false);
       } else {
@@ -849,8 +999,8 @@ class NotificationAndPresenceService {
         final participants = List<String>.from(data['participants'] ?? []);
         final otherId = participants.firstWhere((id) => id != uid, orElse: () => '');
         final usersMap = (data['users'] as Map<String, dynamic>?) ?? {};
-        final senderName = ((usersMap[otherId] as Map<String, dynamic>?)?['name'] ?? 'নতুন মেসেজ').toString();
-        final lastMsg = (data['lastMessage'] ?? 'নতুন মেসেজ এসেছে').toString();
+        final senderName = ((usersMap[otherId] as Map<String, dynamic>?)?['name'] ?? 'New Message').toString();
+        final lastMsg = (data['lastMessage'] ?? 'New message received').toString();
 
         await playNativeMessageSound();
         HapticFeedback.mediumImpact();
@@ -1384,7 +1534,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                           subtitle: Text(
                             isNotifOn
                                 ? (FcmPushService.isConfigured
-                                    ? 'Active: Lock-screen, status bar, sound & push ON'
+                                    ? 'Active: Lock-screen, status bar, sound & killed-app push ON'
                                     : 'Active: Add FCM_SERVICE_ACCOUNT in GitHub Secrets for killed-app push')
                                 : 'Off: All notifications & sounds muted',
                           ),
