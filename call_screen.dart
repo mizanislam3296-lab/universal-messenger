@@ -5,6 +5,250 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:zego_uikit_prebuilt_call/zego_uikit_prebuilt_call.dart';
 
+class CallLogHelper {
+  static String formatDuration(int totalSeconds) {
+    if (totalSeconds <= 0) return '00:00';
+    final hours = totalSeconds ~/ 3600;
+    final minutes = (totalSeconds % 3600) ~/ 60;
+    final seconds = totalSeconds % 60;
+    final mm = minutes.toString().padLeft(2, '0');
+    final ss = seconds.toString().padLeft(2, '0');
+    if (hours > 0) {
+      return '${hours.toString().padLeft(2, '0')}:$mm:$ss';
+    }
+    return '$mm:$ss';
+  }
+
+  static Future<void> startSession({
+    required String callId,
+    required String chatId,
+    required String callerId,
+    required String callerName,
+    required String callerEmail,
+    required String receiverId,
+    required String receiverName,
+    required String receiverEmail,
+    required bool isVideo,
+  }) async {
+    try {
+      await FirebaseFirestore.instance
+          .collection('call_sessions')
+          .doc(callId)
+          .set({
+        'callId': callId,
+        'chatId': chatId,
+        'callerId': callerId,
+        'callerName': callerName,
+        'callerEmail': callerEmail,
+        'receiverId': receiverId,
+        'receiverName': receiverName,
+        'receiverEmail': receiverEmail,
+        'isVideo': isVideo,
+        'status': 'ringing',
+        'logged': false,
+        'startedAt': FieldValue.serverTimestamp(),
+      }, SetOptions(merge: true));
+    } catch (_) {}
+  }
+
+  static Future<void> markConnected(String callId) async {
+    if (callId.isEmpty) return;
+    try {
+      final ref =
+          FirebaseFirestore.instance.collection('call_sessions').doc(callId);
+      await FirebaseFirestore.instance.runTransaction((tx) async {
+        final snap = await tx.get(ref);
+        final data = snap.data();
+        final alreadyConnected = data != null && data['connectedAt'] != null;
+        tx.set(
+          ref,
+          {
+            'callId': callId,
+            'status': 'accepted',
+            if (!alreadyConnected) 'connectedAt': FieldValue.serverTimestamp(),
+          },
+          SetOptions(merge: true),
+        );
+      });
+    } catch (_) {}
+  }
+
+  static Future<void> finalizeCall({
+    required String callId,
+    required bool isVideo,
+    bool forceMissed = false,
+    DateTime? localConnectedAt,
+    String? fallbackChatId,
+    String? fallbackCallerId,
+    String? fallbackCallerName,
+    String? fallbackCallerEmail,
+    String? fallbackReceiverId,
+    String? fallbackReceiverName,
+    String? fallbackReceiverEmail,
+  }) async {
+    if (callId.isEmpty) return;
+
+    final sessionRef =
+        FirebaseFirestore.instance.collection('call_sessions').doc(callId);
+
+    Map<String, dynamic>? finalPayload;
+
+    try {
+      await FirebaseFirestore.instance.runTransaction((tx) async {
+        final snap = await tx.get(sessionRef);
+        final data = snap.data() ?? <String, dynamic>{};
+
+        if (data['logged'] == true) {
+          return;
+        }
+
+        final chatId = (data['chatId'] ?? fallbackChatId ?? '').toString();
+        final callerId =
+            (data['callerId'] ?? fallbackCallerId ?? '').toString();
+        final callerName =
+            (data['callerName'] ?? fallbackCallerName ?? 'User').toString();
+        final callerEmail =
+            (data['callerEmail'] ?? fallbackCallerEmail ?? '').toString();
+        final receiverId =
+            (data['receiverId'] ?? fallbackReceiverId ?? '').toString();
+        final receiverName =
+            (data['receiverName'] ?? fallbackReceiverName ?? 'User').toString();
+        final receiverEmail =
+            (data['receiverEmail'] ?? fallbackReceiverEmail ?? '').toString();
+        final videoFlag =
+            data.containsKey('isVideo') ? (data['isVideo'] == true) : isVideo;
+
+        final connectedTs = data['connectedAt'] as Timestamp?;
+        final DateTime? connectedTime =
+            connectedTs?.toDate() ?? localConnectedAt;
+        final wasAccepted =
+            !forceMissed && (connectedTime != null || data['status'] == 'accepted');
+
+        int durationSec = 0;
+        if (wasAccepted) {
+          if (connectedTime != null) {
+            final diff = DateTime.now().difference(connectedTime).inSeconds;
+            durationSec = diff < 1 ? 1 : diff;
+          } else {
+            durationSec = 1;
+          }
+        }
+
+        final callStatus = wasAccepted ? 'completed' : 'missed';
+        final endedStatus = wasAccepted
+            ? 'ended'
+            : (forceMissed ? 'declined' : 'ended');
+
+        tx.set(
+          sessionRef,
+          {
+            'callId': callId,
+            'status': endedStatus,
+            'callStatus': callStatus,
+            'durationSec': durationSec,
+            'logged': true,
+            'endedAt': FieldValue.serverTimestamp(),
+          },
+          SetOptions(merge: true),
+        );
+
+        finalPayload = {
+          'chatId': chatId,
+          'callerId': callerId,
+          'callerName': callerName,
+          'callerEmail': callerEmail,
+          'receiverId': receiverId,
+          'receiverName': receiverName,
+          'receiverEmail': receiverEmail,
+          'isVideo': videoFlag,
+          'callStatus': callStatus,
+          'durationSec': durationSec,
+        };
+      });
+    } catch (_) {
+      return;
+    }
+
+    final payload = finalPayload;
+    if (payload == null) return;
+
+    final callerId = (payload['callerId'] ?? '').toString();
+    final receiverId = (payload['receiverId'] ?? '').toString();
+    var chatId = (payload['chatId'] ?? '').toString();
+
+    if (chatId.isEmpty && callerId.isNotEmpty && receiverId.isNotEmpty) {
+      final ids = [callerId, receiverId]..sort();
+      chatId = '${ids[0]}_${ids[1]}';
+    }
+    if (chatId.isEmpty || callerId.isEmpty || receiverId.isEmpty) return;
+
+    final videoFlag = payload['isVideo'] == true;
+    final isMissed = payload['callStatus'] == 'missed';
+    final durationSec = (payload['durationSec'] as int?) ?? 0;
+
+    final summaryText = isMissed
+        ? (videoFlag ? 'Missed video call' : 'Missed voice call')
+        : '${videoFlag ? 'Video call' : 'Voice call'} • ${formatDuration(durationSec)}';
+
+    try {
+      await FirebaseFirestore.instance
+          .collection('chats')
+          .doc(chatId)
+          .collection('messages')
+          .add({
+        'senderId': callerId,
+        'receiverId': receiverId,
+        'text': summaryText,
+        'type': 'call',
+        'callId': callId,
+        'isVideo': videoFlag,
+        'callStatus': isMissed ? 'missed' : 'completed',
+        'durationSec': durationSec,
+        'isSeen': !isMissed,
+        'isEdited': false,
+        'timestamp': FieldValue.serverTimestamp(),
+      });
+
+      final chatUpdate = <String, dynamic>{
+        'chatId': chatId,
+        'participants': [callerId, receiverId],
+        'lastMessage': summaryText,
+        'lastMessageType': 'call',
+        'lastCallStatus': isMissed ? 'missed' : 'completed',
+        'lastCallIsVideo': videoFlag,
+        'lastCallDurationSec': durationSec,
+        'lastCallCallerId': callerId,
+        'lastMessageTime': FieldValue.serverTimestamp(),
+        'lastSenderId': callerId,
+        'users': {
+          callerId: {
+            'name': payload['callerName'] ?? 'User',
+            'email': payload['callerEmail'] ?? '',
+          },
+          receiverId: {
+            'name': payload['receiverName'] ?? 'User',
+            'email': payload['receiverEmail'] ?? '',
+          },
+        },
+      };
+
+      if (isMissed) {
+        chatUpdate['unreadCount'] = {
+          receiverId: FieldValue.increment(1),
+        };
+        chatUpdate['missedCallCount'] = {
+          receiverId: FieldValue.increment(1),
+        };
+      }
+
+      await FirebaseFirestore.instance
+          .collection('chats')
+          .doc(chatId)
+          .set(chatUpdate, SetOptions(merge: true));
+    } catch (_) {}
+  }
+}
+
 class CallScreen extends StatefulWidget {
   static const int zegoAppID = 1555115721;
   static const String zegoAppSign =
@@ -14,6 +258,11 @@ class CallScreen extends StatefulWidget {
   final bool isVideoCall;
   final String? receiverIdForCleanup;
   final String? callDocId;
+  final String? chatId;
+  final String? otherUserId;
+  final String? otherUserName;
+  final String? otherUserEmail;
+  final bool isCaller;
 
   const CallScreen({
     super.key,
@@ -21,6 +270,11 @@ class CallScreen extends StatefulWidget {
     required this.isVideoCall,
     this.receiverIdForCleanup,
     this.callDocId,
+    this.chatId,
+    this.otherUserId,
+    this.otherUserName,
+    this.otherUserEmail,
+    this.isCaller = true,
   });
 
   @override
@@ -40,6 +294,7 @@ class _CallScreenState extends State<CallScreen> {
   bool _remoteEnded = false;
   bool _isMinimizing = false;
   bool _callDocExisted = false;
+  DateTime? _connectedAt;
 
   String? get _effectiveCallDocId =>
       widget.callDocId ?? widget.receiverIdForCleanup;
@@ -54,6 +309,10 @@ class _CallScreenState extends State<CallScreen> {
   @override
   void initState() {
     super.initState();
+    if (!widget.isCaller) {
+      _connectedAt = DateTime.now();
+      CallLogHelper.markConnected(widget.callID);
+    }
     _screenShareNotifier = ZegoUIKit().getScreenSharingStateNotifier();
     _screenShareNotifier.addListener(_onScreenShareStateChanged);
     _setNativeCallState(true);
@@ -112,7 +371,6 @@ class _CallScreenState extends State<CallScreen> {
       return;
     }
 
-    // Prevent PiP from hijacking Android's MediaProjection permission dialog
     try {
       await _nativeChannel.invokeMethod('suppressPipOnce', true);
       await _nativeChannel.invokeMethod('setScreenSharing', {'active': true});
@@ -124,7 +382,6 @@ class _CallScreenState extends State<CallScreen> {
       await _setNativeScreenSharing(false);
     }
 
-    // If user cancelled the system dialog, re-enable normal PiP after a short check
     Future.delayed(const Duration(seconds: 4), () {
       if (mounted && !_screenShareNotifier.value) {
         _setNativeScreenSharing(false);
@@ -144,14 +401,19 @@ class _CallScreenState extends State<CallScreen> {
       final data = snap.data();
       if (data == null) return;
       final status = (data['status'] ?? '').toString();
+      if (status == 'accepted' && _connectedAt == null) {
+        final ts = data['connectedAt'] as Timestamp?;
+        _connectedAt = ts?.toDate() ?? DateTime.now();
+      }
       if (_isEndedStatus(status)) {
         _endCallFromRemote();
       }
     });
 
-    final docId = (_effectiveCallDocId != null && _effectiveCallDocId!.isNotEmpty)
-        ? _effectiveCallDocId!
-        : (currentUid ?? '');
+    final docId =
+        (_effectiveCallDocId != null && _effectiveCallDocId!.isNotEmpty)
+            ? _effectiveCallDocId!
+            : (currentUid ?? '');
     if (docId.isEmpty) return;
 
     _callDocSub = FirebaseFirestore.instance
@@ -176,11 +438,46 @@ class _CallScreenState extends State<CallScreen> {
 
       if (docCallId == widget.callID) {
         _callDocExisted = true;
+        if (status == 'accepted' && _connectedAt == null) {
+          _connectedAt = DateTime.now();
+        }
         if (_isEndedStatus(status)) {
           _endCallFromRemote();
         }
       }
     });
+  }
+
+  void _recordCallLog() {
+    final user = FirebaseAuth.instance.currentUser;
+    final myUid = user?.uid ?? '';
+    final myName = user?.displayName ?? user?.email ?? 'User';
+    final myEmail = user?.email ?? '';
+
+    final callerId = widget.isCaller ? myUid : (widget.otherUserId ?? '');
+    final callerName = widget.isCaller ? myName : (widget.otherUserName ?? 'User');
+    final callerEmail = widget.isCaller ? myEmail : (widget.otherUserEmail ?? '');
+
+    final receiverId = widget.isCaller
+        ? (widget.otherUserId ?? widget.receiverIdForCleanup ?? '')
+        : myUid;
+    final receiverName =
+        widget.isCaller ? (widget.otherUserName ?? 'User') : myName;
+    final receiverEmail =
+        widget.isCaller ? (widget.otherUserEmail ?? '') : myEmail;
+
+    CallLogHelper.finalizeCall(
+      callId: widget.callID,
+      isVideo: widget.isVideoCall,
+      localConnectedAt: _connectedAt,
+      fallbackChatId: widget.chatId,
+      fallbackCallerId: callerId,
+      fallbackCallerName: callerName,
+      fallbackCallerEmail: callerEmail,
+      fallbackReceiverId: receiverId,
+      fallbackReceiverName: receiverName,
+      fallbackReceiverEmail: receiverEmail,
+    );
   }
 
   Future<void> _endCallFromRemote() async {
@@ -190,6 +487,7 @@ class _CallScreenState extends State<CallScreen> {
     _stopScreenSharingImmediately();
     _setNativeCallState(false);
     _stopNativeRingtone();
+    _recordCallLog();
 
     if (!mounted) return;
     setState(() => _allowPop = true);
@@ -212,6 +510,7 @@ class _CallScreenState extends State<CallScreen> {
     _stopScreenSharingImmediately();
     _setNativeCallState(false);
     _stopNativeRingtone();
+    _recordCallLog();
 
     final currentUid = FirebaseAuth.instance.currentUser?.uid ?? '';
     final payload = {
@@ -237,7 +536,8 @@ class _CallScreenState extends State<CallScreen> {
     }
 
     if (currentUid.isNotEmpty && currentUid != docId) {
-      final ownRef = FirebaseFirestore.instance.collection('calls').doc(currentUid);
+      final ownRef =
+          FirebaseFirestore.instance.collection('calls').doc(currentUid);
       ownRef.get().then((snap) {
         if (snap.exists && (snap.data()?['callId'] ?? '') == widget.callID) {
           ownRef.set(payload, SetOptions(merge: true)).catchError((_) {});
@@ -293,7 +593,6 @@ class _CallScreenState extends State<CallScreen> {
         ? ZegoUIKitPrebuiltCallConfig.oneOnOneVideoCall()
         : ZegoUIKitPrebuiltCallConfig.oneOnOneVoiceCall();
 
-    // Gallery layout is required by ZegoUIKit to display screen sharing properly
     config.layout = ZegoLayout.gallery(
       showScreenSharingFullscreenModeToggleButtonRules:
           ZegoShowFullscreenModeToggleButtonRules.alwaysShow,
@@ -330,7 +629,6 @@ class _CallScreenState extends State<CallScreen> {
           ];
     config.bottomMenuBar.extendButtons = [_buildScreenShareButton()];
 
-    // Let MainActivity manage PiP safely so it never interrupts screen sharing
     config.pip.enableWhenBackground = false;
 
     return PopScope(
@@ -362,6 +660,12 @@ class _CallScreenState extends State<CallScreen> {
               });
             },
             user: ZegoCallUserEvents(
+              onEnter: (user) {
+                if (user.id != currentUser.uid && _connectedAt == null) {
+                  _connectedAt = DateTime.now();
+                  CallLogHelper.markConnected(widget.callID);
+                }
+              },
               onLeave: (user) {
                 if (user.id != currentUser.uid) {
                   _isMinimizing = false;
