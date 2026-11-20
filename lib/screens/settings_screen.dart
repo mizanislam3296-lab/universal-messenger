@@ -75,6 +75,9 @@ class FcmPushService {
     bool isVideo = false,
     String? chatId,
     String? callId,
+    String? callerId,
+    String? callerName,
+    String? callerEmail,
   }) async {
     if (!isConfigured) return;
     try {
@@ -91,7 +94,10 @@ class FcmPushService {
       if (prefs['enabled'] == false) return;
 
       final channelId = isCall ? 'fcm_call_all_v1' : 'fcm_msg_all_v1';
-      final tagId = isCall ? (callId ?? 'call') : (chatId ?? 'msg');
+      // Fixed tag for calls guarantees Android replaces previous call notification (never duplicates)
+      final tagId = isCall
+          ? NotificationAndPresenceService.incomingCallNotificationTag
+          : (chatId ?? 'msg');
 
       await Dio().post(
         'https://fcm.googleapis.com/v1/projects/$_projectId/messages:send',
@@ -102,7 +108,7 @@ class FcmPushService {
             'notification': {'title': title, 'body': body},
             'android': {
               'priority': 'HIGH',
-              'ttl': '86400s',
+              'ttl': isCall ? '45s' : '86400s',
               'notification': {
                 'channel_id': channelId,
                 'sound': 'default',
@@ -119,6 +125,9 @@ class FcmPushService {
               'body': body,
               'chatId': chatId ?? '',
               'callId': callId ?? '',
+              'callerId': callerId ?? '',
+              'callerName': callerName ?? '',
+              'callerEmail': callerEmail ?? '',
               'isVideo': isVideo ? 'true' : 'false',
             },
           },
@@ -173,7 +182,7 @@ class ScheduledMessageService {
     }
   }
 
-  static Future<bool> sendScheduledDoc(DocumentSnapshot> doc) async {
+  static Future<bool> sendScheduledDoc(DocumentSnapshot doc) async {
     final user = FirebaseAuth.instance.currentUser;
     if (user == null || _inFlightIds.contains(doc.id)) return false;
     _inFlightIds.add(doc.id);
@@ -183,7 +192,7 @@ class ScheduledMessageService {
       await FirebaseFirestore.instance.runTransaction((tx) async {
         final fresh = await tx.get(doc.reference);
         if (!fresh.exists) return;
-        final d = fresh.data();
+        final d = fresh.data() as Map<String, dynamic>?;
         if (d == null || (d['status'] ?? '') != 'pending') return;
         claimedData = Map<String, dynamic>.from(d);
         tx.update(doc.reference, {
@@ -223,6 +232,7 @@ class ScheduledMessageService {
         'chatId': chatId,
         'participants': [user.uid, receiverId],
         'lastMessage': text,
+        'lastMessageType': 'text',
         'lastMessageTime': FieldValue.serverTimestamp(),
         'lastSenderId': user.uid,
         'unreadCount': {
@@ -386,13 +396,21 @@ class AppSettingsController {
 class NotificationAndPresenceService {
   static const MethodChannel _nativeChannel = MethodChannel('com.universal.messenger/icon');
   static final FlutterLocalNotificationsPlugin _notifications = FlutterLocalNotificationsPlugin();
+  static const int incomingCallNotificationId = 99001;
+  static const String incomingCallNotificationTag = 'universal_incoming_call';
 
   static bool _initialized = false;
   static bool isAppInForeground = true;
+  static bool isInActiveCall = false;
   static String? activeChatId;
   static String? _lastNotifiedCallId;
   static bool _initialChatsLoaded = false;
   static final Map<String, int> _lastChatMsgMillis = {};
+
+  static void Function(Map<String, dynamic> callData, {bool autoAccept})? onIncomingCallTrigger;
+  static void Function(Map<String, dynamic> callData)? onIncomingCallDeclinedFromNotification;
+  static Map<String, dynamic>? pendingCallData;
+  static bool pendingAutoAccept = false;
 
   static StreamSubscription<DocumentSnapshot>? _callSub;
   static StreamSubscription<QuerySnapshot>? _chatSub;
@@ -402,6 +420,104 @@ class NotificationAndPresenceService {
   static Future<void> requestBatteryUnrestricted() async {
     try {
       await _nativeChannel.invokeMethod('requestIgnoreBatteryOptimizations');
+    } catch (_) {}
+  }
+
+  static Future<void> requestFullScreenIntentPermission() async {
+    try {
+      await _nativeChannel.invokeMethod('requestFullScreenIntentPermission');
+    } catch (_) {}
+  }
+
+  static Future<void> clearCallNotifications() async {
+    try {
+      await _notifications.cancel(incomingCallNotificationId, tag: incomingCallNotificationTag);
+      await _notifications.cancel(incomingCallNotificationId);
+    } catch (_) {}
+    try {
+      await _nativeChannel.invokeMethod('clearCallNotifications');
+    } catch (_) {}
+  }
+
+  static Future<void> showOngoingCallNotification({
+    required bool isVideo,
+    required String otherName,
+    bool isScreenSharing = false,
+  }) async {
+    isInActiveCall = true;
+    await clearCallNotifications();
+    if (!AppSettingsController.notificationsEnabled.value) return;
+    try {
+      final title = isScreenSharing
+          ? 'স্ক্রিন শেয়ার চলছে'
+          : (isVideo ? 'ভিডিও কল চলছে' : 'অডিও কল চলছে');
+      final body = '$otherName • ট্যাপ করে কলের ভেতর ফিরে যান';
+      await _notifications.show(
+        incomingCallNotificationId,
+        title,
+        body,
+        NotificationDetails(
+          android: AndroidNotificationDetails(
+            'call_ch_master_v1',
+            'Incoming Calls',
+            tag: incomingCallNotificationTag,
+            importance: Importance.high,
+            priority: Priority.high,
+            category: AndroidNotificationCategory.call,
+            ongoing: true,
+            autoCancel: false,
+            playSound: false,
+            enableVibration: false,
+            onlyAlertOnce: true,
+            visibility: NotificationVisibility.public,
+          ),
+        ),
+        payload: jsonEncode({'type': 'active_call'}),
+      );
+    } catch (_) {}
+  }
+
+  static void _handleNotificationResponse(NotificationResponse response) {
+    final raw = response.payload;
+    if (raw == null || raw.isEmpty) return;
+    try {
+      final map = jsonDecode(raw) as Map<String, dynamic>;
+      final type = (map['type'] ?? '').toString();
+      if (type == 'active_call') {
+        return;
+      }
+      if (type != 'call') return;
+
+      final actionId = (response.actionId ?? '').toString();
+      if (actionId == 'decline') {
+        stopNativeCallRingtone();
+        clearCallNotifications();
+        if (onIncomingCallDeclinedFromNotification != null) {
+          onIncomingCallDeclinedFromNotification!(map);
+        } else {
+          final uid = FirebaseAuth.instance.currentUser?.uid;
+          final callId = (map['callId'] ?? '').toString();
+          if (uid != null && callId.isNotEmpty) {
+            FirebaseFirestore.instance.collection('calls').doc(uid).set({
+              'callId': callId,
+              'status': 'declined',
+            }, SetOptions(merge: true));
+            FirebaseFirestore.instance.collection('call_sessions').doc(callId).set({
+              'callId': callId,
+              'status': 'declined',
+            }, SetOptions(merge: true));
+          }
+        }
+        return;
+      }
+
+      final autoAccept = actionId == 'accept';
+      if (onIncomingCallTrigger != null) {
+        onIncomingCallTrigger!(map, autoAccept: autoAccept);
+      } else {
+        pendingCallData = map;
+        pendingAutoAccept = autoAccept;
+      }
     } catch (_) {}
   }
 
@@ -480,6 +596,7 @@ class NotificationAndPresenceService {
     try {
       await _notifications.cancelAll();
     } catch (_) {}
+    await clearCallNotifications();
   }
 
   static Future<void> start() async {
@@ -489,9 +606,20 @@ class NotificationAndPresenceService {
 
     if (!_initialized) {
       _initialized = true;
-      await _notifications.initialize(const InitializationSettings(android: AndroidInitializationSettings('@mipmap/ic_launcher')));
+      await _notifications.initialize(
+        const InitializationSettings(
+          android: AndroidInitializationSettings('@mipmap/ic_launcher'),
+        ),
+        onDidReceiveNotificationResponse: _handleNotificationResponse,
+      );
       final android = _notifications.resolvePlatformSpecificImplementation<AndroidFlutterLocalNotificationsPlugin>();
       await android?.requestNotificationsPermission();
+
+      final launchDetails = await _notifications.getNotificationAppLaunchDetails();
+      if (launchDetails?.didNotificationLaunchApp == true &&
+          launchDetails?.notificationResponse != null) {
+        _handleNotificationResponse(launchDetails!.notificationResponse!);
+      }
 
       _fcmTokenRefreshSub?.cancel();
       _fcmTokenRefreshSub = FirebaseMessaging.instance.onTokenRefresh.listen((newToken) {
@@ -565,9 +693,9 @@ class NotificationAndPresenceService {
 
   static void _stopCallRing() {
     stopNativeCallRingtone();
-    if (_lastNotifiedCallId != null) {
-      _notifications.cancel(_lastNotifiedCallId.hashCode);
-      _lastNotifiedCallId = null;
+    _lastNotifiedCallId = null;
+    if (!isInActiveCall) {
+      clearCallNotifications();
     }
   }
 
@@ -610,40 +738,79 @@ class NotificationAndPresenceService {
       }
       final callId = (data['callId'] ?? '').toString();
       if (callId.isEmpty || callId == _lastNotifiedCallId) return;
-      _stopCallRing();
-      _lastNotifiedCallId = callId;
-      if (!AppSettingsController.notificationsEnabled.value) return;
 
+      _lastNotifiedCallId = callId;
       final callerName = (data['callerName'] ?? 'কেউ একজন').toString();
       final isVideo = data['isVideo'] == true;
+      final callPayload = <String, dynamic>{
+        'type': 'call',
+        'callId': callId,
+        'chatId': (data['chatId'] ?? '').toString(),
+        'callerId': (data['callerId'] ?? '').toString(),
+        'callerName': callerName,
+        'callerEmail': (data['callerEmail'] ?? '').toString(),
+        'isVideo': isVideo,
+      };
 
-      await playNativeCallRingtone();
-      HapticFeedback.heavyImpact();
+      // Clear any previous/duplicate FCM call notifications so ONLY 1 ever shows
+      await clearCallNotifications();
 
-      await _notifications.show(
-        callId.hashCode,
-        isVideo ? 'ইনকামিং ভিডিও কল' : 'ইনকামিং অডিও কল',
-        '$callerName আপনাকে কল দিচ্ছেন...',
-        NotificationDetails(
-          android: AndroidNotificationDetails(
-            'call_ch_master_v1',
-            'Incoming Calls',
-            importance: Importance.max,
-            priority: Priority.max,
-            category: AndroidNotificationCategory.call,
-            fullScreenIntent: true,
-            ongoing: true,
-            autoCancel: false,
-            playSound: true,
-            sound: const UriAndroidNotificationSound('content://settings/system/ringtone'),
-            audioAttributesUsage: AudioAttributesUsage.notificationRingtone,
-            enableVibration: true,
-            vibrationPattern: Int64List.fromList([0, 800, 400, 800]),
-            additionalFlags: Int32List.fromList([4]),
-            visibility: NotificationVisibility.public,
+      if (AppSettingsController.notificationsEnabled.value) {
+        await playNativeCallRingtone();
+        HapticFeedback.heavyImpact();
+
+        await _notifications.show(
+          incomingCallNotificationId,
+          isVideo ? 'ইনকামিং ভিডিও কল' : 'ইনকামিং অডিও কল',
+          '$callerName আপনাকে কল দিচ্ছেন...',
+          NotificationDetails(
+            android: AndroidNotificationDetails(
+              'call_ch_master_v1',
+              'Incoming Calls',
+              tag: incomingCallNotificationTag,
+              importance: Importance.max,
+              priority: Priority.max,
+              category: AndroidNotificationCategory.call,
+              fullScreenIntent: true,
+              ongoing: true,
+              autoCancel: false,
+              onlyAlertOnce: true,
+              playSound: true,
+              sound: const UriAndroidNotificationSound('content://settings/system/ringtone'),
+              audioAttributesUsage: AudioAttributesUsage.notificationRingtone,
+              enableVibration: true,
+              vibrationPattern: Int64List.fromList([0, 800, 400, 800]),
+              additionalFlags: Int32List.fromList([4]),
+              visibility: NotificationVisibility.public,
+              actions: const [
+                AndroidNotificationAction(
+                  'decline',
+                  'Decline',
+                  titleColor: Color(0xFFFF5252),
+                  showsUserInterface: true,
+                  cancelNotification: true,
+                ),
+                AndroidNotificationAction(
+                  'accept',
+                  'Accept',
+                  titleColor: Color(0xFF4CAF50),
+                  showsUserInterface: true,
+                  cancelNotification: true,
+                ),
+              ],
+            ),
           ),
-        ),
-      );
+          payload: jsonEncode(callPayload),
+        );
+      }
+
+      // Immediately open full-screen Messenger-style incoming call UI
+      if (onIncomingCallTrigger != null) {
+        onIncomingCallTrigger!(callPayload, autoAccept: false);
+      } else {
+        pendingCallData = callPayload;
+        pendingAutoAccept = false;
+      }
     });
   }
 
@@ -1229,6 +1396,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                             await FcmPushService.syncDeviceTokenAndPrefs();
                             if (val) {
                               await NotificationAndPresenceService.requestBatteryUnrestricted();
+                              await NotificationAndPresenceService.requestFullScreenIntentPermission();
                               await NotificationAndPresenceService.start();
                               NotificationAndPresenceService.playNativeMessageSound();
                               HapticFeedback.mediumImpact();
