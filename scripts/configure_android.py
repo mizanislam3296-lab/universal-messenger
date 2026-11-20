@@ -884,6 +884,7 @@ def write_main_activity_kt() -> None:
 
     kt_content = """package com.universal.universal_messenger
 
+import android.app.NotificationManager
 import android.app.PictureInPictureParams
 import android.content.ComponentName
 import android.content.ContentValues
@@ -922,6 +923,8 @@ import java.io.FileOutputStream
 class MainActivity : FlutterActivity() {
     companion object {
         private const val CHANNEL = "com.universal.messenger/icon"
+        private const val CALL_NOTIF_ID = 99001
+        private const val CALL_NOTIF_TAG = "universal_incoming_call"
         private val ICON_ALIASES = mapOf(
             "default" to "com.universal.universal_messenger.AliasDefault",
             "google" to "com.universal.universal_messenger.AliasGoogle",
@@ -1005,6 +1008,7 @@ class MainActivity : FlutterActivity() {
                         if (!active) {
                             isScreenSharing = false
                             stopZegoScreenCaptureServices()
+                            clearCallNotifications()
                         }
                         result.success(true)
                     }
@@ -1031,6 +1035,21 @@ class MainActivity : FlutterActivity() {
                         isScreenSharing = false
                         stopZegoScreenCaptureServices()
                         result.success(true)
+                    }
+
+                    "moveToBackground" -> {
+                        suppressPipOnce = true
+                        moveTaskToBack(true)
+                        result.success(true)
+                    }
+
+                    "clearCallNotifications" -> {
+                        clearCallNotifications()
+                        result.success(true)
+                    }
+
+                    "requestFullScreenIntentPermission" -> {
+                        result.success(requestFullScreenIntentPermission())
                     }
 
                     "suppressPipOnce" -> {
@@ -1108,6 +1127,51 @@ class MainActivity : FlutterActivity() {
                     else -> result.notImplemented()
                 }
             }
+    }
+
+    private fun clearCallNotifications() {
+        try {
+            val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+            nm.cancel(CALL_NOTIF_ID)
+            nm.cancel(CALL_NOTIF_TAG, 0)
+            nm.cancel(CALL_NOTIF_TAG, CALL_NOTIF_ID)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                for (sbn in nm.activeNotifications) {
+                    val ch = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                        sbn.notification.channelId
+                    } else {
+                        null
+                    }
+                    if (ch == "fcm_call_all_v1" || ch == "call_ch_master_v1" || sbn.id == CALL_NOTIF_ID) {
+                        if (sbn.tag != null) {
+                            nm.cancel(sbn.tag, sbn.id)
+                        } else {
+                            nm.cancel(sbn.id)
+                        }
+                    }
+                }
+            }
+        } catch (_: Exception) {
+        }
+    }
+
+    private fun requestFullScreenIntentPermission(): Boolean {
+        return try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+                if (!nm.canUseFullScreenIntent()) {
+                    val intent = Intent(Settings.ACTION_MANAGE_APP_USE_FULL_SCREEN_INTENT).apply {
+                        data = Uri.parse("package:$packageName")
+                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    }
+                    startActivity(intent)
+                    return false
+                }
+            }
+            true
+        } catch (_: Exception) {
+            true
+        }
     }
 
     private fun setCallAudioMode(active: Boolean): Boolean {
@@ -1411,12 +1475,13 @@ class MainActivity : FlutterActivity() {
         stopActiveRingtone()
         setCallAudioMode(false)
         stopZegoScreenCaptureServices()
+        clearCallNotifications()
         super.onDestroy()
     }
 }
 """
     (kt_dir / "MainActivity.kt").write_text(kt_content, encoding="utf-8")
-    log("Wrote MainActivity.kt with call audio DSP, media saver & launcher aliases")
+    log("Wrote MainActivity.kt with single-call notification cleanup & Messenger screen share support")
 
 
 def main() -> None:
