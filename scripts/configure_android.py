@@ -886,6 +886,7 @@ def write_main_activity_kt() -> None:
 
 import android.app.PictureInPictureParams
 import android.content.ComponentName
+import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -895,6 +896,8 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.drawable.Icon
 import android.media.AudioAttributes
+import android.media.AudioManager
+import android.media.MediaScannerConnection
 import android.media.Ringtone
 import android.media.RingtoneManager
 import android.net.ConnectivityManager
@@ -902,7 +905,9 @@ import android.net.NetworkCapabilities
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.Environment
 import android.os.PowerManager
+import android.provider.MediaStore
 import android.provider.Settings
 import android.util.Rational
 import android.view.WindowManager
@@ -911,6 +916,8 @@ import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
 import java.io.File
+import java.io.FileInputStream
+import java.io.FileOutputStream
 
 class MainActivity : FlutterActivity() {
     companion object {
@@ -953,7 +960,6 @@ class MainActivity : FlutterActivity() {
             suppressPipOnce = false
             return
         }
-        // Do NOT force PiP while screen sharing or during MediaProjection consent
         if (isScreenSharing) {
             return
         }
@@ -995,11 +1001,19 @@ class MainActivity : FlutterActivity() {
                             ?: call.argument<Boolean>("active")
                             ?: false
                         isCallActive = active
+                        setCallAudioMode(active)
                         if (!active) {
                             isScreenSharing = false
                             stopZegoScreenCaptureServices()
                         }
                         result.success(true)
+                    }
+
+                    "setCallAudioMode" -> {
+                        val active = (call.arguments as? Boolean)
+                            ?: call.argument<Boolean>("active")
+                            ?: false
+                        result.success(setCallAudioMode(active))
                     }
 
                     "setScreenSharing" -> {
@@ -1022,6 +1036,20 @@ class MainActivity : FlutterActivity() {
                     "suppressPipOnce" -> {
                         suppressPipOnce = (call.arguments as? Boolean) ?: true
                         result.success(true)
+                    }
+
+                    "saveMediaFile" -> {
+                        val path = extractFilePath(call.arguments, call.argument("path"), call.argument("filePath"))
+                        val fileName = call.argument<String>("fileName") ?: "media_${System.currentTimeMillis()}"
+                        val mediaType = call.argument<String>("mediaType") ?: "file"
+                        if (path.isNullOrBlank()) {
+                            result.success(false)
+                        } else {
+                            Thread {
+                                val saved = saveMediaToDevice(path, fileName, mediaType)
+                                runOnUiThread { result.success(saved) }
+                            }.start()
+                        }
                     }
 
                     "requestIgnoreBatteryOptimizations" -> {
@@ -1080,6 +1108,112 @@ class MainActivity : FlutterActivity() {
                     else -> result.notImplemented()
                 }
             }
+    }
+
+    private fun setCallAudioMode(active: Boolean): Boolean {
+        return try {
+            val am = getSystemService(Context.AUDIO_SERVICE) as AudioManager
+            if (active) {
+                am.mode = AudioManager.MODE_IN_COMMUNICATION
+                am.isMicrophoneMute = false
+                volumeControlStream = AudioManager.STREAM_VOICE_CALL
+            } else {
+                am.mode = AudioManager.MODE_NORMAL
+                volumeControlStream = AudioManager.USE_DEFAULT_STREAM_TYPE
+            }
+            true
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    private fun guessMimeType(fileName: String, mediaType: String): String {
+        val lower = fileName.lowercase()
+        return when {
+            lower.endsWith(".png") -> "image/png"
+            lower.endsWith(".webp") -> "image/webp"
+            lower.endsWith(".gif") -> "image/gif"
+            lower.endsWith(".jpg") || lower.endsWith(".jpeg") -> "image/jpeg"
+            lower.endsWith(".mp4") -> "video/mp4"
+            lower.endsWith(".mkv") -> "video/x-matroska"
+            lower.endsWith(".mov") -> "video/quicktime"
+            lower.endsWith(".avi") -> "video/x-msvideo"
+            lower.endsWith(".pdf") -> "application/pdf"
+            mediaType == "image" -> "image/jpeg"
+            mediaType == "video" -> "video/mp4"
+            else -> "application/octet-stream"
+        }
+    }
+
+    private fun saveMediaToDevice(sourcePath: String, fileName: String, mediaType: String): Boolean {
+        return try {
+            val src = File(sourcePath)
+            if (!src.exists()) return false
+            val safeName = fileName.replace(Regex("[^a-zA-Z0-9._-]"), "_")
+            val mime = guessMimeType(safeName, mediaType)
+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                val (collection, relPath) = when (mediaType) {
+                    "image" -> Pair(
+                        MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
+                        "${Environment.DIRECTORY_PICTURES}/Universal Messenger"
+                    )
+                    "video" -> Pair(
+                        MediaStore.Video.Media.EXTERNAL_CONTENT_URI,
+                        "${Environment.DIRECTORY_MOVIES}/Universal Messenger"
+                    )
+                    else -> Pair(
+                        MediaStore.Downloads.EXTERNAL_CONTENT_URI,
+                        "${Environment.DIRECTORY_DOWNLOADS}/Universal Messenger"
+                    )
+                }
+
+                val values = ContentValues().apply {
+                    put(MediaStore.MediaColumns.DISPLAY_NAME, safeName)
+                    put(MediaStore.MediaColumns.MIME_TYPE, mime)
+                    put(MediaStore.MediaColumns.RELATIVE_PATH, relPath)
+                    put(MediaStore.MediaColumns.IS_PENDING, 1)
+                }
+
+                val uri = contentResolver.insert(collection, values) ?: return false
+                contentResolver.openOutputStream(uri)?.use { out ->
+                    FileInputStream(src).use { input ->
+                        input.copyTo(out)
+                    }
+                } ?: return false
+
+                values.clear()
+                values.put(MediaStore.MediaColumns.IS_PENDING, 0)
+                contentResolver.update(uri, values, null, null)
+                true
+            } else {
+                @Suppress("DEPRECATION")
+                val baseDir = Environment.getExternalStoragePublicDirectory(
+                    when (mediaType) {
+                        "image" -> Environment.DIRECTORY_PICTURES
+                        "video" -> Environment.DIRECTORY_MOVIES
+                        else -> Environment.DIRECTORY_DOWNLOADS
+                    }
+                )
+                val targetDir = File(baseDir, "Universal Messenger")
+                if (!targetDir.exists()) targetDir.mkdirs()
+                val dst = File(targetDir, safeName)
+                FileInputStream(src).use { input ->
+                    FileOutputStream(dst).use { out ->
+                        input.copyTo(out)
+                    }
+                }
+                MediaScannerConnection.scanFile(
+                    applicationContext,
+                    arrayOf(dst.absolutePath),
+                    arrayOf(mime),
+                    null
+                )
+                true
+            }
+        } catch (_: Exception) {
+            false
+        }
     }
 
     private fun stopZegoScreenCaptureServices() {
@@ -1252,7 +1386,7 @@ class MainActivity : FlutterActivity() {
                     addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                 }
                 startActivity(permIntent)
-                result.success(false)
+                result.success("PERMISSION_REQUIRED")
                 return
             }
 
@@ -1267,7 +1401,7 @@ class MainActivity : FlutterActivity() {
                 addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
             }
             startActivity(installIntent)
-            result.success(true)
+            result.success("STARTED")
         } catch (e: Exception) {
             result.error("INSTALL_ERROR", e.message, null)
         }
@@ -1275,13 +1409,14 @@ class MainActivity : FlutterActivity() {
 
     override fun onDestroy() {
         stopActiveRingtone()
+        setCallAudioMode(false)
         stopZegoScreenCaptureServices()
         super.onDestroy()
     }
 }
 """
     (kt_dir / "MainActivity.kt").write_text(kt_content, encoding="utf-8")
-    log("Wrote MainActivity.kt with launcher icon switcher & screen share cleanup")
+    log("Wrote MainActivity.kt with call audio DSP, media saver & launcher aliases")
 
 
 def main() -> None:
