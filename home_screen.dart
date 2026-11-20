@@ -4,6 +4,7 @@ import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:universal_messenger/screens/search_user_screen.dart';
@@ -26,12 +27,20 @@ class HomeScreen extends StatefulWidget {
 
 class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   StreamSubscription<DocumentSnapshot>? _updateSub;
+  StreamSubscription<RemoteMessage>? _fcmOpenSub;
   bool _isUpdateDialogShowing = false;
+  String? _activeIncomingCallId;
 
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+
+    NotificationAndPresenceService.onIncomingCallTrigger =
+        _handleIncomingCallTrigger;
+    NotificationAndPresenceService.onIncomingCallDeclinedFromNotification =
+        _handleDeclineFromNotification;
+
     AppSettingsController.load().then((_) {
       if (AppSettingsController.notificationsEnabled.value) {
         NotificationAndPresenceService.requestBatteryUnrestricted();
@@ -40,10 +49,25 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     NotificationAndPresenceService.setAppForeground(true);
     NotificationAndPresenceService.start();
     _listenForAppUpdates();
+    _setupFcmCallTapHandlers();
+
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _consumePendingCallIfAny();
+    });
   }
 
   @override
   void dispose() {
+    if (NotificationAndPresenceService.onIncomingCallTrigger ==
+        _handleIncomingCallTrigger) {
+      NotificationAndPresenceService.onIncomingCallTrigger = null;
+    }
+    if (NotificationAndPresenceService.onIncomingCallDeclinedFromNotification ==
+        _handleDeclineFromNotification) {
+      NotificationAndPresenceService.onIncomingCallDeclinedFromNotification =
+          null;
+    }
+    _fcmOpenSub?.cancel();
     _updateSub?.cancel();
     WidgetsBinding.instance.removeObserver(this);
     super.dispose();
@@ -54,11 +78,171 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     if (state == AppLifecycleState.resumed) {
       NotificationAndPresenceService.setAppForeground(true);
       NotificationAndPresenceService.start();
+      _checkActiveRingingCallOnResume();
     } else if (state == AppLifecycleState.paused ||
         state == AppLifecycleState.inactive ||
         state == AppLifecycleState.detached ||
         state == AppLifecycleState.hidden) {
       NotificationAndPresenceService.setAppForeground(false);
+    }
+  }
+
+  void _setupFcmCallTapHandlers() {
+    FirebaseMessaging.instance.getInitialMessage().then((msg) {
+      if (msg != null && (msg.data['type'] ?? '') == 'call') {
+        _checkActiveRingingCallOnResume();
+      }
+    }).catchError((_) {});
+
+    _fcmOpenSub = FirebaseMessaging.onMessageOpenedApp.listen((msg) {
+      if ((msg.data['type'] ?? '') == 'call') {
+        _checkActiveRingingCallOnResume();
+      }
+    });
+  }
+
+  void _consumePendingCallIfAny() {
+    final pending = NotificationAndPresenceService.pendingCallData;
+    if (pending != null) {
+      final autoAccept = NotificationAndPresenceService.pendingAutoAccept;
+      NotificationAndPresenceService.pendingCallData = null;
+      NotificationAndPresenceService.pendingAutoAccept = false;
+      _handleIncomingCallTrigger(pending, autoAccept: autoAccept);
+    }
+  }
+
+  Future<void> _checkActiveRingingCallOnResume() async {
+    final user = FirebaseAuth.instance.currentUser;
+    if (user == null || !mounted || NotificationAndPresenceService.isInActiveCall) {
+      return;
+    }
+    try {
+      final snap = await FirebaseFirestore.instance
+          .collection('calls')
+          .doc(user.uid)
+          .get();
+      final data = snap.data();
+      if (!snap.exists || data == null || (data['status'] ?? '') != 'ringing') {
+        return;
+      }
+      final callId = (data['callId'] ?? '').toString();
+      if (callId.isEmpty) return;
+      _handleIncomingCallTrigger({
+        'type': 'call',
+        'callId': callId,
+        'chatId': (data['chatId'] ?? '').toString(),
+        'callerId': (data['callerId'] ?? '').toString(),
+        'callerName': (data['callerName'] ?? 'কেউ একজন').toString(),
+        'callerEmail': (data['callerEmail'] ?? '').toString(),
+        'isVideo': data['isVideo'] == true,
+      }, autoAccept: false);
+    } catch (_) {}
+  }
+
+  Future<void> _handleDeclineFromNotification(
+      Map<String, dynamic> callData) async {
+    final currentUser = FirebaseAuth.instance.currentUser;
+    if (currentUser == null) return;
+    final callId = (callData['callId'] ?? '').toString();
+    if (callId.isEmpty) return;
+    final isVideo =
+        callData['isVideo'] == true || callData['isVideo'] == 'true';
+
+    NotificationAndPresenceService.stopNativeCallRingtone();
+    await NotificationAndPresenceService.clearCallNotifications();
+
+    await FirebaseFirestore.instance
+        .collection('calls')
+        .doc(currentUser.uid)
+        .set({
+      'callId': callId,
+      'status': 'declined',
+    }, SetOptions(merge: true));
+
+    CallLogHelper.finalizeCall(
+      callId: callId,
+      isVideo: isVideo,
+      forceMissed: true,
+      fallbackChatId: (callData['chatId'] ?? '').toString(),
+      fallbackCallerId: (callData['callerId'] ?? '').toString(),
+      fallbackCallerName: (callData['callerName'] ?? 'User').toString(),
+      fallbackCallerEmail: (callData['callerEmail'] ?? '').toString(),
+      fallbackReceiverId: currentUser.uid,
+      fallbackReceiverName:
+          currentUser.displayName ?? currentUser.email ?? 'User',
+      fallbackReceiverEmail: currentUser.email ?? '',
+    );
+  }
+
+  Future<void> _handleIncomingCallTrigger(
+    Map<String, dynamic> callData, {
+    bool autoAccept = false,
+  }) async {
+    if (!mounted) return;
+    final currentUser = FirebaseAuth.instance.currentUser;
+    if (currentUser == null) return;
+
+    final callId = (callData['callId'] ?? '').toString();
+    if (callId.isEmpty) return;
+    if (NotificationAndPresenceService.isInActiveCall) return;
+    if (!autoAccept && _activeIncomingCallId == callId) return;
+
+    final chatId = (callData['chatId'] ?? '').toString();
+    final callerId = (callData['callerId'] ?? '').toString();
+    final callerName = (callData['callerName'] ?? 'কেউ একজন').toString();
+    final callerEmail = (callData['callerEmail'] ?? '').toString();
+    final isVideo =
+        callData['isVideo'] == true || callData['isVideo'] == 'true';
+
+    if (autoAccept) {
+      _activeIncomingCallId = null;
+      NotificationAndPresenceService.stopNativeCallRingtone();
+      await NotificationAndPresenceService.clearCallNotifications();
+
+      await FirebaseFirestore.instance
+          .collection('calls')
+          .doc(currentUser.uid)
+          .set({
+        'callId': callId,
+        'status': 'accepted',
+      }, SetOptions(merge: true));
+      await CallLogHelper.markConnected(callId);
+
+      if (!mounted) return;
+      Navigator.of(context).push(
+        MaterialPageRoute(
+          builder: (_) => CallScreen(
+            callID: callId,
+            isVideoCall: isVideo,
+            callDocId: currentUser.uid,
+            chatId: chatId.isNotEmpty ? chatId : null,
+            otherUserId: callerId.isNotEmpty ? callerId : null,
+            otherUserName: callerName,
+            otherUserEmail: callerEmail,
+            isCaller: false,
+          ),
+        ),
+      );
+      return;
+    }
+
+    _activeIncomingCallId = callId;
+    await Navigator.of(context).push(
+      MaterialPageRoute(
+        fullscreenDialog: true,
+        builder: (_) => IncomingCallScreen(
+          callID: callId,
+          isVideoCall: isVideo,
+          callerId: callerId,
+          callerName: callerName,
+          callerEmail: callerEmail,
+          chatId: chatId,
+          callDocId: currentUser.uid,
+        ),
+      ),
+    );
+    if (_activeIncomingCallId == callId) {
+      _activeIncomingCallId = null;
     }
   }
 
@@ -262,113 +446,81 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         final callerEmail = (data['callerEmail'] ?? '').toString();
         final isVideo = data['isVideo'] == true;
 
-        return Container(
-          margin: const EdgeInsets.all(10),
-          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
-          decoration: BoxDecoration(
-            color: primaryColor,
-            borderRadius: BorderRadius.circular(14),
-            boxShadow: [
-              BoxShadow(
-                color: Colors.black.withOpacity(0.2),
-                blurRadius: 8,
-                offset: const Offset(0, 3),
-              ),
-            ],
-          ),
-          child: Row(
-            children: [
-              CircleAvatar(
-                backgroundColor: Colors.white24,
-                child: Icon(
-                  isVideo ? Icons.videocam : Icons.call,
-                  color: Colors.white,
-                ),
-              ),
-              const SizedBox(width: 12),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      callerName,
-                      style: const TextStyle(
-                        color: Colors.white,
-                        fontWeight: FontWeight.bold,
-                        fontSize: 15,
-                      ),
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                    Text(
-                      isVideo ? 'ইনকামিং ভিডিও কল...' : 'ইনকামিং অডিও কল...',
-                      style:
-                          const TextStyle(color: Colors.white70, fontSize: 12),
-                    ),
-                  ],
-                ),
-              ),
-              IconButton(
-                style: IconButton.styleFrom(backgroundColor: Colors.red),
-                icon: const Icon(Icons.call_end, color: Colors.white),
-                tooltip: 'কল কাটুন',
-                onPressed: () {
-                  NotificationAndPresenceService.stopNativeCallRingtone();
-                  FirebaseFirestore.instance
-                      .collection('calls')
-                      .doc(currentUser.uid)
-                      .set({
-                    'callId': callId,
-                    'status': 'declined',
-                  }, SetOptions(merge: true));
+        final callPayload = <String, dynamic>{
+          'type': 'call',
+          'callId': callId,
+          'chatId': chatId,
+          'callerId': callerId,
+          'callerName': callerName,
+          'callerEmail': callerEmail,
+          'isVideo': isVideo,
+        };
 
-                  CallLogHelper.finalizeCall(
-                    callId: callId,
-                    isVideo: isVideo,
-                    forceMissed: true,
-                    fallbackChatId: chatId,
-                    fallbackCallerId: callerId,
-                    fallbackCallerName: callerName,
-                    fallbackCallerEmail: callerEmail,
-                    fallbackReceiverId: currentUser.uid,
-                    fallbackReceiverName:
-                        currentUser.displayName ?? currentUser.email ?? 'User',
-                    fallbackReceiverEmail: currentUser.email ?? '',
-                  );
-                },
-              ),
-              const SizedBox(width: 8),
-              IconButton(
-                style: IconButton.styleFrom(backgroundColor: Colors.green),
-                icon: const Icon(Icons.call, color: Colors.white),
-                tooltip: 'কল রিসিভ করুন',
-                onPressed: () {
-                  NotificationAndPresenceService.stopNativeCallRingtone();
-                  FirebaseFirestore.instance
-                      .collection('calls')
-                      .doc(currentUser.uid)
-                      .set({
-                    'callId': callId,
-                    'status': 'accepted',
-                  }, SetOptions(merge: true));
-                  CallLogHelper.markConnected(callId);
-                  Navigator.push(
-                    context,
-                    MaterialPageRoute(
-                      builder: (_) => CallScreen(
-                        callID: callId,
-                        isVideoCall: isVideo,
-                        callDocId: currentUser.uid,
-                        chatId: chatId.isNotEmpty ? chatId : null,
-                        otherUserId: callerId.isNotEmpty ? callerId : null,
-                        otherUserName: callerName,
-                        otherUserEmail: callerEmail,
-                        isCaller: false,
+        return GestureDetector(
+          onTap: () => _handleIncomingCallTrigger(callPayload, autoAccept: false),
+          child: Container(
+            margin: const EdgeInsets.all(10),
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+            decoration: BoxDecoration(
+              color: primaryColor,
+              borderRadius: BorderRadius.circular(14),
+              boxShadow: [
+                BoxShadow(
+                  color: Colors.black.withOpacity(0.2),
+                  blurRadius: 8,
+                  offset: const Offset(0, 3),
+                ),
+              ],
+            ),
+            child: Row(
+              children: [
+                CircleAvatar(
+                  backgroundColor: Colors.white24,
+                  child: Icon(
+                    isVideo ? Icons.videocam : Icons.call,
+                    color: Colors.white,
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        callerName,
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontWeight: FontWeight.bold,
+                          fontSize: 15,
+                        ),
+                        overflow: TextOverflow.ellipsis,
                       ),
-                    ),
-                  );
-                },
-              ),
-            ],
+                      Text(
+                        isVideo
+                            ? 'ইনকামিং ভিডিও কল... (ট্যাপ করুন)'
+                            : 'ইনকামিং অডিও কল... (ট্যাপ করুন)',
+                        style: const TextStyle(
+                            color: Colors.white70, fontSize: 12),
+                      ),
+                    ],
+                  ),
+                ),
+                IconButton(
+                  style: IconButton.styleFrom(backgroundColor: Colors.red),
+                  icon: const Icon(Icons.call_end, color: Colors.white),
+                  tooltip: 'কল কাটুন',
+                  onPressed: () => _handleDeclineFromNotification(callPayload),
+                ),
+                const SizedBox(width: 8),
+                IconButton(
+                  style: IconButton.styleFrom(backgroundColor: Colors.green),
+                  icon: const Icon(Icons.call, color: Colors.white),
+                  tooltip: 'কল রিসিভ করুন',
+                  onPressed: () =>
+                      _handleIncomingCallTrigger(callPayload, autoAccept: true),
+                ),
+              ],
+            ),
           ),
         );
       },
