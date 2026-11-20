@@ -25,6 +25,11 @@ audio_fn_pat = re.compile(
 screen_fn_pat = re.compile(
     r'Future<void>\s+_optimizeScreenShareStream\(\)\s+async\s*\{[\s\S]*?\}\s*catch\s*\(_\)\s*\{\}\s*\}'
 )
+send_sched_sig_pat = re.compile(
+    r'static\s+Future<bool>\s+sendScheduledDoc\s*\([^)]*\)\s*async\s*\{'
+)
+fresh_data_pat = re.compile(r'final\s+d\s*=\s*fresh\.data\(\)\s*;')
+doc_is_snap_pat = re.compile(r'if\s*\(\s*doc\s+is\s+DocumentSnapshot[^)]*\)')
 
 for p in pathlib.Path('lib').rglob('*.dart'):
     text = p.read_text(encoding='utf-8')
@@ -60,6 +65,20 @@ for p in pathlib.Path('lib').rglob('*.dart'):
             'await ZegoUIKit().startSharingScreen();',
             'ZegoUIKit().startSharingScreen();',
         )
+
+    if p.name == 'settings_screen.dart':
+        new_text = send_sched_sig_pat.sub(
+            'static Future<bool> sendScheduledDoc(DocumentSnapshot doc) async {',
+            new_text,
+            count=1,
+        )
+        new_text = fresh_data_pat.sub(
+            'final d = fresh.data() as Map<String, dynamic>?;',
+            new_text,
+        )
+
+    if p.name == 'chat_screen.dart':
+        new_text = doc_is_snap_pat.sub('if (doc is DocumentSnapshot)', new_text)
 
     if new_text != text:
         p.write_text(new_text, encoding='utf-8')
