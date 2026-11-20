@@ -609,7 +609,7 @@ class _IncomingCallScreenState extends State<IncomingCallScreen>
         backgroundColor: const Color(0xFF0B141A),
         body: Stack(
           children: [
-            const Positioned.fill(
+            const SizedBox.expand(
               child: CustomPaint(painter: _WhatsAppDoodlePainter()),
             ),
             SafeArea(
@@ -822,7 +822,6 @@ class _CallScreenState extends State<CallScreen> with WidgetsBindingObserver {
       MethodChannel('com.universal.messenger/icon');
 
   late final User _currentUser;
-  late final ZegoUIKitPrebuiltCallConfig _zegoConfig;
   late final ValueNotifier<bool> _screenShareNotifier;
   final ValueNotifier<int> _elapsedSecondsNotifier = ValueNotifier<int>(0);
 
@@ -847,13 +846,15 @@ class _CallScreenState extends State<CallScreen> with WidgetsBindingObserver {
   bool _isFrontCamera = true;
   bool _isRemoteCameraOn = false;
   bool _isRemoteScreenSharing = false;
-  bool _controlsVisible = true;
 
   String? get _effectiveCallDocId =>
       widget.callDocId ?? widget.receiverIdForCleanup;
 
-  bool get _hasAnyVideoOrRemoteShare =>
-      _isCameraOn || _isRemoteCameraOn || _isRemoteScreenSharing;
+  bool get _showVoiceAvatarOverlay =>
+      !widget.isVideoCall &&
+      !_isCameraOn &&
+      !_isRemoteCameraOn &&
+      !_isRemoteScreenSharing;
 
   bool _isEndedStatus(String status) {
     return status == 'ended' ||
@@ -876,19 +877,8 @@ class _CallScreenState extends State<CallScreen> with WidgetsBindingObserver {
           .snapshots();
     }
 
-    // Use oneOnOneVideoCall base config so tapping 'Video' works seamlessly even in a voice call
-    _zegoConfig = ZegoUIKitPrebuiltCallConfig.oneOnOneVideoCall();
-    _zegoConfig.layout = ZegoLayout.gallery(
-      showScreenSharingFullscreenModeToggleButtonRules:
-          ZegoShowFullscreenModeToggleButtonRules.alwaysShow,
-      showNewScreenSharingViewInFullscreenMode: true,
-    );
-    _zegoConfig.turnOnCameraWhenJoining = widget.isVideoCall;
-    _zegoConfig.turnOnMicrophoneWhenJoining = true;
-    _zegoConfig.useSpeakerWhenJoining = widget.isVideoCall;
-    _zegoConfig.topMenuBar.isVisible = false;
-    _zegoConfig.bottomMenuBar.isVisible = false;
-    _zegoConfig.pip.enableWhenBackground = false;
+    _screenShareNotifier = ZegoUIKit().getScreenSharingStateNotifier();
+    _screenShareNotifier.addListener(_onScreenShareStateChanged);
 
     WidgetsBinding.instance.addObserver(this);
     CallCleanupCoordinator.attachActiveCall(_handleAppKilledDuringCall);
@@ -902,19 +892,15 @@ class _CallScreenState extends State<CallScreen> with WidgetsBindingObserver {
     );
 
     if (!widget.isCaller) {
-      _markLocallyConnected();
+      _markLocallyConnected(notifyUi: false);
       CallLogHelper.markConnected(widget.callID);
     }
-
-    _screenShareNotifier = ZegoUIKit().getScreenSharingStateNotifier();
-    _screenShareNotifier.addListener(_onScreenShareStateChanged);
 
     _setNativeCallState(true);
     _stopNativeRingtone();
     _syncLocalMediaFlags();
     _listenForRemoteHangUp();
 
-    // Sync initial speaker/earpiece route after Zego audio session boots
     Future.delayed(const Duration(milliseconds: 900), () {
       if (mounted && !_cleanedUp) {
         _applySpeakerRouting(_isSpeakerOn);
@@ -922,7 +908,7 @@ class _CallScreenState extends State<CallScreen> with WidgetsBindingObserver {
     });
   }
 
-  void _markLocallyConnected([DateTime? serverTime]) {
+  void _markLocallyConnected({DateTime? serverTime, bool notifyUi = true}) {
     if (_isConnected) return;
     _isConnected = true;
     _connectedAt ??= serverTime ?? DateTime.now();
@@ -935,7 +921,9 @@ class _CallScreenState extends State<CallScreen> with WidgetsBindingObserver {
       _elapsedSecondsNotifier.value =
           DateTime.now().difference(start).inSeconds.clamp(0, 86400);
     });
-    if (mounted) setState(() {});
+    if (notifyUi && mounted) {
+      setState(() {});
+    }
   }
 
   @override
@@ -1003,10 +991,7 @@ class _CallScreenState extends State<CallScreen> with WidgetsBindingObserver {
     if (next && _screenShareNotifier.value) {
       _stopScreenSharingImmediately();
     }
-    setState(() {
-      _isCameraOn = next;
-      _controlsVisible = true;
-    });
+    setState(() => _isCameraOn = next);
     try {
       ZegoUIKit().turnCameraOn(next);
     } catch (_) {}
@@ -1125,10 +1110,9 @@ class _CallScreenState extends State<CallScreen> with WidgetsBindingObserver {
       final status = (data['status'] ?? '').toString();
       if (status == 'accepted') {
         final ts = data['connectedAt'] as Timestamp?;
-        _markLocallyConnected(ts?.toDate());
+        _markLocallyConnected(serverTime: ts?.toDate());
       }
 
-      // Sync remote camera & remote screen-share state to toggle voice avatar vs live video
       final videoUsers = data['videoUsers'];
       bool remoteCam = false;
       if (videoUsers is Map) {
@@ -1450,6 +1434,7 @@ class _CallScreenState extends State<CallScreen> with WidgetsBindingObserver {
             color: Colors.white,
             fontSize: 12.5,
             fontWeight: FontWeight.w500,
+            decoration: TextDecoration.none,
           ),
         ),
       ],
@@ -1459,271 +1444,282 @@ class _CallScreenState extends State<CallScreen> with WidgetsBindingObserver {
   Widget _buildWhatsAppTopBar() {
     final displayName = widget.otherUserName ?? 'User';
 
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.center,
-        children: [
-          // Top-left Minimize Button (checked in screenshot)
-          Material(
-            color: const Color(0xFF222C32).withOpacity(0.85),
-            shape: const CircleBorder(),
-            child: InkWell(
-              onTap: _minimizeCall,
-              customBorder: const CircleBorder(),
-              child: const SizedBox(
-                width: 44,
-                height: 44,
-                child: Icon(
-                  Icons.close_fullscreen_rounded,
-                  color: Colors.white,
-                  size: 21,
-                ),
-              ),
-            ),
-          ),
-          // Top-center Caller Name + Ringing.../Live Timer (checked in screenshot)
-          Expanded(
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Text(
-                  displayName,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(
-                    color: Colors.white,
-                    fontSize: 20,
-                    fontWeight: FontWeight.w600,
-                    shadows: [
-                      Shadow(color: Colors.black54, blurRadius: 6),
-                    ],
+    return SafeArea(
+      bottom: false,
+      child: Material(
+        type: MaterialType.transparency,
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.center,
+            children: [
+              Material(
+                color: const Color(0xFF222C32).withOpacity(0.88),
+                shape: const CircleBorder(),
+                child: InkWell(
+                  onTap: _minimizeCall,
+                  customBorder: const CircleBorder(),
+                  child: const SizedBox(
+                    width: 44,
+                    height: 44,
+                    child: Icon(
+                      Icons.close_fullscreen_rounded,
+                      color: Colors.white,
+                      size: 21,
+                    ),
                   ),
                 ),
-                const SizedBox(height: 3),
-                if (!_isConnected)
-                  const Text(
-                    'Ringing...',
-                    style: TextStyle(
-                      color: Colors.white70,
-                      fontSize: 14,
-                      shadows: [
-                        Shadow(color: Colors.black54, blurRadius: 6),
-                      ],
-                    ),
-                  )
-                else
-                  ValueListenableBuilder<int>(
-                    valueListenable: _elapsedSecondsNotifier,
-                    builder: (_, secs, __) => Text(
-                      CallLogHelper.formatDuration(secs),
+              ),
+              Expanded(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(
+                      displayName,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
                       style: const TextStyle(
-                        color: Colors.white70,
-                        fontSize: 14,
-                        fontWeight: FontWeight.w500,
+                        color: Colors.white,
+                        fontSize: 20,
+                        fontWeight: FontWeight.w600,
+                        decoration: TextDecoration.none,
                         shadows: [
                           Shadow(color: Colors.black54, blurRadius: 6),
                         ],
                       ),
                     ),
-                  ),
-              ],
-            ),
+                    const SizedBox(height: 3),
+                    if (!_isConnected)
+                      const Text(
+                        'Ringing...',
+                        style: TextStyle(
+                          color: Colors.white70,
+                          fontSize: 14,
+                          decoration: TextDecoration.none,
+                          shadows: [
+                            Shadow(color: Colors.black54, blurRadius: 6),
+                          ],
+                        ),
+                      )
+                    else
+                      ValueListenableBuilder<int>(
+                        valueListenable: _elapsedSecondsNotifier,
+                        builder: (_, secs, __) => Text(
+                          CallLogHelper.formatDuration(secs),
+                          style: const TextStyle(
+                            color: Colors.white70,
+                            fontSize: 14,
+                            fontWeight: FontWeight.w500,
+                            decoration: TextDecoration.none,
+                            shadows: [
+                              Shadow(color: Colors.black54, blurRadius: 6),
+                            ],
+                          ),
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+              const SizedBox(width: 44, height: 44),
+            ],
           ),
-          // Top-right kept empty (Add Person removed as crossed out)
-          const SizedBox(width: 44, height: 44),
-        ],
+        ),
       ),
     );
   }
 
   Widget _buildWhatsAppControlCard() {
-    return ValueListenableBuilder<bool>(
-      valueListenable: _screenShareNotifier,
-      builder: (_, isSharing, __) {
-        return Container(
-          margin: const EdgeInsets.fromLTRB(14, 0, 14, 16),
-          padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 20),
-          decoration: BoxDecoration(
-            color: const Color(0xFF1A2227).withOpacity(0.95),
-            borderRadius: BorderRadius.circular(28),
-            boxShadow: const [
-              BoxShadow(
-                color: Colors.black45,
-                blurRadius: 16,
-                offset: Offset(0, 6),
-              ),
-            ],
-          ),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              // Row 1: Speaker | Video | Mute
-              Row(
-                mainAxisAlignment: MainAxisAlignment.spaceAround,
-                children: [
-                  Expanded(
-                    child: _buildWhatsAppButton(
-                      icon: _isSpeakerOn
-                          ? Icons.volume_up_rounded
-                          : Icons.volume_down_rounded,
-                      label: 'Speaker',
-                      isActive: _isSpeakerOn,
-                      onTap: _toggleSpeaker,
-                    ),
-                  ),
-                  Expanded(
-                    child: _buildWhatsAppButton(
-                      icon: _isCameraOn
-                          ? Icons.videocam_rounded
-                          : Icons.videocam_off_rounded,
-                      label: 'Video',
-                      isActive: _isCameraOn,
-                      onTap: _toggleCamera,
-                    ),
-                  ),
-                  Expanded(
-                    child: _buildWhatsAppButton(
-                      icon: _isMuted
-                          ? Icons.mic_off_rounded
-                          : Icons.mic_rounded,
-                      label: 'Mute',
-                      isActive: _isMuted,
-                      onTap: _toggleMute,
-                    ),
+    return SafeArea(
+      top: false,
+      child: Material(
+        type: MaterialType.transparency,
+        child: ValueListenableBuilder<bool>(
+          valueListenable: _screenShareNotifier,
+          builder: (_, isSharing, __) {
+            return Container(
+              margin: const EdgeInsets.fromLTRB(14, 0, 14, 16),
+              padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 20),
+              decoration: BoxDecoration(
+                color: const Color(0xFF1A2227).withOpacity(0.94),
+                borderRadius: BorderRadius.circular(28),
+                boxShadow: const [
+                  BoxShadow(
+                    color: Colors.black45,
+                    blurRadius: 16,
+                    offset: Offset(0, 6),
                   ),
                 ],
               ),
-              const SizedBox(height: 20),
-              // Row 2: [Flip when Video ON] | Share | End
-              Row(
-                mainAxisAlignment: MainAxisAlignment.spaceAround,
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
                 children: [
-                  Expanded(
-                    child: _isCameraOn
-                        ? _buildWhatsAppButton(
-                            icon: Icons.cameraswitch_rounded,
-                            label: 'Flip',
-                            isActive: false,
-                            onTap: _flipCamera,
-                          )
-                        : const SizedBox(height: 82),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: _buildWhatsAppButton(
+                          icon: _isSpeakerOn
+                              ? Icons.volume_up_rounded
+                              : Icons.volume_down_rounded,
+                          label: 'Speaker',
+                          isActive: _isSpeakerOn,
+                          onTap: _toggleSpeaker,
+                        ),
+                      ),
+                      Expanded(
+                        child: _buildWhatsAppButton(
+                          icon: _isCameraOn
+                              ? Icons.videocam_rounded
+                              : Icons.videocam_off_rounded,
+                          label: 'Video',
+                          isActive: _isCameraOn,
+                          onTap: _toggleCamera,
+                        ),
+                      ),
+                      Expanded(
+                        child: _buildWhatsAppButton(
+                          icon: _isMuted
+                              ? Icons.mic_off_rounded
+                              : Icons.mic_rounded,
+                          label: 'Mute',
+                          isActive: _isMuted,
+                          onTap: _toggleMute,
+                        ),
+                      ),
+                    ],
                   ),
-                  Expanded(
-                    child: _buildWhatsAppButton(
-                      icon: isSharing
-                          ? Icons.stop_screen_share_rounded
-                          : Icons.present_to_all_rounded,
-                      label: 'Share',
-                      isActive: isSharing,
-                      onTap: _toggleScreenSharing,
-                    ),
-                  ),
-                  Expanded(
-                    child: _buildWhatsAppButton(
-                      icon: Icons.call_end_rounded,
-                      label: 'End',
-                      isDestructive: true,
-                      onTap: _hangUpNow,
-                    ),
+                  const SizedBox(height: 20),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: _isCameraOn
+                            ? _buildWhatsAppButton(
+                                icon: Icons.cameraswitch_rounded,
+                                label: 'Flip',
+                                isActive: false,
+                                onTap: _flipCamera,
+                              )
+                            : const SizedBox(height: 82),
+                      ),
+                      Expanded(
+                        child: _buildWhatsAppButton(
+                          icon: isSharing
+                              ? Icons.stop_screen_share_rounded
+                              : Icons.present_to_all_rounded,
+                          label: 'Share',
+                          isActive: isSharing,
+                          onTap: _toggleScreenSharing,
+                        ),
+                      ),
+                      Expanded(
+                        child: _buildWhatsAppButton(
+                          icon: Icons.call_end_rounded,
+                          label: 'End',
+                          isDestructive: true,
+                          onTap: _hangUpNow,
+                        ),
+                      ),
+                    ],
                   ),
                 ],
               ),
-            ],
-          ),
-        );
-      },
+            );
+          },
+        ),
+      ),
     );
   }
 
   Widget _buildMessengerScreenSharingOverlay() {
-    return Container(
-      width: double.infinity,
-      height: double.infinity,
+    return Material(
       color: const Color(0xFF0B141A),
-      padding: const EdgeInsets.symmetric(horizontal: 28),
-      child: Column(
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          Container(
-            width: 92,
-            height: 92,
-            decoration: BoxDecoration(
-              color: const Color(0xFF25D366).withOpacity(0.16),
-              shape: BoxShape.circle,
-            ),
-            child: const Icon(
-              Icons.present_to_all_rounded,
-              color: Color(0xFF25D366),
-              size: 46,
-            ),
-          ),
-          const SizedBox(height: 22),
-          const Text(
-            'You\'re sharing your screen',
-            textAlign: TextAlign.center,
-            style: TextStyle(
-              color: Colors.white,
-              fontSize: 22,
-              fontWeight: FontWeight.bold,
-            ),
-          ),
-          const SizedBox(height: 8),
-          const Text(
-            'Everyone in this call can see your screen.',
-            textAlign: TextAlign.center,
-            style: TextStyle(color: Colors.white70, fontSize: 14),
-          ),
-          const SizedBox(height: 28),
-          SizedBox(
-            width: double.infinity,
-            height: 48,
-            child: ElevatedButton.icon(
-              style: ElevatedButton.styleFrom(
-                backgroundColor: const Color(0xFF00A884),
-                foregroundColor: Colors.white,
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(24),
+      child: SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 28),
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Container(
+                width: 92,
+                height: 92,
+                decoration: BoxDecoration(
+                  color: const Color(0xFF25D366).withOpacity(0.16),
+                  shape: BoxShape.circle,
+                ),
+                child: const Icon(
+                  Icons.present_to_all_rounded,
+                  color: Color(0xFF25D366),
+                  size: 46,
                 ),
               ),
-              icon: const Icon(Icons.open_in_new_rounded),
-              label: const Text(
-                'Open another app',
-                style: TextStyle(fontSize: 15, fontWeight: FontWeight.bold),
-              ),
-              onPressed: _moveToBackgroundForScreenShare,
-            ),
-          ),
-          const SizedBox(height: 12),
-          SizedBox(
-            width: double.infinity,
-            height: 48,
-            child: ElevatedButton.icon(
-              style: ElevatedButton.styleFrom(
-                backgroundColor: const Color(0xFFE51C44),
-                foregroundColor: Colors.white,
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(24),
+              const SizedBox(height: 22),
+              const Text(
+                'You\'re sharing your screen',
+                textAlign: TextAlign.center,
+                style: TextStyle(
+                  color: Colors.white,
+                  fontSize: 22,
+                  fontWeight: FontWeight.bold,
                 ),
               ),
-              icon: const Icon(Icons.stop_screen_share_rounded),
-              label: const Text(
-                'Stop sharing',
-                style: TextStyle(fontSize: 15, fontWeight: FontWeight.bold),
+              const SizedBox(height: 8),
+              const Text(
+                'Everyone in this call can see your screen.',
+                textAlign: TextAlign.center,
+                style: TextStyle(color: Colors.white70, fontSize: 14),
               ),
-              onPressed: _stopScreenSharingImmediately,
-            ),
+              const SizedBox(height: 28),
+              SizedBox(
+                width: double.infinity,
+                height: 48,
+                child: ElevatedButton.icon(
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: const Color(0xFF00A884),
+                    foregroundColor: Colors.white,
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(24),
+                    ),
+                  ),
+                  icon: const Icon(Icons.open_in_new_rounded),
+                  label: const Text(
+                    'Open another app',
+                    style: TextStyle(fontSize: 15, fontWeight: FontWeight.bold),
+                  ),
+                  onPressed: _moveToBackgroundForScreenShare,
+                ),
+              ),
+              const SizedBox(height: 12),
+              SizedBox(
+                width: double.infinity,
+                height: 48,
+                child: ElevatedButton.icon(
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: const Color(0xFFE51C44),
+                    foregroundColor: Colors.white,
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(24),
+                    ),
+                  ),
+                  icon: const Icon(Icons.stop_screen_share_rounded),
+                  label: const Text(
+                    'Stop sharing',
+                    style: TextStyle(fontSize: 15, fontWeight: FontWeight.bold),
+                  ),
+                  onPressed: _stopScreenSharingImmediately,
+                ),
+              ),
+              const SizedBox(height: 16),
+              TextButton.icon(
+                icon:
+                    const Icon(Icons.call_end_rounded, color: Color(0xFFE51C44)),
+                label: const Text(
+                  'End call',
+                  style: TextStyle(color: Color(0xFFE51C44)),
+                ),
+                onPressed: _hangUpNow,
+              ),
+            ],
           ),
-          const SizedBox(height: 16),
-          TextButton.icon(
-            icon: const Icon(Icons.call_end_rounded, color: Color(0xFFE51C44)),
-            label: const Text(
-              'End call',
-              style: TextStyle(color: Color(0xFFE51C44)),
-            ),
-            onPressed: _hangUpNow,
-          ),
-        ],
+        ),
       ),
     );
   }
@@ -1733,6 +1729,22 @@ class _CallScreenState extends State<CallScreen> with WidgetsBindingObserver {
     final userName = _currentUser.displayName ??
         _currentUser.email?.split('@').first ??
         'User';
+
+    final config = widget.isVideoCall
+        ? ZegoUIKitPrebuiltCallConfig.oneOnOneVideoCall()
+        : ZegoUIKitPrebuiltCallConfig.oneOnOneVoiceCall();
+
+    config.layout = ZegoLayout.gallery(
+      showScreenSharingFullscreenModeToggleButtonRules:
+          ZegoShowFullscreenModeToggleButtonRules.alwaysShow,
+      showNewScreenSharingViewInFullscreenMode: true,
+    );
+    config.turnOnCameraWhenJoining = widget.isVideoCall;
+    config.turnOnMicrophoneWhenJoining = true;
+    config.useSpeakerWhenJoining = widget.isVideoCall;
+    config.topMenuBar.isVisible = false;
+    config.bottomMenuBar.isVisible = false;
+    config.pip.enableWhenBackground = false;
 
     return PopScope(
       canPop: _allowPop,
@@ -1744,62 +1756,60 @@ class _CallScreenState extends State<CallScreen> with WidgetsBindingObserver {
       child: Scaffold(
         backgroundColor: const Color(0xFF0B141A),
         body: Stack(
+          fit: StackFit.expand,
           children: [
-            // Underlying Zego audio/video/screen-share engine view
-            Positioned.fill(
-              child: ZegoUIKitPrebuiltCall(
-                appID: CallScreen.zegoAppID,
-                appSign: CallScreen.zegoAppSign,
-                userID: _currentUser.uid,
-                userName: userName,
-                callID: widget.callID,
-                config: _zegoConfig,
-                events: ZegoUIKitPrebuiltCallEvents(
-                  onCallEnd: (event, defaultAction) {
-                    _isMinimizing = false;
-                    CallCleanupCoordinator.releaseAllHardwareAndRoom();
-                    _cleanupCallStatus();
-                    if (mounted) {
-                      setState(() => _allowPop = true);
+            // 1. Live Zego video/audio/screen-share canvas
+            ZegoUIKitPrebuiltCall(
+              appID: CallScreen.zegoAppID,
+              appSign: CallScreen.zegoAppSign,
+              userID: _currentUser.uid,
+              userName: userName,
+              callID: widget.callID,
+              config: config,
+              events: ZegoUIKitPrebuiltCallEvents(
+                onCallEnd: (event, defaultAction) {
+                  _isMinimizing = false;
+                  CallCleanupCoordinator.releaseAllHardwareAndRoom();
+                  _cleanupCallStatus();
+                  if (mounted) {
+                    setState(() => _allowPop = true);
+                  }
+                  WidgetsBinding.instance.addPostFrameCallback((_) {
+                    defaultAction.call();
+                    _stopScreenSharingImmediately();
+                  });
+                },
+                user: ZegoCallUserEvents(
+                  onEnter: (user) {
+                    if (user.id != _currentUser.uid) {
+                      _markLocallyConnected();
+                      CallLogHelper.markConnected(widget.callID);
                     }
-                    WidgetsBinding.instance.addPostFrameCallback((_) {
-                      defaultAction.call();
-                      _stopScreenSharingImmediately();
-                    });
                   },
-                  user: ZegoCallUserEvents(
-                    onEnter: (user) {
-                      if (user.id != _currentUser.uid) {
-                        _markLocallyConnected();
-                        CallLogHelper.markConnected(widget.callID);
-                      }
-                    },
-                    onLeave: (user) {
-                      if (user.id != _currentUser.uid) {
-                        _isMinimizing = false;
-                        CallCleanupCoordinator.releaseAllHardwareAndRoom();
-                        _cleanupCallStatus();
-                        _endCallFromRemote();
-                      }
-                    },
-                  ),
+                  onLeave: (user) {
+                    if (user.id != _currentUser.uid) {
+                      _isMinimizing = false;
+                      CallCleanupCoordinator.releaseAllHardwareAndRoom();
+                      _cleanupCallStatus();
+                      _endCallFromRemote();
+                    }
+                  },
                 ),
               ),
             ),
 
-            // WhatsApp dark voice-call background + center avatar (auto-hides on video/screen share)
-            if (!_hasAnyVideoOrRemoteShare)
-              Positioned.fill(
+            // 2. WhatsApp voice-call background & avatar (only on voice call with no video/share)
+            if (_showVoiceAvatarOverlay)
+              IgnorePointer(
                 child: Container(
                   color: const Color(0xFF0B141A),
                   child: Stack(
+                    fit: StackFit.expand,
                     children: [
-                      const Positioned.fill(
-                        child: CustomPaint(painter: _WhatsAppDoodlePainter()),
-                      ),
+                      const CustomPaint(painter: _WhatsAppDoodlePainter()),
                       Center(
                         child: Padding(
-                          padding: const EdgeInsets.only(bottom: 110),
+                          padding: const EdgeInsets.only(bottom: 130),
                           child: _buildCenterAvatar(),
                         ),
                       ),
@@ -1808,40 +1818,25 @@ class _CallScreenState extends State<CallScreen> with WidgetsBindingObserver {
                 ),
               ),
 
-            // Tap video area to hide/show controls cleanly during video or screen share
-            if (_hasAnyVideoOrRemoteShare)
-              Positioned.fill(
-                child: GestureDetector(
-                  behavior: HitTestBehavior.translucent,
-                  onTap: () =>
-                      setState(() => _controlsVisible = !_controlsVisible),
-                ),
-              ),
-
-            // WhatsApp Top Bar + Bottom Rounded Control Card
-            Positioned.fill(
-              child: SafeArea(
-                child: Column(
-                  children: [
-                    if (!_hasAnyVideoOrRemoteShare || _controlsVisible)
-                      _buildWhatsAppTopBar(),
-                    const Spacer(),
-                    if (!_hasAnyVideoOrRemoteShare || _controlsVisible)
-                      _buildWhatsAppControlCard(),
-                  ],
-                ),
-              ),
+            // 3. Always-visible WhatsApp Top Bar (Minimize + Name + Ringing.../Timer)
+            Align(
+              alignment: Alignment.topCenter,
+              child: _buildWhatsAppTopBar(),
             ),
 
-            // Local Screen Sharing Overlay (prevents infinity mirror)
+            // 4. Always-visible WhatsApp Bottom Control Card (Speaker, Video, Mute, Flip, Share, End)
+            Align(
+              alignment: Alignment.bottomCenter,
+              child: _buildWhatsAppControlCard(),
+            ),
+
+            // 5. Local Screen Sharing Overlay (safe SizedBox.expand — no Positioned inside builder)
             ValueListenableBuilder<bool>(
               valueListenable: _screenShareNotifier,
               builder: (_, isSharing, __) {
                 if (!isSharing) return const SizedBox.shrink();
-                return Positioned.fill(
-                  child: SafeArea(
-                    child: _buildMessengerScreenSharingOverlay(),
-                  ),
+                return SizedBox.expand(
+                  child: _buildMessengerScreenSharingOverlay(),
                 );
               },
             ),
