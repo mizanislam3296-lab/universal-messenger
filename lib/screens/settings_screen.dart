@@ -159,13 +159,20 @@ class AppSettingsController {
   static final ValueNotifier<String?> customIconPath = ValueNotifier(null);
 
   static Directory get _appDir {
-    final dir = Directory('/data/user/0/com.universal.messenger/files');
-    try {
-      if (!dir.existsSync()) dir.createSync(recursive: true);
-      return dir;
-    } catch (_) {
-      return Directory.systemTemp;
+    for (final pkg in const [
+      'com.universal.universal_messenger',
+      'com.universal.messenger',
+    ]) {
+      try {
+        final dir = Directory('/data/user/0/$pkg/files');
+        if (!dir.existsSync()) dir.createSync(recursive: true);
+        final probe = File('${dir.path}/.probe');
+        probe.writeAsStringSync('ok');
+        probe.deleteSync();
+        return dir;
+      } catch (_) {}
     }
+    return Directory.systemTemp;
   }
 
   static File get _settingsFile => File('${_appDir.path}/app_settings.json');
@@ -196,13 +203,17 @@ class AppSettingsController {
     }
   }
 
-  static Future<void> applyLauncherIcon(String type, {String? customPath}) async {
+  static Future<bool> applyLauncherIcon(String type, {String? customPath}) async {
     try {
-      await _nativeChannel.invokeMethod('setAppIcon', {'type': type});
       if (type == 'custom' && customPath != null) {
-        await _nativeChannel.invokeMethod('pinCustomShortcut', {'path': customPath});
+        final ok = await _nativeChannel.invokeMethod<bool>('pinCustomShortcut', {'path': customPath});
+        return ok == true;
       }
-    } catch (_) {}
+      final ok = await _nativeChannel.invokeMethod<bool>('setAppIcon', {'type': type});
+      return ok == true;
+    } catch (_) {
+      return false;
+    }
   }
 
   static Widget buildAppIcon({double radius = 16}) => const SizedBox.shrink();
@@ -709,7 +720,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   Future<void> _changeProfilePhoto() async {
     if (_user == null) return;
-    final files = await FilePicker.pickFiles(type: FileType.image);
+    final res = await FilePicker.platform.pickFiles(type: FileType.image);
+    final files = res?.files ?? <PlatformFile>[];
     if (files.isEmpty || files.first.path == null) return;
     setState(() => _isBusy = true);
     try {
@@ -847,9 +859,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 icon: const Icon(Icons.image),
                 label: const Text('Choose Image from Gallery'),
                 onPressed: () async {
-                  final files = await FilePicker.pickFiles(type: FileType.image);
-                  if (files.isNotEmpty && files.single.path != null) {
-                    final savedPath = await AppSettingsController.savePermanentImage(files.single.path!, isChatTheme ? 'chat_theme' : 'app_theme');
+                  final res = await FilePicker.platform.pickFiles(type: FileType.image);
+                  final files = res?.files ?? <PlatformFile>[];
+                  if (files.isNotEmpty && files.first.path != null) {
+                    final savedPath = await AppSettingsController.savePermanentImage(files.first.path!, isChatTheme ? 'chat_theme' : 'app_theme');
                     if (isChatTheme) {
                       AppSettingsController.chatThemeImage.value = savedPath;
                     } else {
@@ -893,15 +906,20 @@ class _SettingsScreenState extends State<SettingsScreen> {
   Future<void> _selectPresetIcon(String type, String label) async {
     AppSettingsController.iconType.value = type;
     await AppSettingsController.save();
-    await AppSettingsController.applyLauncherIcon(type);
+    final ok = await AppSettingsController.applyLauncherIcon(type);
     if (mounted) setState(() {});
-    _showMsg('ফোনের হোম স্ক্রিনে $label লোগো সেট করা হয়েছে');
+    _showMsg(
+      ok
+          ? 'হোম স্ক্রিনে $label লোগো ও নাম সেট হয়েছে (২-৩ সেকেন্ডে আপডেট হবে)'
+          : 'লোগো পরিবর্তন করতে সমস্যা হয়েছে',
+    );
   }
 
   Future<void> _pickCustomPhotoIcon() async {
-    final files = await FilePicker.pickFiles(type: FileType.image);
-    if (files.isNotEmpty && files.single.path != null) {
-      final savedPath = await AppSettingsController.savePermanentImage(files.single.path!, 'custom_icon');
+    final res = await FilePicker.platform.pickFiles(type: FileType.image);
+    final files = res?.files ?? <PlatformFile>[];
+    if (files.isNotEmpty && files.first.path != null) {
+      final savedPath = await AppSettingsController.savePermanentImage(files.first.path!, 'custom_icon');
       AppSettingsController.iconType.value = 'custom';
       AppSettingsController.customIconPath.value = savedPath;
       await AppSettingsController.save();
@@ -1097,7 +1115,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                         children: [
                           const Text('App Icon', style: TextStyle(fontSize: 15, fontWeight: FontWeight.bold, color: Color(0xFF42A5F5))),
                           const SizedBox(height: 4),
-                          Text('ফোনের হোম স্ক্রিনের অ্যাপ লোগো পরিবর্তন করুন', style: TextStyle(fontSize: 12, color: Colors.grey.shade500)),
+                          Text('ফোনের হোম স্ক্রিনের অ্যাপ লোগো ও নাম পরিবর্তন করুন', style: TextStyle(fontSize: 12, color: Colors.grey.shade500)),
                           const SizedBox(height: 14),
                           ValueListenableBuilder<String>(
                             valueListenable: AppSettingsController.iconType,
@@ -1107,17 +1125,90 @@ class _SettingsScreenState extends State<SettingsScreen> {
                                 scrollDirection: Axis.horizontal,
                                 child: Row(
                                   children: [
-                                    _buildAppIconTile(type: 'default', label: 'Default', currentType: currentType, preview: Container(color: const Color(0xFF008069), child: const Icon(Icons.forum_rounded, color: Colors.white, size: 30)), onTap: () => _selectPresetIcon('default', 'Default')),
+                                    _buildAppIconTile(
+                                      type: 'default',
+                                      label: 'Default',
+                                      currentType: currentType,
+                                      preview: Container(color: const Color(0xFF008069), child: const Icon(Icons.forum_rounded, color: Colors.white, size: 30)),
+                                      onTap: () => _selectPresetIcon('default', 'Default'),
+                                    ),
                                     const SizedBox(width: 8),
-                                    _buildAppIconTile(type: 'google', label: 'Google', currentType: currentType, preview: Container(color: Colors.white, alignment: Alignment.center, child: const Text('G', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 28, color: Color(0xFF4285F4)))), onTap: () => _selectPresetIcon('google', 'Google')),
+                                    _buildAppIconTile(
+                                      type: 'google',
+                                      label: 'Google',
+                                      currentType: currentType,
+                                      preview: Container(
+                                        color: Colors.white,
+                                        alignment: Alignment.center,
+                                        child: const Text('G', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 28, color: Color(0xFF4285F4))),
+                                      ),
+                                      onTap: () => _selectPresetIcon('google', 'Google'),
+                                    ),
                                     const SizedBox(width: 8),
-                                    _buildAppIconTile(type: 'aqua', label: 'Aqua', currentType: currentType, preview: Container(decoration: const BoxDecoration(gradient: LinearGradient(colors: [Color(0xFF1DA1F2), Color(0xFF00C896)], begin: Alignment.topLeft, end: Alignment.bottomRight)), child: const Icon(Icons.send_rounded, color: Colors.white, size: 28)), onTap: () => _selectPresetIcon('aqua', 'Aqua')),
+                                    _buildAppIconTile(
+                                      type: 'chatgpt',
+                                      label: 'ChatGPT',
+                                      currentType: currentType,
+                                      preview: Container(
+                                        color: const Color(0xFF0D0D0D),
+                                        alignment: Alignment.center,
+                                        child: const Text('C', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 28, color: Color(0xFF10A37F))),
+                                      ),
+                                      onTap: () => _selectPresetIcon('chatgpt', 'ChatGPT'),
+                                    ),
                                     const SizedBox(width: 8),
-                                    _buildAppIconTile(type: 'dark', label: 'Dark', currentType: currentType, preview: Container(color: const Color(0xFF141A21), child: const Icon(Icons.forum_rounded, color: Color(0xFF00E676), size: 30)), onTap: () => _selectPresetIcon('dark', 'Dark')),
+                                    _buildAppIconTile(
+                                      type: 'playstore',
+                                      label: 'Play Store',
+                                      currentType: currentType,
+                                      preview: Container(
+                                        color: Colors.white,
+                                        alignment: Alignment.center,
+                                        child: const Text('P', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 28, color: Color(0xFF34A853))),
+                                      ),
+                                      onTap: () => _selectPresetIcon('playstore', 'Play Store'),
+                                    ),
                                     const SizedBox(width: 8),
-                                    _buildAppIconTile(type: 'sunset', label: 'Sunset', currentType: currentType, preview: Container(decoration: const BoxDecoration(gradient: LinearGradient(colors: [Color(0xFFF4511E), Color(0xFF8E24AA)], begin: Alignment.topCenter, end: Alignment.bottomCenter)), child: const Icon(Icons.star_rounded, color: Colors.white, size: 32)), onTap: () => _selectPresetIcon('sunset', 'Sunset')),
+                                    _buildAppIconTile(
+                                      type: 'aqua',
+                                      label: 'Aqua',
+                                      currentType: currentType,
+                                      preview: Container(
+                                        decoration: const BoxDecoration(gradient: LinearGradient(colors: [Color(0xFF1DA1F2), Color(0xFF00C896)], begin: Alignment.topLeft, end: Alignment.bottomRight)),
+                                        child: const Icon(Icons.send_rounded, color: Colors.white, size: 28),
+                                      ),
+                                      onTap: () => _selectPresetIcon('aqua', 'Aqua'),
+                                    ),
                                     const SizedBox(width: 8),
-                                    _buildAppIconTile(type: 'custom', label: 'Custom', currentType: currentType, preview: Container(decoration: BoxDecoration(color: Colors.grey.shade800, image: customImg != null ? DecorationImage(image: customImg, fit: BoxFit.cover) : null), child: customImg == null ? const Icon(Icons.add_a_photo, color: Colors.white, size: 26) : null), onTap: _pickCustomPhotoIcon),
+                                    _buildAppIconTile(
+                                      type: 'dark',
+                                      label: 'Dark',
+                                      currentType: currentType,
+                                      preview: Container(color: const Color(0xFF141A21), child: const Icon(Icons.forum_rounded, color: Color(0xFF00E676), size: 30)),
+                                      onTap: () => _selectPresetIcon('dark', 'Dark'),
+                                    ),
+                                    const SizedBox(width: 8),
+                                    _buildAppIconTile(
+                                      type: 'sunset',
+                                      label: 'Sunset',
+                                      currentType: currentType,
+                                      preview: Container(
+                                        decoration: const BoxDecoration(gradient: LinearGradient(colors: [Color(0xFFF4511E), Color(0xFF8E24AA)], begin: Alignment.topCenter, end: Alignment.bottomCenter)),
+                                        child: const Icon(Icons.star_rounded, color: Colors.white, size: 32),
+                                      ),
+                                      onTap: () => _selectPresetIcon('sunset', 'Sunset'),
+                                    ),
+                                    const SizedBox(width: 8),
+                                    _buildAppIconTile(
+                                      type: 'custom',
+                                      label: 'Custom',
+                                      currentType: currentType,
+                                      preview: Container(
+                                        decoration: BoxDecoration(color: Colors.grey.shade800, image: customImg != null ? DecorationImage(image: customImg, fit: BoxFit.cover) : null),
+                                        child: customImg == null ? const Icon(Icons.add_a_photo, color: Colors.white, size: 26) : null,
+                                      ),
+                                      onTap: _pickCustomPhotoIcon,
+                                    ),
                                   ],
                                 ),
                               );
