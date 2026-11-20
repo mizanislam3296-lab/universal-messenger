@@ -564,7 +564,6 @@ def write_launcher_icon_resources() -> None:
 """
     (values_dir / "icon_colors.xml").write_text(colors_xml, encoding="utf-8")
 
-    # Foreground vector contents (108x108 adaptive icon viewport, safe zone 21..87)
     fg_bodies = {
         "default": (
             "#008069",
@@ -643,7 +642,6 @@ def write_launcher_icon_resources() -> None:
     }
 
     for key, (bg_hex, body) in fg_bodies.items():
-        # Foreground-only vector for Android 8+ adaptive icon
         fg_xml = f"""<?xml version="1.0" encoding="utf-8"?>
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="108dp"
@@ -655,7 +653,6 @@ def write_launcher_icon_resources() -> None:
 """
         (drawable_dir / f"ic_alias_{key}_fg.xml").write_text(fg_xml, encoding="utf-8")
 
-        # Fallback full icon for API < 26
         fallback_xml = f"""<?xml version="1.0" encoding="utf-8"?>
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="108dp"
@@ -670,7 +667,6 @@ def write_launcher_icon_resources() -> None:
 """
         (drawable_dir / f"ic_alias_{key}.xml").write_text(fallback_xml, encoding="utf-8")
 
-        # Adaptive icon for API 26+ (clean rounded/squircle home screen look)
         adaptive_xml = f"""<?xml version="1.0" encoding="utf-8"?>
 <adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
     <background android:drawable="@color/ic_bg_{key}" />
@@ -931,6 +927,7 @@ class MainActivity : FlutterActivity() {
     }
 
     private var isCallActive: Boolean = false
+    private var isScreenSharing: Boolean = false
     private var suppressPipOnce: Boolean = false
     private var activeRingtone: Ringtone? = null
 
@@ -954,6 +951,10 @@ class MainActivity : FlutterActivity() {
         super.onUserLeaveHint()
         if (suppressPipOnce) {
             suppressPipOnce = false
+            return
+        }
+        // Do NOT force PiP while screen sharing or during MediaProjection consent
+        if (isScreenSharing) {
             return
         }
         if (isCallActive && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -994,6 +995,27 @@ class MainActivity : FlutterActivity() {
                             ?: call.argument<Boolean>("active")
                             ?: false
                         isCallActive = active
+                        if (!active) {
+                            isScreenSharing = false
+                            stopZegoScreenCaptureServices()
+                        }
+                        result.success(true)
+                    }
+
+                    "setScreenSharing" -> {
+                        val active = (call.arguments as? Boolean)
+                            ?: call.argument<Boolean>("active")
+                            ?: false
+                        isScreenSharing = active
+                        if (!active) {
+                            stopZegoScreenCaptureServices()
+                        }
+                        result.success(true)
+                    }
+
+                    "stopScreenShareService" -> {
+                        isScreenSharing = false
+                        stopZegoScreenCaptureServices()
                         result.success(true)
                     }
 
@@ -1060,6 +1082,20 @@ class MainActivity : FlutterActivity() {
             }
     }
 
+    private fun stopZegoScreenCaptureServices() {
+        val serviceNames = listOf(
+            "im.zego.zegoexpress.internal.ZegoScreenCaptureService",
+            "im.zego.internal.screencapture.ZegoScreenCaptureService"
+        )
+        for (cls in serviceNames) {
+            try {
+                val intent = Intent().setClassName(applicationContext.packageName, cls)
+                applicationContext.stopService(intent)
+            } catch (_: Exception) {
+            }
+        }
+    }
+
     private fun switchLauncherIcon(type: String): Boolean {
         val normalized = type.lowercase().trim()
         if (normalized == "custom") {
@@ -1070,7 +1106,6 @@ class MainActivity : FlutterActivity() {
             val pm = applicationContext.packageManager
             val pkg = applicationContext.packageName
 
-            // Enable new alias FIRST so Android launcher never sees 0 active icons
             pm.setComponentEnabledSetting(
                 ComponentName(pkg, targetClass),
                 PackageManager.COMPONENT_ENABLED_STATE_ENABLED,
@@ -1240,12 +1275,13 @@ class MainActivity : FlutterActivity() {
 
     override fun onDestroy() {
         stopActiveRingtone()
+        stopZegoScreenCaptureServices()
         super.onDestroy()
     }
 }
 """
     (kt_dir / "MainActivity.kt").write_text(kt_content, encoding="utf-8")
-    log("Wrote MainActivity.kt with launcher icon switcher")
+    log("Wrote MainActivity.kt with launcher icon switcher & screen share cleanup")
 
 
 def main() -> None:
