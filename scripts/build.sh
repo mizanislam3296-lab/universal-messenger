@@ -19,17 +19,12 @@ zego_express_imp_pat = re.compile(
     r"^\s*import\s+'package:zego_express_engine/zego_express_engine\.dart';\s*\n?",
     flags=re.MULTILINE,
 )
-audio_fn_pat = re.compile(
-    r'Future<void>\s+_applyClearAudioAndHardwareSettings\(\)\s+async\s*\{[\s\S]*?\}\s*catch\s*\(_\)\s*\{\}\s*\}'
-)
-screen_fn_pat = re.compile(
-    r'Future<void>\s+_optimizeScreenShareStream\(\)\s+async\s*\{[\s\S]*?\}\s*catch\s*\(_\)\s*\{\}\s*\}'
-)
 send_sched_sig_pat = re.compile(
     r'static\s+Future<bool>\s+sendScheduledDoc\s*\([^)]*\)\s*async\s*\{'
 )
 fresh_data_pat = re.compile(r'final\s+d\s*=\s*fresh\.data\(\)\s*;')
 doc_is_snap_pat = re.compile(r'if\s*\(\s*doc\s+is\s+DocumentSnapshot[^)]*\)')
+fb_init_pat = re.compile(r'(await\s+Firebase\.initializeApp\s*\([\s\S]*?\)\s*;)')
 
 for p in pathlib.Path('lib').rglob('*.dart'):
     text = p.read_text(encoding='utf-8')
@@ -39,28 +34,28 @@ for p in pathlib.Path('lib').rglob('*.dart'):
     )
     new_text = double_gt_pat.sub(r'StreamBuilder<\1>(', new_text)
 
+    if p.name == 'main.dart' and 'universalFcmBackgroundHandler' not in new_text:
+        fcm_imp = "import 'package:firebase_messaging/firebase_messaging.dart';"
+        set_imp = "import 'package:universal_messenger/screens/settings_screen.dart';"
+        header = ''
+        if fcm_imp not in new_text:
+            header += f"{fcm_imp}\n"
+        if set_imp not in new_text:
+            header += f"{set_imp}\n"
+        if header:
+            new_text = header + new_text
+        new_text = fb_init_pat.sub(
+            r'\1\n  FirebaseMessaging.onBackgroundMessage(universalFcmBackgroundHandler);',
+            new_text,
+            count=1,
+        )
+
     if p.name == 'call_screen.dart':
         prebuilt_imp = "import 'package:zego_uikit_prebuilt_call/zego_uikit_prebuilt_call.dart';"
         uikit_imp = "import 'package:zego_uikit/zego_uikit.dart';"
         if prebuilt_imp in new_text and uikit_imp not in new_text:
             new_text = new_text.replace(prebuilt_imp, f"{prebuilt_imp}\n{uikit_imp}", 1)
         new_text = zego_express_imp_pat.sub('', new_text)
-        new_text = audio_fn_pat.sub(
-            "Future<void> _applyClearAudioAndHardwareSettings() async {\n"
-            "    try {\n"
-            "      await _nativeChannel.invokeMethod('setCallAudioMode', {'active': true});\n"
-            "    } catch (_) {}\n"
-            "  }",
-            new_text,
-        )
-        new_text = screen_fn_pat.sub(
-            "Future<void> _optimizeScreenShareStream() async {\n"
-            "    try {\n"
-            "      await _nativeChannel.invokeMethod('setCallAudioMode', {'active': true});\n"
-            "    } catch (_) {}\n"
-            "  }",
-            new_text,
-        )
         new_text = new_text.replace(
             'await ZegoUIKit().startSharingScreen();',
             'ZegoUIKit().startSharingScreen();',
@@ -79,6 +74,12 @@ for p in pathlib.Path('lib').rglob('*.dart'):
 
     if p.name == 'chat_screen.dart':
         new_text = doc_is_snap_pat.sub('if (doc is DocumentSnapshot)', new_text)
+        if 'callId: callId,' in new_text and 'callerId: _currentUser.uid,' not in new_text:
+            new_text = new_text.replace(
+                'callId: callId,',
+                'callId: callId,\n      chatId: _chatId,\n      callerId: _currentUser.uid,\n      callerName: callerName,\n      callerEmail: callerEmail,',
+                1,
+            )
 
     if new_text != text:
         p.write_text(new_text, encoding='utf-8')
