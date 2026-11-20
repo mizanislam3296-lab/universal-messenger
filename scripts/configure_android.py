@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
-Configure freshly generated Android project, generate adaptive launcher aliases,
-and patch cached Flutter plugins for AGP 9+ / modern Flutter compatibility on CI.
+Configure freshly generated Android project, permanent release signing,
+adaptive launcher aliases, CallTaskCleanupService, accurate Android 12-16
+speaker routing, and AGP 9+ plugin patches.
 """
 
 import json
@@ -449,12 +450,39 @@ gradle.beforeProject { proj ->
         log("Configured android/settings.gradle")
 
 
+def configure_release_key_properties() -> bool:
+    """Create android/key.properties if a permanent upload-keystore.jks and credentials exist."""
+    keystore_file = APP_DIR / "upload-keystore.jks"
+    store_pwd = os.environ.get("KEYSTORE_PASSWORD", "").strip()
+    key_pwd = os.environ.get("KEY_PASSWORD", "").strip() or store_pwd
+    key_alias = os.environ.get("KEY_ALIAS", "").strip() or "upload"
+
+    key_props_file = ANDROID_DIR / "key.properties"
+    if keystore_file.exists() and store_pwd and key_pwd and key_alias:
+        content = (
+            f"storePassword={store_pwd}\n"
+            f"keyPassword={key_pwd}\n"
+            f"keyAlias={key_alias}\n"
+            "storeFile=upload-keystore.jks\n"
+        )
+        key_props_file.write_text(content, encoding="utf-8")
+        log(f"Configured permanent release signing (alias={key_alias})")
+        return True
+
+    if key_props_file.exists():
+        key_props_file.unlink()
+    log("Permanent release keystore not configured; release build will use debug signing.")
+    return False
+
+
 def write_app_build_gradle_kts(application_id: str) -> None:
     groovy_app = APP_DIR / "build.gradle"
     if groovy_app.exists():
         groovy_app.unlink()
 
-    kts_template = """import org.jetbrains.kotlin.gradle.dsl.JvmTarget
+    kts_template = """import java.io.FileInputStream
+import java.util.Properties
+import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 import org.jetbrains.kotlin.gradle.tasks.KotlinCompile
 
 plugins {
@@ -462,6 +490,13 @@ plugins {
     id("kotlin-android")
     id("dev.flutter.flutter-gradle-plugin")
     id("com.google.gms.google-services")
+}
+
+val keystorePropertiesFile = rootProject.file("key.properties")
+val keystoreProperties = Properties()
+val hasReleaseKeystore = keystorePropertiesFile.exists()
+if (hasReleaseKeystore) {
+    keystoreProperties.load(FileInputStream(keystorePropertiesFile))
 }
 
 android {
@@ -488,9 +523,24 @@ android {
         buildConfig = true
     }
 
+    signingConfigs {
+        if (hasReleaseKeystore) {
+            create("release") {
+                keyAlias = keystoreProperties.getProperty("keyAlias")
+                keyPassword = keystoreProperties.getProperty("keyPassword")
+                storeFile = file(keystoreProperties.getProperty("storeFile"))
+                storePassword = keystoreProperties.getProperty("storePassword")
+            }
+        }
+    }
+
     buildTypes {
         release {
-            signingConfig = signingConfigs.getByName("debug")
+            signingConfig = if (hasReleaseKeystore) {
+                signingConfigs.getByName("release")
+            } else {
+                signingConfigs.getByName("debug")
+            }
             isMinifyEnabled = false
             isShrinkResources = false
         }
@@ -852,6 +902,12 @@ def write_android_manifest() -> None:
         </provider>
 
         <service
+            android:name="com.universal.universal_messenger.CallTaskCleanupService"
+            android:enabled="true"
+            android:exported="false"
+            android:stopWithTask="false" />
+
+        <service
             android:name="im.zego.zegoexpress.internal.ZegoScreenCaptureService"
             android:enabled="true"
             android:exported="false"
@@ -872,7 +928,35 @@ def write_android_manifest() -> None:
 </manifest>
 """
     (MAIN_DIR / "AndroidManifest.xml").write_text(manifest_content, encoding="utf-8")
-    log("Wrote android/app/src/main/AndroidManifest.xml with launcher aliases")
+    log("Wrote android/app/src/main/AndroidManifest.xml with CallTaskCleanupService")
+
+
+def write_call_task_cleanup_service_kt() -> None:
+    kt_dir = MAIN_DIR / "kotlin" / "com" / "universal" / "universal_messenger"
+    kt_dir.mkdir(parents=True, exist_ok=True)
+
+    service_kt = """package com.universal.universal_messenger
+
+import android.app.Service
+import android.content.Intent
+import android.os.IBinder
+
+class CallTaskCleanupService : Service() {
+    override fun onBind(intent: Intent?): IBinder? = null
+
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        return START_NOT_STICKY
+    }
+
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        MainActivity.handleAppSwipedFromRecents(applicationContext)
+        stopSelf()
+        super.onTaskRemoved(rootIntent)
+    }
+}
+"""
+    (kt_dir / "CallTaskCleanupService.kt").write_text(service_kt, encoding="utf-8")
+    log("Wrote CallTaskCleanupService.kt")
 
 
 def write_main_activity_kt() -> None:
@@ -897,6 +981,7 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.drawable.Icon
 import android.media.AudioAttributes
+import android.media.AudioDeviceInfo
 import android.media.AudioManager
 import android.media.MediaScannerConnection
 import android.media.Ringtone
@@ -907,6 +992,8 @@ import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Environment
+import android.os.Handler
+import android.os.Looper
 import android.os.PowerManager
 import android.provider.MediaStore
 import android.provider.Settings
@@ -919,10 +1006,12 @@ import io.flutter.plugin.common.MethodChannel
 import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
+import java.lang.ref.WeakReference
 
 class MainActivity : FlutterActivity() {
     companion object {
         private const val CHANNEL = "com.universal.messenger/icon"
+        private const val CALL_PREFS = "universal_call_state"
         private const val CALL_NOTIF_ID = 99001
         private const val CALL_NOTIF_TAG = "universal_incoming_call"
         private val ICON_ALIASES = mapOf(
@@ -934,6 +1023,110 @@ class MainActivity : FlutterActivity() {
             "dark" to "com.universal.universal_messenger.AliasDark",
             "sunset" to "com.universal.universal_messenger.AliasSunset"
         )
+
+        @Volatile
+        private var activeInstance: WeakReference<MainActivity>? = null
+
+        @Volatile
+        private var activeMethodChannel: MethodChannel? = null
+
+        fun stopZegoScreenCaptureServicesStatic(context: Context) {
+            val serviceNames = listOf(
+                "im.zego.zegoexpress.internal.ZegoScreenCaptureService",
+                "im.zego.internal.screencapture.ZegoScreenCaptureService"
+            )
+            for (cls in serviceNames) {
+                try {
+                    val intent = Intent().setClassName(context.packageName, cls)
+                    context.stopService(intent)
+                } catch (_: Exception) {
+                }
+            }
+        }
+
+        fun clearCallNotificationsStatic(context: Context) {
+            try {
+                val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+                nm.cancel(CALL_NOTIF_ID)
+                nm.cancel(CALL_NOTIF_TAG, 0)
+                nm.cancel(CALL_NOTIF_TAG, CALL_NOTIF_ID)
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                    for (sbn in nm.activeNotifications) {
+                        val ch = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                            sbn.notification.channelId
+                        } else {
+                            null
+                        }
+                        if (ch == "fcm_call_all_v1" || ch == "call_ch_master_v1" || sbn.id == CALL_NOTIF_ID) {
+                            if (sbn.tag != null) {
+                                nm.cancel(sbn.tag, sbn.id)
+                            } else {
+                                nm.cancel(sbn.id)
+                            }
+                        }
+                    }
+                }
+            } catch (_: Exception) {
+            }
+        }
+
+        fun handleAppSwipedFromRecents(context: Context) {
+            val prefs = context.getSharedPreferences(CALL_PREFS, Context.MODE_PRIVATE)
+            val wasInCall = prefs.getBoolean("in_call", false)
+            val activeCallId = prefs.getString("call_id", "") ?: ""
+            val activeCallDocId = prefs.getString("call_doc_id", "") ?: ""
+
+            stopZegoScreenCaptureServicesStatic(context)
+            clearCallNotificationsStatic(context)
+
+            try {
+                val am = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+                am.mode = AudioManager.MODE_NORMAL
+                am.isMicrophoneMute = false
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                    am.clearCommunicationDevice()
+                }
+            } catch (_: Exception) {
+            }
+
+            if (!wasInCall && activeCallId.isEmpty()) {
+                return
+            }
+
+            prefs.edit()
+                .putBoolean("in_call", false)
+                .putBoolean("killed_in_call", true)
+                .putString("killed_call_id", activeCallId)
+                .putString("killed_call_doc_id", activeCallDocId)
+                .remove("call_id")
+                .remove("call_doc_id")
+                .apply()
+
+            val mainHandler = Handler(Looper.getMainLooper())
+            mainHandler.post {
+                try {
+                    activeInstance?.get()?.stopActiveRingtone()
+                    activeMethodChannel?.invokeMethod(
+                        "onAppSwipedFromRecents",
+                        mapOf(
+                            "callId" to activeCallId,
+                            "callDocId" to activeCallDocId
+                        )
+                    )
+                } catch (_: Exception) {
+                }
+            }
+
+            mainHandler.postDelayed({
+                try {
+                    stopZegoScreenCaptureServicesStatic(context)
+                    clearCallNotificationsStatic(context)
+                    activeInstance?.get()?.finishAndRemoveTask()
+                } catch (_: Exception) {
+                }
+                android.os.Process.killProcess(android.os.Process.myPid())
+            }, 1200)
+        }
     }
 
     private var isCallActive: Boolean = false
@@ -943,6 +1136,7 @@ class MainActivity : FlutterActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        activeInstance = WeakReference(this)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
             setShowWhenLocked(true)
             setTurnScreenOn(true)
@@ -979,179 +1173,247 @@ class MainActivity : FlutterActivity() {
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
-        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL)
-            .setMethodCallHandler { call, result ->
-                when (call.method) {
-                    "setAppIcon" -> {
-                        val type = call.argument<String>("type")
-                            ?: (call.arguments as? String)
-                            ?: "default"
-                        result.success(switchLauncherIcon(type))
-                    }
+        activeInstance = WeakReference(this)
+        val channel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL)
+        activeMethodChannel = channel
 
-                    "pinCustomShortcut" -> {
-                        val path = extractFilePath(call.arguments, call.argument("path"), call.argument("filePath"))
-                        val label = call.argument<String>("label") ?: "Universal Messenger"
-                        if (path.isNullOrBlank()) {
-                            result.success(false)
-                        } else {
-                            result.success(pinCustomHomeShortcut(path, label))
-                        }
+        channel.setMethodCallHandler { call, result ->
+            when (call.method) {
+                "getAppFilesDir" -> {
+                    try {
+                        result.success(applicationContext.filesDir.absolutePath)
+                    } catch (_: Exception) {
+                        result.success(null)
                     }
-
-                    "setCallActive" -> {
-                        val active = (call.arguments as? Boolean)
-                            ?: call.argument<Boolean>("active")
-                            ?: false
-                        isCallActive = active
-                        setCallAudioMode(active)
-                        if (!active) {
-                            isScreenSharing = false
-                            stopZegoScreenCaptureServices()
-                            clearCallNotifications()
-                        }
-                        result.success(true)
-                    }
-
-                    "setCallAudioMode" -> {
-                        val active = (call.arguments as? Boolean)
-                            ?: call.argument<Boolean>("active")
-                            ?: false
-                        result.success(setCallAudioMode(active))
-                    }
-
-                    "setScreenSharing" -> {
-                        val active = (call.arguments as? Boolean)
-                            ?: call.argument<Boolean>("active")
-                            ?: false
-                        isScreenSharing = active
-                        if (!active) {
-                            stopZegoScreenCaptureServices()
-                        }
-                        result.success(true)
-                    }
-
-                    "stopScreenShareService" -> {
-                        isScreenSharing = false
-                        stopZegoScreenCaptureServices()
-                        result.success(true)
-                    }
-
-                    "moveToBackground" -> {
-                        suppressPipOnce = true
-                        moveTaskToBack(true)
-                        result.success(true)
-                    }
-
-                    "clearCallNotifications" -> {
-                        clearCallNotifications()
-                        result.success(true)
-                    }
-
-                    "requestFullScreenIntentPermission" -> {
-                        result.success(requestFullScreenIntentPermission())
-                    }
-
-                    "suppressPipOnce" -> {
-                        suppressPipOnce = (call.arguments as? Boolean) ?: true
-                        result.success(true)
-                    }
-
-                    "saveMediaFile" -> {
-                        val path = extractFilePath(call.arguments, call.argument("path"), call.argument("filePath"))
-                        val fileName = call.argument<String>("fileName") ?: "media_${System.currentTimeMillis()}"
-                        val mediaType = call.argument<String>("mediaType") ?: "file"
-                        if (path.isNullOrBlank()) {
-                            result.success(false)
-                        } else {
-                            Thread {
-                                val saved = saveMediaToDevice(path, fileName, mediaType)
-                                runOnUiThread { result.success(saved) }
-                            }.start()
-                        }
-                    }
-
-                    "requestIgnoreBatteryOptimizations" -> {
-                        result.success(requestBatteryOptimizationExemption())
-                    }
-
-                    "isNetworkConnected" -> {
-                        result.success(checkNetworkConnected())
-                    }
-
-                    "playRingtone" -> {
-                        result.success(startRingtone())
-                    }
-
-                    "stopRingtone" -> {
-                        stopActiveRingtone()
-                        result.success(true)
-                    }
-
-                    "playMessageSound" -> {
-                        result.success(playNotificationSound())
-                    }
-
-                    "getContentUri" -> {
-                        val path = extractFilePath(call.arguments, call.argument("path"), call.argument("filePath"))
-                        if (path.isNullOrBlank()) {
-                            result.error("INVALID_PATH", "File path is required", null)
-                        } else {
-                            try {
-                                val file = File(path)
-                                if (!file.exists()) {
-                                    result.error("FILE_NOT_FOUND", "File does not exist: $path", null)
-                                } else {
-                                    val uri = FileProvider.getUriForFile(
-                                        this,
-                                        "${applicationContext.packageName}.fileprovider",
-                                        file
-                                    )
-                                    result.success(uri.toString())
-                                }
-                            } catch (e: Exception) {
-                                result.error("URI_ERROR", e.message, null)
-                            }
-                        }
-                    }
-
-                    "installApk" -> {
-                        val path = extractFilePath(call.arguments, call.argument("path"), call.argument("filePath"))
-                        if (path.isNullOrBlank()) {
-                            result.error("INVALID_PATH", "APK path is required", null)
-                        } else {
-                            installApkFile(path, result)
-                        }
-                    }
-
-                    else -> result.notImplemented()
                 }
+
+                "setSpeakerphone" -> {
+                    val enabled = (call.arguments as? Boolean)
+                        ?: call.argument<Boolean>("enabled")
+                        ?: false
+                    result.success(setSpeakerphoneOn(enabled))
+                }
+
+                "setAppIcon" -> {
+                    val type = call.argument<String>("type")
+                        ?: (call.arguments as? String)
+                        ?: "default"
+                    result.success(switchLauncherIcon(type))
+                }
+
+                "pinCustomShortcut" -> {
+                    val path = extractFilePath(call.arguments, call.argument("path"), call.argument("filePath"))
+                    val label = call.argument<String>("label") ?: "Universal Messenger"
+                    if (path.isNullOrBlank()) {
+                        result.success(false)
+                    } else {
+                        result.success(pinCustomHomeShortcut(path, label))
+                    }
+                }
+
+                "setCallActive" -> {
+                    val active = (call.arguments as? Boolean)
+                        ?: call.argument<Boolean>("active")
+                        ?: false
+                    val callId = call.argument<String>("callId") ?: ""
+                    val callDocId = call.argument<String>("callDocId") ?: ""
+                    isCallActive = active
+                    setCallAudioMode(active)
+                    val prefs = getSharedPreferences(CALL_PREFS, Context.MODE_PRIVATE)
+                    if (active) {
+                        prefs.edit()
+                            .putBoolean("in_call", true)
+                            .putString("call_id", callId)
+                            .putString("call_doc_id", callDocId)
+                            .apply()
+                        try {
+                            startService(Intent(this, CallTaskCleanupService::class.java))
+                        } catch (_: Exception) {
+                        }
+                    } else {
+                        prefs.edit()
+                            .putBoolean("in_call", false)
+                            .remove("call_id")
+                            .remove("call_doc_id")
+                            .apply()
+                        isScreenSharing = false
+                        stopZegoScreenCaptureServicesStatic(applicationContext)
+                        clearCallNotificationsStatic(applicationContext)
+                        try {
+                            stopService(Intent(this, CallTaskCleanupService::class.java))
+                        } catch (_: Exception) {
+                        }
+                    }
+                    result.success(true)
+                }
+
+                "consumeKilledCallState" -> {
+                    val prefs = getSharedPreferences(CALL_PREFS, Context.MODE_PRIVATE)
+                    val killed = prefs.getBoolean("killed_in_call", false)
+                    val callId = prefs.getString("killed_call_id", "") ?: ""
+                    val callDocId = prefs.getString("killed_call_doc_id", "") ?: ""
+                    if (killed) {
+                        prefs.edit()
+                            .putBoolean("killed_in_call", false)
+                            .remove("killed_call_id")
+                            .remove("killed_call_doc_id")
+                            .apply()
+                        result.success(mapOf("callId" to callId, "callDocId" to callDocId))
+                    } else {
+                        result.success(null)
+                    }
+                }
+
+                "setCallAudioMode" -> {
+                    val active = (call.arguments as? Boolean)
+                        ?: call.argument<Boolean>("active")
+                        ?: false
+                    result.success(setCallAudioMode(active))
+                }
+
+                "setScreenSharing" -> {
+                    val active = (call.arguments as? Boolean)
+                        ?: call.argument<Boolean>("active")
+                        ?: false
+                    isScreenSharing = active
+                    if (!active) {
+                        stopZegoScreenCaptureServicesStatic(applicationContext)
+                    }
+                    result.success(true)
+                }
+
+                "stopScreenShareService" -> {
+                    isScreenSharing = false
+                    stopZegoScreenCaptureServicesStatic(applicationContext)
+                    result.success(true)
+                }
+
+                "moveToBackground" -> {
+                    suppressPipOnce = true
+                    moveTaskToBack(true)
+                    result.success(true)
+                }
+
+                "clearCallNotifications" -> {
+                    clearCallNotificationsStatic(applicationContext)
+                    result.success(true)
+                }
+
+                "requestFullScreenIntentPermission" -> {
+                    result.success(requestFullScreenIntentPermission())
+                }
+
+                "suppressPipOnce" -> {
+                    suppressPipOnce = (call.arguments as? Boolean) ?: true
+                    result.success(true)
+                }
+
+                "saveMediaFile" -> {
+                    val path = extractFilePath(call.arguments, call.argument("path"), call.argument("filePath"))
+                    val fileName = call.argument<String>("fileName") ?: "media_${System.currentTimeMillis()}"
+                    val mediaType = call.argument<String>("mediaType") ?: "file"
+                    if (path.isNullOrBlank()) {
+                        result.success(false)
+                    } else {
+                        Thread {
+                            val saved = saveMediaToDevice(path, fileName, mediaType)
+                            runOnUiThread { result.success(saved) }
+                        }.start()
+                    }
+                }
+
+                "requestIgnoreBatteryOptimizations" -> {
+                    result.success(requestBatteryOptimizationExemption())
+                }
+
+                "isNetworkConnected" -> {
+                    result.success(checkNetworkConnected())
+                }
+
+                "playRingtone" -> {
+                    result.success(startRingtone())
+                }
+
+                "stopRingtone" -> {
+                    stopActiveRingtone()
+                    result.success(true)
+                }
+
+                "playMessageSound" -> {
+                    result.success(playNotificationSound())
+                }
+
+                "getContentUri" -> {
+                    val path = extractFilePath(call.arguments, call.argument("path"), call.argument("filePath"))
+                    if (path.isNullOrBlank()) {
+                        result.error("INVALID_PATH", "File path is required", null)
+                    } else {
+                        try {
+                            val file = File(path)
+                            if (!file.exists()) {
+                                result.error("FILE_NOT_FOUND", "File does not exist: $path", null)
+                            } else {
+                                val uri = FileProvider.getUriForFile(
+                                    this,
+                                    "${applicationContext.packageName}.fileprovider",
+                                    file
+                                )
+                                result.success(uri.toString())
+                            }
+                        } catch (e: Exception) {
+                            result.error("URI_ERROR", e.message, null)
+                        }
+                    }
+                }
+
+                "installApk" -> {
+                    val path = extractFilePath(call.arguments, call.argument("path"), call.argument("filePath"))
+                    if (path.isNullOrBlank()) {
+                        result.error("INVALID_PATH", "APK path is required", null)
+                    } else {
+                        installApkFile(path, result)
+                    }
+                }
+
+                else -> result.notImplemented()
             }
+        }
     }
 
-    private fun clearCallNotifications() {
-        try {
-            val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-            nm.cancel(CALL_NOTIF_ID)
-            nm.cancel(CALL_NOTIF_TAG, 0)
-            nm.cancel(CALL_NOTIF_TAG, CALL_NOTIF_ID)
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-                for (sbn in nm.activeNotifications) {
-                    val ch = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                        sbn.notification.channelId
-                    } else {
-                        null
+    private fun setSpeakerphoneOn(enabled: Boolean): Boolean {
+        return try {
+            val am = getSystemService(Context.AUDIO_SERVICE) as AudioManager
+            am.mode = AudioManager.MODE_IN_COMMUNICATION
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                val devices = am.availableCommunicationDevices
+                if (enabled) {
+                    val speaker = devices.firstOrNull {
+                        it.type == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER
                     }
-                    if (ch == "fcm_call_all_v1" || ch == "call_ch_master_v1" || sbn.id == CALL_NOTIF_ID) {
-                        if (sbn.tag != null) {
-                            nm.cancel(sbn.tag, sbn.id)
-                        } else {
-                            nm.cancel(sbn.id)
-                        }
+                    if (speaker != null) {
+                        am.setCommunicationDevice(speaker)
+                    }
+                } else {
+                    val preferred = devices.firstOrNull {
+                        it.type == AudioDeviceInfo.TYPE_BLUETOOTH_SCO ||
+                            it.type == AudioDeviceInfo.TYPE_BLE_HEADSET ||
+                            it.type == AudioDeviceInfo.TYPE_WIRED_HEADSET ||
+                            it.type == AudioDeviceInfo.TYPE_WIRED_HEADPHONES ||
+                            it.type == AudioDeviceInfo.TYPE_USB_HEADSET ||
+                            it.type == AudioDeviceInfo.TYPE_BUILTIN_EARPIECE
+                    }
+                    if (preferred != null) {
+                        am.setCommunicationDevice(preferred)
+                    } else {
+                        am.clearCommunicationDevice()
                     }
                 }
             }
+            @Suppress("DEPRECATION")
+            am.isSpeakerphoneOn = enabled
+            true
         } catch (_: Exception) {
+            false
         }
     }
 
@@ -1182,6 +1444,11 @@ class MainActivity : FlutterActivity() {
                 am.isMicrophoneMute = false
                 volumeControlStream = AudioManager.STREAM_VOICE_CALL
             } else {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                    am.clearCommunicationDevice()
+                }
+                @Suppress("DEPRECATION")
+                am.isSpeakerphoneOn = false
                 am.mode = AudioManager.MODE_NORMAL
                 volumeControlStream = AudioManager.USE_DEFAULT_STREAM_TYPE
             }
@@ -1277,20 +1544,6 @@ class MainActivity : FlutterActivity() {
             }
         } catch (_: Exception) {
             false
-        }
-    }
-
-    private fun stopZegoScreenCaptureServices() {
-        val serviceNames = listOf(
-            "im.zego.zegoexpress.internal.ZegoScreenCaptureService",
-            "im.zego.internal.screencapture.ZegoScreenCaptureService"
-        )
-        for (cls in serviceNames) {
-            try {
-                val intent = Intent().setClassName(applicationContext.packageName, cls)
-                applicationContext.stopService(intent)
-            } catch (_: Exception) {
-            }
         }
     }
 
@@ -1414,7 +1667,7 @@ class MainActivity : FlutterActivity() {
         }
     }
 
-    private fun stopActiveRingtone() {
+    fun stopActiveRingtone() {
         try {
             activeRingtone?.stop()
         } catch (_: Exception) {
@@ -1474,14 +1727,20 @@ class MainActivity : FlutterActivity() {
     override fun onDestroy() {
         stopActiveRingtone()
         setCallAudioMode(false)
-        stopZegoScreenCaptureServices()
-        clearCallNotifications()
+        stopZegoScreenCaptureServicesStatic(applicationContext)
+        clearCallNotificationsStatic(applicationContext)
+        if (isFinishing) {
+            try {
+                stopService(Intent(this, CallTaskCleanupService::class.java))
+            } catch (_: Exception) {
+            }
+        }
         super.onDestroy()
     }
 }
 """
     (kt_dir / "MainActivity.kt").write_text(kt_content, encoding="utf-8")
-    log("Wrote MainActivity.kt with single-call notification cleanup & Messenger screen share support")
+    log("Wrote MainActivity.kt with accurate Android 12-16 speaker routing & recents cleanup")
 
 
 def main() -> None:
@@ -1493,11 +1752,13 @@ def main() -> None:
     patch_all_plugins()
     configure_gradle_properties()
     configure_settings_gradle()
+    configure_release_key_properties()
     write_app_build_gradle_kts(app_id)
     copy_google_services()
     write_file_paths_xml()
     write_launcher_icon_resources()
     write_android_manifest()
+    write_call_task_cleanup_service_kt()
     write_main_activity_kt()
     log("Android configuration and plugin patching completed successfully.")
 
