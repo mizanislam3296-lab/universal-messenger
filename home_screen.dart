@@ -41,13 +41,20 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     NotificationAndPresenceService.onIncomingCallDeclinedFromNotification =
         _handleDeclineFromNotification;
 
-    AppSettingsController.load().then((_) {
-      if (AppSettingsController.notificationsEnabled.value) {
-        NotificationAndPresenceService.requestBatteryUnrestricted();
-      }
-    });
+    _bootHomeServices();
+  }
+
+  Future<void> _bootHomeServices() async {
+    // First clean up any leftover call/camera/mic from a killed session
+    await CallCleanupCoordinator.cleanupOnFreshAppLaunch();
+
+    await AppSettingsController.load();
+    if (AppSettingsController.notificationsEnabled.value) {
+      NotificationAndPresenceService.requestBatteryUnrestricted();
+    }
     NotificationAndPresenceService.setAppForeground(true);
-    NotificationAndPresenceService.start();
+    await NotificationAndPresenceService.start();
+    if (!mounted) return;
     _listenForAppUpdates();
     _setupFcmCallTapHandlers();
 
@@ -113,7 +120,9 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
 
   Future<void> _checkActiveRingingCallOnResume() async {
     final user = FirebaseAuth.instance.currentUser;
-    if (user == null || !mounted || NotificationAndPresenceService.isInActiveCall) {
+    if (user == null ||
+        !mounted ||
+        NotificationAndPresenceService.isInActiveCall) {
       return;
     }
     try {
@@ -125,6 +134,14 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       if (!snap.exists || data == null || (data['status'] ?? '') != 'ringing') {
         return;
       }
+
+      // Ignore stale ringing docs older than 60 seconds
+      final ts = data['timestamp'] as Timestamp?;
+      if (ts != null &&
+          DateTime.now().difference(ts.toDate()).inSeconds > 60) {
+        return;
+      }
+
       final callId = (data['callId'] ?? '').toString();
       if (callId.isEmpty) return;
       _handleIncomingCallTrigger({
@@ -457,7 +474,8 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         };
 
         return GestureDetector(
-          onTap: () => _handleIncomingCallTrigger(callPayload, autoAccept: false),
+          onTap: () =>
+              _handleIncomingCallTrigger(callPayload, autoAccept: false),
           child: Container(
             margin: const EdgeInsets.all(10),
             padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
