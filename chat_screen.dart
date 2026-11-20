@@ -31,6 +31,16 @@ class _ChatScreenState extends State<ChatScreen> {
   static const String _cloudName = 'tcdkckrl';
   static const String _uploadPreset = 'ml_default';
   static const int _pageSize = 40;
+  static const List<String> _reactionEmojis = [
+    '❤️',
+    '😂',
+    '😮',
+    '😢',
+    '😡',
+    '👍',
+    '🙏',
+    '🔥',
+  ];
 
   final _messageController = TextEditingController();
   final _messageFocusNode = FocusNode();
@@ -40,6 +50,7 @@ class _ChatScreenState extends State<ChatScreen> {
 
   late final Stream<DocumentSnapshot> _receiverUserStream;
   late final Stream<DocumentSnapshot> _chatDocStream;
+  late final Stream<QuerySnapshot>> _scheduledStream;
   late Stream<QuerySnapshot> _messagesStream;
 
   int _messageLimit = _pageSize;
@@ -72,10 +83,17 @@ class _ChatScreenState extends State<ChatScreen> {
         .collection('chats')
         .doc(_chatId)
         .snapshots();
+    _scheduledStream = FirebaseFirestore.instance
+        .collection('users')
+        .doc(_currentUser.uid)
+        .collection('scheduled_messages')
+        .where('status', isEqualTo: 'pending')
+        .snapshots();
     _messagesStream = _buildMessagesStream();
 
     _scrollController.addListener(_onScroll);
     _markAsRead();
+    ScheduledMessageService.checkAndSendDueMessages();
   }
 
   Stream<QuerySnapshot> _buildMessagesStream() {
@@ -299,6 +317,416 @@ class _ChatScreenState extends State<ChatScreen> {
       title: _currentUser.displayName ?? _currentUser.email ?? 'নতুন মেসেজ',
       body: text,
       chatId: _chatId,
+    );
+  }
+
+  String _formatDateTime(DateTime dt) {
+    final day = dt.day.toString().padLeft(2, '0');
+    final month = dt.month.toString().padLeft(2, '0');
+    final hour = dt.hour % 12 == 0 ? 12 : dt.hour % 12;
+    final min = dt.minute.toString().padLeft(2, '0');
+    final period = dt.hour >= 12 ? 'PM' : 'AM';
+    return '$day/$month/${dt.year} • $hour:$min $period';
+  }
+
+  Future<void> _saveScheduledMessage(String text, DateTime scheduledTime, Map<String, dynamic>? replyPayload) async {
+    try {
+      await FirebaseFirestore.instance
+          .collection('users')
+          .doc(_currentUser.uid)
+          .collection('scheduled_messages')
+          .add({
+        'chatId': _chatId,
+        'senderId': _currentUser.uid,
+        'receiverId': widget.receiverId,
+        'receiverName': widget.receiverName,
+        'receiverEmail': widget.receiverEmail,
+        'text': text,
+        if (replyPayload != null) 'replyTo': replyPayload,
+        'scheduledAt': Timestamp.fromDate(scheduledTime),
+        'status': 'pending',
+        'createdAt': FieldValue.serverTimestamp(),
+      });
+
+      _messageController.clear();
+      _typingTimer?.cancel();
+      if (_isTyping) _setTypingStatus(false);
+      if (_replyingTo != null && mounted) {
+        setState(() => _replyingTo = null);
+      }
+
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('মেসেজ শিডিউল হয়েছে: ${_formatDateTime(scheduledTime)}'),
+          duration: const Duration(seconds: 3),
+        ),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('শিডিউল করতে সমস্যা হয়েছে: $e'), backgroundColor: Colors.red.shade700),
+      );
+    }
+  }
+
+  Future<void> _openScheduleMessageSheet(Color barColor) async {
+    final text = _messageController.text.trim();
+    if (text.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('আগে মেসেজ লিখুন, তারপর সেন্ড বাটনে হোল্ড করে শিডিউল করুন'),
+          duration: Duration(seconds: 2),
+        ),
+      );
+      return;
+    }
+
+    HapticFeedback.mediumImpact();
+    final replyPayload = _replyingTo;
+    DateTime selectedDateTime = DateTime.now().add(const Duration(minutes: 10));
+
+    await showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
+      builder: (ctx) {
+        return StatefulBuilder(
+          builder: (ctx, setSheetState) {
+            Future<void> pickCustomDateTime() async {
+              final now = DateTime.now();
+              final pickedDate = await showDatePicker(
+                context: ctx,
+                initialDate: selectedDateTime.isAfter(now) ? selectedDateTime : now,
+                firstDate: now,
+                lastDate: now.add(const Duration(days: 365)),
+              );
+              if (pickedDate == null || !ctx.mounted) return;
+              final pickedTime = await showTimePicker(
+                context: ctx,
+                initialTime: TimeOfDay.fromDateTime(selectedDateTime),
+              );
+              if (pickedTime == null) return;
+              setSheetState(() {
+                selectedDateTime = DateTime(
+                  pickedDate.year,
+                  pickedDate.month,
+                  pickedDate.day,
+                  pickedTime.hour,
+                  pickedTime.minute,
+                );
+              });
+            }
+
+            return SafeArea(
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(18, 12, 18, 20),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Center(
+                      child: Container(
+                        width: 42,
+                        height: 4,
+                        decoration: BoxDecoration(color: Colors.grey.shade400, borderRadius: BorderRadius.circular(4)),
+                      ),
+                    ),
+                    const SizedBox(height: 14),
+                    Row(
+                      children: [
+                        Icon(Icons.schedule_send_rounded, color: barColor),
+                        const SizedBox(width: 8),
+                        const Text('মেসেজ শিডিউল করুন', style: TextStyle(fontSize: 17, fontWeight: FontWeight.bold)),
+                      ],
+                    ),
+                    const SizedBox(height: 10),
+                    Container(
+                      width: double.infinity,
+                      padding: const EdgeInsets.all(10),
+                      decoration: BoxDecoration(
+                        color: barColor.withOpacity(0.1),
+                        borderRadius: BorderRadius.circular(10),
+                      ),
+                      child: Text(text, maxLines: 3, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 13)),
+                    ),
+                    const SizedBox(height: 12),
+                    Wrap(
+                      spacing: 8,
+                      runSpacing: 8,
+                      children: [
+                        ActionChip(
+                          avatar: const Icon(Icons.timer_outlined, size: 16),
+                          label: const Text('৫ মিনিট পর'),
+                          onPressed: () => setSheetState(() => selectedDateTime = DateTime.now().add(const Duration(minutes: 5))),
+                        ),
+                        ActionChip(
+                          avatar: const Icon(Icons.timer_outlined, size: 16),
+                          label: const Text('১৫ মিনিট পর'),
+                          onPressed: () => setSheetState(() => selectedDateTime = DateTime.now().add(const Duration(minutes: 15))),
+                        ),
+                        ActionChip(
+                          avatar: const Icon(Icons.timer_outlined, size: 16),
+                          label: const Text('১ ঘণ্টা পর'),
+                          onPressed: () => setSheetState(() => selectedDateTime = DateTime.now().add(const Duration(hours: 1))),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 12),
+                    ListTile(
+                      contentPadding: const EdgeInsets.symmetric(horizontal: 12),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(12),
+                        side: BorderSide(color: Colors.grey.shade400),
+                      ),
+                      leading: Icon(Icons.calendar_month_rounded, color: barColor),
+                      title: const Text('তারিখ ও সময়', style: TextStyle(fontSize: 12)),
+                      subtitle: Text(_formatDateTime(selectedDateTime), style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14)),
+                      trailing: const Icon(Icons.edit_calendar_rounded),
+                      onTap: pickCustomDateTime,
+                    ),
+                    const SizedBox(height: 16),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: OutlinedButton(
+                            onPressed: () => Navigator.pop(ctx),
+                            child: const Text('বাতিল'),
+                          ),
+                        ),
+                        const SizedBox(width: 10),
+                        Expanded(
+                          child: ElevatedButton.icon(
+                            style: ElevatedButton.styleFrom(backgroundColor: barColor, foregroundColor: Colors.white),
+                            icon: const Icon(Icons.schedule_send_rounded, size: 18),
+                            label: const Text('শিডিউল করুন'),
+                            onPressed: () async {
+                              if (!selectedDateTime.isAfter(DateTime.now())) {
+                                ScaffoldMessenger.of(context).showSnackBar(
+                                  const SnackBar(content: Text('অনুগ্রহ করে ভবিষ্যতের সময় নির্বাচন করুন')),
+                                );
+                                return;
+                              }
+                              Navigator.pop(ctx);
+                              await _saveScheduledMessage(text, selectedDateTime, replyPayload);
+                            },
+                          ),
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+            );
+          },
+        );
+      },
+    );
+  }
+
+  void _openPendingScheduledList(List<QueryDocumentSnapshot>> pendingDocs, Color barColor) {
+    showModalBottomSheet(
+      context: context,
+      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(18))),
+      builder: (ctx) => SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(16, 12, 16, 16),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Center(
+                child: Container(width: 40, height: 4, decoration: BoxDecoration(color: Colors.grey.shade400, borderRadius: BorderRadius.circular(4))),
+              ),
+              const SizedBox(height: 12),
+              Text('শিডিউল মেসেজ (${pendingDocs.length})', style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+              const SizedBox(height: 10),
+              Flexible(
+                child: ListView.separated(
+                  shrinkWrap: true,
+                  itemCount: pendingDocs.length,
+                  separatorBuilder: (_, __) => const Divider(height: 12),
+                  itemBuilder: (_, idx) {
+                    final doc = pendingDocs[idx];
+                    final d = doc.data();
+                    final ts = (d['scheduledAt'] as Timestamp?)?.toDate();
+                    final msgText = (d['text'] ?? '').toString();
+                    return ListTile(
+                      contentPadding: EdgeInsets.zero,
+                      leading: CircleAvatar(backgroundColor: barColor.withOpacity(0.15), child: Icon(Icons.schedule, color: barColor, size: 20)),
+                      title: Text(msgText, maxLines: 2, overflow: TextOverflow.ellipsis),
+                      subtitle: Text(ts != null ? _formatDateTime(ts) : 'অপেক্ষমাণ', style: const TextStyle(fontSize: 12)),
+                      trailing: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          IconButton(
+                            tooltip: 'এখনই পাঠান',
+                            icon: Icon(Icons.send_rounded, color: barColor, size: 20),
+                            onPressed: () async {
+                              Navigator.pop(ctx);
+                              await ScheduledMessageService.sendScheduledDoc(doc);
+                            },
+                          ),
+                          IconButton(
+                            tooltip: 'বাতিল করুন',
+                            icon: const Icon(Icons.delete_outline, color: Colors.red, size: 20),
+                            onPressed: () async {
+                              await doc.reference.delete();
+                              if (ctx.mounted && pendingDocs.length <= 1) {
+                                Navigator.pop(ctx);
+                              }
+                            },
+                          ),
+                        ],
+                      ),
+                    );
+                  },
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _toggleReaction(DocumentSnapshot doc, Map<String, dynamic> data, String emoji) async {
+    try {
+      final rawReactions = (data['reactions'] as Map<String, dynamic>?) ?? {};
+      final currentEmoji = rawReactions[_currentUser.uid]?.toString();
+      final isSame = currentEmoji == emoji;
+      await doc.reference.update({
+        'reactions.${_currentUser.uid}': isSame ? FieldValue.delete() : emoji,
+      });
+    } catch (_) {
+      try {
+        await doc.reference.set({
+          'reactions': {_currentUser.uid: emoji},
+        }, SetOptions(merge: true));
+      } catch (_) {}
+    }
+  }
+
+  void _showReactionPicker(DocumentSnapshot doc, Map<String, dynamic> data, Color barColor) {
+    HapticFeedback.mediumImpact();
+    final rawReactions = (data['reactions'] as Map<String, dynamic>?) ?? {};
+    final myEmoji = rawReactions[_currentUser.uid]?.toString();
+
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: Colors.transparent,
+      builder: (ctx) {
+        final isDark = Theme.of(ctx).brightness == Brightness.dark;
+        return SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(14, 0, 14, 18),
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 14),
+              decoration: BoxDecoration(
+                color: isDark ? const Color(0xFF1F2C34) : Colors.white,
+                borderRadius: BorderRadius.circular(24),
+                boxShadow: const [BoxShadow(color: Colors.black26, blurRadius: 12, offset: Offset(0, 4))],
+              ),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  SingleChildScrollView(
+                    scrollDirection: Axis.horizontal,
+                    child: Row(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: _reactionEmojis.map((emoji) {
+                        final selected = myEmoji == emoji;
+                        return GestureDetector(
+                          onTap: () async {
+                            Navigator.pop(ctx);
+                            await _toggleReaction(doc, data, emoji);
+                          },
+                          child: Container(
+                            margin: const EdgeInsets.symmetric(horizontal: 4),
+                            padding: const EdgeInsets.all(8),
+                            decoration: BoxDecoration(
+                              color: selected ? barColor.withOpacity(0.22) : Colors.transparent,
+                              shape: BoxShape.circle,
+                              border: selected ? Border.all(color: barColor, width: 1.5) : null,
+                            ),
+                            child: Text(emoji, style: const TextStyle(fontSize: 26)),
+                          ),
+                        );
+                      }).toList(),
+                    ),
+                  ),
+                  if (myEmoji != null) ...[
+                    const SizedBox(height: 6),
+                    Text(
+                      'সিলেক্ট করা ইমোজি ($myEmoji)-তে আবার ট্যাপ করলে মুছে যাবে',
+                      style: TextStyle(fontSize: 11, color: isDark ? Colors.white60 : Colors.grey.shade600),
+                    ),
+                  ],
+                ],
+              ),
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _buildReactionBadges(DocumentSnapshot doc, Map<String, dynamic> data, bool isMe, Color barColor) {
+    final raw = data['reactions'];
+    if (raw is! Map || raw.isEmpty) return const SizedBox.shrink();
+
+    final counts = <String, int>{};
+    String? myEmoji;
+    raw.forEach((uid, value) {
+      final emoji = value?.toString() ?? '';
+      if (emoji.isEmpty) return;
+      counts[emoji] = (counts[emoji] ?? 0) + 1;
+      if (uid.toString() == _currentUser.uid) {
+        myEmoji = emoji;
+      }
+    });
+
+    if (counts.isEmpty) return const SizedBox.shrink();
+
+    return Padding(
+      padding: EdgeInsets.only(
+        left: isMe ? 0 : 8,
+        right: isMe ? 8 : 0,
+        bottom: 4,
+      ),
+      child: GestureDetector(
+        onTap: () => _showReactionPicker(doc, data, barColor),
+        child: Wrap(
+          spacing: 4,
+          runSpacing: 4,
+          alignment: isMe ? WrapAlignment.end : WrapAlignment.start,
+          children: counts.entries.map((entry) {
+            final isMine = myEmoji == entry.key;
+            return Container(
+              padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
+              decoration: BoxDecoration(
+                color: isMine ? barColor.withOpacity(0.16) : Colors.white,
+                borderRadius: BorderRadius.circular(14),
+                border: Border.all(color: isMine ? barColor : Colors.grey.shade300, width: 1),
+                boxShadow: const [BoxShadow(color: Colors.black12, blurRadius: 2, offset: Offset(0, 1))],
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(entry.key, style: const TextStyle(fontSize: 13)),
+                  if (entry.value > 1) ...[
+                    const SizedBox(width: 3),
+                    Text(
+                      '${entry.value}',
+                      style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: isMine ? barColor : Colors.black87),
+                    ),
+                  ],
+                ],
+              ),
+            );
+          }).toList(),
+        ),
+      ),
     );
   }
 
@@ -752,66 +1180,73 @@ class _ChatScreenState extends State<ChatScreen> {
                                 ),
                                 child: Align(
                                   alignment: isMe ? Alignment.centerRight : Alignment.centerLeft,
-                                  child: GestureDetector(
-                                    onTap: () => _showMessageOptions(doc, data, isMe, barColor),
-                                    child: Container(
-                                      margin: const EdgeInsets.symmetric(vertical: 4),
-                                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                                      constraints: BoxConstraints(maxWidth: MediaQuery.of(context).size.width * 0.78),
-                                      decoration: BoxDecoration(
-                                        color: isMe ? (isDefaultBg ? const Color(0xFFD9FDD3) : Color.lerp(Colors.white, chatColor, 0.25)) : Colors.white,
-                                        borderRadius: BorderRadius.only(
-                                          topLeft: const Radius.circular(14),
-                                          topRight: const Radius.circular(14),
-                                          bottomLeft: Radius.circular(isMe ? 14 : 2),
-                                          bottomRight: Radius.circular(isMe ? 2 : 14),
-                                        ),
-                                      ),
-                                      child: Column(
-                                        crossAxisAlignment: CrossAxisAlignment.start,
-                                        children: [
-                                          if (replyData != null)
-                                            Container(
-                                              margin: const EdgeInsets.only(bottom: 6),
-                                              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
-                                              decoration: BoxDecoration(
-                                                color: Colors.black.withOpacity(0.06),
-                                                borderRadius: BorderRadius.circular(8),
-                                                border: Border(left: BorderSide(color: barColor, width: 3)),
-                                              ),
-                                              child: Column(
-                                                crossAxisAlignment: CrossAxisAlignment.start,
+                                  child: Column(
+                                    crossAxisAlignment: isMe ? CrossAxisAlignment.end : CrossAxisAlignment.start,
+                                    children: [
+                                      GestureDetector(
+                                        onTap: () => _showMessageOptions(doc, data, isMe, barColor),
+                                        onLongPress: () => _showReactionPicker(doc, data, barColor),
+                                        child: Container(
+                                          margin: const EdgeInsets.symmetric(vertical: 4),
+                                          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                                          constraints: BoxConstraints(maxWidth: MediaQuery.of(context).size.width * 0.78),
+                                          decoration: BoxDecoration(
+                                            color: isMe ? (isDefaultBg ? const Color(0xFFD9FDD3) : Color.lerp(Colors.white, chatColor, 0.25)) : Colors.white,
+                                            borderRadius: BorderRadius.only(
+                                              topLeft: const Radius.circular(14),
+                                              topRight: const Radius.circular(14),
+                                              bottomLeft: Radius.circular(isMe ? 14 : 2),
+                                              bottomRight: Radius.circular(isMe ? 2 : 14),
+                                            ),
+                                          ),
+                                          child: Column(
+                                            crossAxisAlignment: CrossAxisAlignment.start,
+                                            children: [
+                                              if (replyData != null)
+                                                Container(
+                                                  margin: const EdgeInsets.only(bottom: 6),
+                                                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+                                                  decoration: BoxDecoration(
+                                                    color: Colors.black.withOpacity(0.06),
+                                                    borderRadius: BorderRadius.circular(8),
+                                                    border: Border(left: BorderSide(color: barColor, width: 3)),
+                                                  ),
+                                                  child: Column(
+                                                    crossAxisAlignment: CrossAxisAlignment.start,
+                                                    children: [
+                                                      Text((replyData['senderName'] ?? '').toString(), style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: barColor)),
+                                                      const SizedBox(height: 2),
+                                                      Text((replyData['text'] ?? '').toString(), maxLines: 2, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 12, color: Colors.black54)),
+                                                    ],
+                                                  ),
+                                                ),
+                                              _buildMessageContent(data, barColor),
+                                              const SizedBox(height: 4),
+                                              Row(
+                                                mainAxisSize: MainAxisSize.min,
+                                                mainAxisAlignment: MainAxisAlignment.end,
                                                 children: [
-                                                  Text((replyData['senderName'] ?? '').toString(), style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: barColor)),
-                                                  const SizedBox(height: 2),
-                                                  Text((replyData['text'] ?? '').toString(), maxLines: 2, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 12, color: Colors.black54)),
+                                                  if (isEdited)
+                                                    Padding(
+                                                      padding: const EdgeInsets.only(right: 5),
+                                                      child: Text('Edited', style: TextStyle(fontSize: 10, fontStyle: FontStyle.italic, color: Colors.grey.shade600)),
+                                                    ),
+                                                  Text(time, style: TextStyle(fontSize: 10, color: Colors.grey.shade600)),
+                                                  if (isMe) ...[
+                                                    const SizedBox(width: 5),
+                                                    Text(
+                                                      isSeen ? 'Seen' : 'Sent',
+                                                      style: TextStyle(fontSize: 10, fontWeight: isSeen ? FontWeight.bold : FontWeight.normal, color: isSeen ? const Color(0xFF1A73E8) : Colors.grey.shade600),
+                                                    ),
+                                                  ],
                                                 ],
                                               ),
-                                            ),
-                                          _buildMessageContent(data, barColor),
-                                          const SizedBox(height: 4),
-                                          Row(
-                                            mainAxisSize: MainAxisSize.min,
-                                            mainAxisAlignment: MainAxisAlignment.end,
-                                            children: [
-                                              if (isEdited)
-                                                Padding(
-                                                  padding: const EdgeInsets.only(right: 5),
-                                                  child: Text('Edited', style: TextStyle(fontSize: 10, fontStyle: FontStyle.italic, color: Colors.grey.shade600)),
-                                                ),
-                                              Text(time, style: TextStyle(fontSize: 10, color: Colors.grey.shade600)),
-                                              if (isMe) ...[
-                                                const SizedBox(width: 5),
-                                                Text(
-                                                  isSeen ? 'Seen' : 'Sent',
-                                                  style: TextStyle(fontSize: 10, fontWeight: isSeen ? FontWeight.bold : FontWeight.normal, color: isSeen ? const Color(0xFF1A73E8) : Colors.grey.shade600),
-                                                ),
-                                              ],
                                             ],
                                           ),
-                                        ],
+                                        ),
                                       ),
-                                    ),
+                                      _buildReactionBadges(doc, data, isMe, barColor),
+                                    ],
                                   ),
                                 ),
                               );
@@ -842,6 +1277,36 @@ class _ChatScreenState extends State<ChatScreen> {
                               ),
                             ),
                             child: _AnimatedWaitIndicator(color: barColor),
+                          ),
+                        );
+                      },
+                    ),
+                    StreamBuilder<QuerySnapshot>>(
+                      stream: _scheduledStream,
+                      builder: (context, snap) {
+                        final docs = (snap.data?.docs ?? [])
+                            .where((d) => (d.data()['chatId'] ?? '') == _chatId)
+                            .toList();
+                        if (docs.isEmpty) return const SizedBox.shrink();
+                        return GestureDetector(
+                          onTap: () => _openPendingScheduledList(docs, barColor),
+                          child: Container(
+                            width: double.infinity,
+                            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 7),
+                            color: barColor.withOpacity(0.14),
+                            child: Row(
+                              children: [
+                                Icon(Icons.schedule_send_rounded, size: 16, color: barColor),
+                                const SizedBox(width: 8),
+                                Expanded(
+                                  child: Text(
+                                    '${docs.length}টি শিডিউল মেসেজ অপেক্ষায় আছে (দেখতে ট্যাপ করুন)',
+                                    style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: isDark ? Colors.white : Colors.black87),
+                                  ),
+                                ),
+                                Icon(Icons.chevron_right, size: 18, color: barColor),
+                              ],
+                            ),
                           ),
                         );
                       },
@@ -913,10 +1378,17 @@ class _ChatScreenState extends State<ChatScreen> {
                                   ),
                                 ),
                                 const SizedBox(width: 6),
-                                CircleAvatar(
-                                  backgroundColor: barColor,
-                                  radius: 23,
-                                  child: IconButton(icon: const Icon(Icons.send, color: Colors.white, size: 20), onPressed: _sendMessage),
+                                GestureDetector(
+                                  onLongPress: () => _openScheduleMessageSheet(barColor),
+                                  child: CircleAvatar(
+                                    backgroundColor: barColor,
+                                    radius: 23,
+                                    child: IconButton(
+                                      icon: const Icon(Icons.send, color: Colors.white, size: 20),
+                                      tooltip: 'পাঠাতে ট্যাপ করুন, শিডিউল করতে হোল্ড করুন',
+                                      onPressed: _sendMessage,
+                                    ),
+                                  ),
                                 ),
                               ],
                             ),
