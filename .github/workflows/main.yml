@@ -41,21 +41,15 @@ jobs:
           chmod +x scripts/build.sh
           bash scripts/build.sh
 
-      - name: Upload APK Artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: universal-messenger-apk
-          path: build/app/outputs/flutter-apk/app-release.apk
-          if-no-files-found: error
-
       - name: Publish GitHub Release v14.0.0
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v14.0.0
           name: Universal Messenger v14.0.0
-          body: Automated Android APK release for Universal Messenger v14.0.0 (arm64-v8a).
-          files: build/app/outputs/flutter-apk/app-release.apk
+          body: Direct Android APK release for Universal Messenger v14.0.0 (arm64-v8a).
+          files: build/app/outputs/flutter-apk/Universal-Messenger.apk
           draft: false
           prerelease: false
+          make_latest: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
