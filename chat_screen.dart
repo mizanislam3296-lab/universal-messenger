@@ -33,14 +33,20 @@ class _ChatScreenState extends State<ChatScreen> {
   static const int _pageSize = 40;
 
   final _messageController = TextEditingController();
+  final _messageFocusNode = FocusNode();
   final _scrollController = ScrollController();
   late final String _chatId;
   late final User _currentUser;
+
+  late final Stream<DocumentSnapshot> _receiverUserStream;
+  late final Stream<DocumentSnapshot> _chatDocStream;
+  late Stream<QuerySnapshot> _messagesStream;
 
   int _messageLimit = _pageSize;
   int _lastFetchedCount = 0;
   bool _isLoadingMore = false;
   final Set<String> _markedSeenIds = {};
+  String? _lastMarkedLatestMsgId;
 
   bool _isUploading = false;
   double _uploadProgress = 0.0;
@@ -57,8 +63,29 @@ class _ChatScreenState extends State<ChatScreen> {
     final ids = [_currentUser.uid, widget.receiverId]..sort();
     _chatId = '${ids[0]}_${ids[1]}';
     NotificationAndPresenceService.activeChatId = _chatId;
+
+    _receiverUserStream = FirebaseFirestore.instance
+        .collection('users')
+        .doc(widget.receiverId)
+        .snapshots();
+    _chatDocStream = FirebaseFirestore.instance
+        .collection('chats')
+        .doc(_chatId)
+        .snapshots();
+    _messagesStream = _buildMessagesStream();
+
     _scrollController.addListener(_onScroll);
     _markAsRead();
+  }
+
+  Stream<QuerySnapshot> _buildMessagesStream() {
+    return FirebaseFirestore.instance
+        .collection('chats')
+        .doc(_chatId)
+        .collection('messages')
+        .orderBy('timestamp', descending: true)
+        .limit(_messageLimit)
+        .snapshots();
   }
 
   void _onScroll() {
@@ -68,6 +95,7 @@ class _ChatScreenState extends State<ChatScreen> {
         setState(() {
           _isLoadingMore = true;
           _messageLimit += _pageSize;
+          _messagesStream = _buildMessagesStream();
         });
         Future.delayed(const Duration(milliseconds: 400), () {
           if (mounted) setState(() => _isLoadingMore = false);
@@ -89,6 +117,7 @@ class _ChatScreenState extends State<ChatScreen> {
       }, SetOptions(merge: true));
     }
     _messageController.dispose();
+    _messageFocusNode.dispose();
     _scrollController.dispose();
     super.dispose();
   }
@@ -102,6 +131,13 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   void _markMessagesAsSeen(List<QueryDocumentSnapshot> docs) {
+    if (docs.isEmpty) return;
+    final latestId = docs.first.id;
+    if (_lastMarkedLatestMsgId != latestId) {
+      _lastMarkedLatestMsgId = latestId;
+      _markAsRead();
+    }
+
     final batch = FirebaseFirestore.instance.batch();
     bool hasUpdates = false;
     for (final doc in docs) {
@@ -128,12 +164,12 @@ class _ChatScreenState extends State<ChatScreen> {
 
   void _onTextChanged(String val) {
     if (val.trim().isNotEmpty) {
-      _setTypingStatus(true);
+      if (!_isTyping) _setTypingStatus(true);
       _typingTimer?.cancel();
       _typingTimer = Timer(const Duration(seconds: 3), () => _setTypingStatus(false));
     } else {
       _typingTimer?.cancel();
-      _setTypingStatus(false);
+      if (_isTyping) _setTypingStatus(false);
     }
   }
 
@@ -242,7 +278,9 @@ class _ChatScreenState extends State<ChatScreen> {
     _messageController.clear();
     _typingTimer?.cancel();
     _isTyping = false;
-    setState(() => _replyingTo = null);
+    if (_replyingTo != null) {
+      setState(() => _replyingTo = null);
+    }
 
     await FirebaseFirestore.instance.collection('chats').doc(_chatId).collection('messages').add({
       'senderId': _currentUser.uid,
@@ -267,7 +305,8 @@ class _ChatScreenState extends State<ChatScreen> {
   Future<void> _pickAndSendFile() async {
     if (_isUploading) return;
     try {
-      final files = await FilePicker.pickFiles(type: FileType.any);
+      final res = await FilePicker.platform.pickFiles(type: FileType.any);
+      final files = res?.files ?? <PlatformFile>[];
       if (files.isEmpty || files.first.path == null) return;
 
       final pickedFile = files.first;
@@ -405,9 +444,12 @@ class _ChatScreenState extends State<ChatScreen> {
           controller: editController,
           autofocus: true,
           keyboardType: TextInputType.multiline,
-          autocorrect: true,
+          autocorrect: false,
           enableSuggestions: true,
-          textCapitalization: TextCapitalization.sentences,
+          textCapitalization: TextCapitalization.none,
+          smartDashesType: SmartDashesType.disabled,
+          smartQuotesType: SmartQuotesType.disabled,
+          spellCheckConfiguration: const SpellCheckConfiguration.disabled(),
           maxLines: 4,
           minLines: 1,
           decoration: const InputDecoration(border: OutlineInputBorder(), hintText: 'নতুন মেসেজ লিখুন...'),
@@ -591,7 +633,7 @@ class _ChatScreenState extends State<ChatScreen> {
                     const SizedBox(width: 10),
                     Expanded(
                       child: StreamBuilder<DocumentSnapshot>(
-                        stream: FirebaseFirestore.instance.collection('users').doc(widget.receiverId).snapshots(),
+                        stream: _receiverUserStream,
                         builder: (context, snap) {
                           final uData = snap.data?.data() as Map<String, dynamic>?;
                           final activeNow = NotificationAndPresenceService.isUserActive(uData);
@@ -653,13 +695,7 @@ class _ChatScreenState extends State<ChatScreen> {
                       ),
                     Expanded(
                       child: StreamBuilder<QuerySnapshot>(
-                        stream: FirebaseFirestore.instance
-                            .collection('chats')
-                            .doc(_chatId)
-                            .collection('messages')
-                            .orderBy('timestamp', descending: true)
-                            .limit(_messageLimit)
-                            .snapshots(),
+                        stream: _messagesStream,
                         builder: (context, snapshot) {
                           if (snapshot.connectionState == ConnectionState.waiting && !snapshot.hasData) {
                             return const Center(child: CircularProgressIndicator());
@@ -677,7 +713,6 @@ class _ChatScreenState extends State<ChatScreen> {
                             );
                           }
 
-                          _markAsRead();
                           _markMessagesAsSeen(messages);
 
                           return ListView.builder(
@@ -786,7 +821,7 @@ class _ChatScreenState extends State<ChatScreen> {
                       ),
                     ),
                     StreamBuilder<DocumentSnapshot>(
-                      stream: FirebaseFirestore.instance.collection('chats').doc(_chatId).snapshots(),
+                      stream: _chatDocStream,
                       builder: (context, snapshot) {
                         final chatData = snapshot.data?.data() as Map<String, dynamic>?;
                         final typingMap = chatData?['typing'] as Map<String, dynamic>?;
@@ -855,11 +890,15 @@ class _ChatScreenState extends State<ChatScreen> {
                                 Expanded(
                                   child: TextField(
                                     controller: _messageController,
+                                    focusNode: _messageFocusNode,
                                     onChanged: _onTextChanged,
                                     keyboardType: TextInputType.multiline,
-                                    textCapitalization: TextCapitalization.sentences,
-                                    autocorrect: true,
+                                    textCapitalization: TextCapitalization.none,
+                                    autocorrect: false,
                                     enableSuggestions: true,
+                                    smartDashesType: SmartDashesType.disabled,
+                                    smartQuotesType: SmartQuotesType.disabled,
+                                    spellCheckConfiguration: const SpellCheckConfiguration.disabled(),
                                     minLines: 1,
                                     maxLines: 4,
                                     style: TextStyle(color: isDark ? Colors.white : Colors.black87),
