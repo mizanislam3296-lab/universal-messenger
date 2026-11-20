@@ -33,6 +33,8 @@ class _CallScreenState extends State<CallScreen> {
 
   StreamSubscription<DocumentSnapshot>? _callDocSub;
   StreamSubscription<DocumentSnapshot>? _sessionDocSub;
+  late final ValueNotifier<bool> _screenShareNotifier;
+
   bool _allowPop = false;
   bool _cleanedUp = false;
   bool _remoteEnded = false;
@@ -52,6 +54,8 @@ class _CallScreenState extends State<CallScreen> {
   @override
   void initState() {
     super.initState();
+    _screenShareNotifier = ZegoUIKit().getScreenSharingStateNotifier();
+    _screenShareNotifier.addListener(_onScreenShareStateChanged);
     _setNativeCallState(true);
     _stopNativeRingtone();
     _listenForRemoteHangUp();
@@ -59,17 +63,30 @@ class _CallScreenState extends State<CallScreen> {
 
   @override
   void dispose() {
+    _screenShareNotifier.removeListener(_onScreenShareStateChanged);
     _callDocSub?.cancel();
     _sessionDocSub?.cancel();
     if (!_isMinimizing) {
+      _stopScreenSharingImmediately();
       _cleanupCallStatus();
     }
     super.dispose();
   }
 
+  void _onScreenShareStateChanged() {
+    final sharing = _screenShareNotifier.value;
+    _setNativeScreenSharing(sharing);
+  }
+
   Future<void> _setNativeCallState(bool active) async {
     try {
       await _nativeChannel.invokeMethod('setCallActive', {'active': active});
+    } catch (_) {}
+  }
+
+  Future<void> _setNativeScreenSharing(bool active) async {
+    try {
+      await _nativeChannel.invokeMethod('setScreenSharing', {'active': active});
     } catch (_) {}
   }
 
@@ -79,10 +96,45 @@ class _CallScreenState extends State<CallScreen> {
     } catch (_) {}
   }
 
+  void _stopScreenSharingImmediately() {
+    try {
+      ZegoUIKit().stopSharingScreen();
+    } catch (_) {}
+    try {
+      _nativeChannel.invokeMethod('stopScreenShareService');
+    } catch (_) {}
+  }
+
+  Future<void> _toggleScreenSharing() async {
+    final currentlySharing = _screenShareNotifier.value;
+    if (currentlySharing) {
+      _stopScreenSharingImmediately();
+      return;
+    }
+
+    // Prevent PiP from hijacking Android's MediaProjection permission dialog
+    try {
+      await _nativeChannel.invokeMethod('suppressPipOnce', true);
+      await _nativeChannel.invokeMethod('setScreenSharing', {'active': true});
+    } catch (_) {}
+
+    try {
+      await ZegoUIKit().startSharingScreen();
+    } catch (_) {
+      await _setNativeScreenSharing(false);
+    }
+
+    // If user cancelled the system dialog, re-enable normal PiP after a short check
+    Future.delayed(const Duration(seconds: 4), () {
+      if (mounted && !_screenShareNotifier.value) {
+        _setNativeScreenSharing(false);
+      }
+    });
+  }
+
   void _listenForRemoteHangUp() {
     final currentUid = FirebaseAuth.instance.currentUser?.uid;
 
-    // 1. Shared session listener by callID (works reliably for BOTH caller & receiver)
     _sessionDocSub = FirebaseFirestore.instance
         .collection('call_sessions')
         .doc(widget.callID)
@@ -97,7 +149,6 @@ class _CallScreenState extends State<CallScreen> {
       }
     });
 
-    // 2. Direct calls/{docId} listener (handles ring-time decline/cancel/delete)
     final docId = (_effectiveCallDocId != null && _effectiveCallDocId!.isNotEmpty)
         ? _effectiveCallDocId!
         : (currentUid ?? '');
@@ -136,6 +187,7 @@ class _CallScreenState extends State<CallScreen> {
     if (_remoteEnded) return;
     _remoteEnded = true;
     _cleanedUp = true;
+    _stopScreenSharingImmediately();
     _setNativeCallState(false);
     _stopNativeRingtone();
 
@@ -147,6 +199,7 @@ class _CallScreenState extends State<CallScreen> {
       try {
         await ZegoUIKitPrebuiltCallController().hangUp(context);
       } catch (_) {}
+      _stopScreenSharingImmediately();
       if (mounted && Navigator.of(context).canPop()) {
         Navigator.of(context).pop();
       }
@@ -156,6 +209,7 @@ class _CallScreenState extends State<CallScreen> {
   void _cleanupCallStatus() {
     if (_cleanedUp) return;
     _cleanedUp = true;
+    _stopScreenSharingImmediately();
     _setNativeCallState(false);
     _stopNativeRingtone();
 
@@ -167,14 +221,12 @@ class _CallScreenState extends State<CallScreen> {
       'endedAt': FieldValue.serverTimestamp(),
     };
 
-    // Always broadcast hang-up on the shared call_sessions doc
     FirebaseFirestore.instance
         .collection('call_sessions')
         .doc(widget.callID)
         .set(payload, SetOptions(merge: true))
         .catchError((_) {});
 
-    // Also update calls/{docId} so ringing/incoming UI stops immediately
     final docId = _effectiveCallDocId;
     if (docId != null && docId.isNotEmpty) {
       FirebaseFirestore.instance
@@ -184,7 +236,6 @@ class _CallScreenState extends State<CallScreen> {
           .catchError((_) {});
     }
 
-    // If receiver didn't have callDocId passed, also mark their own calls/{uid} doc ended
     if (currentUid.isNotEmpty && currentUid != docId) {
       final ownRef = FirebaseFirestore.instance.collection('calls').doc(currentUid);
       ownRef.get().then((snap) {
@@ -206,6 +257,32 @@ class _CallScreenState extends State<CallScreen> {
     });
   }
 
+  Widget _buildScreenShareButton() {
+    return ValueListenableBuilder<bool>(
+      valueListenable: _screenShareNotifier,
+      builder: (context, isSharing, _) {
+        return GestureDetector(
+          onTap: _toggleScreenSharing,
+          child: Container(
+            width: 48,
+            height: 48,
+            decoration: BoxDecoration(
+              color: isSharing ? Colors.redAccent : Colors.white24,
+              shape: BoxShape.circle,
+            ),
+            child: Icon(
+              isSharing
+                  ? Icons.stop_screen_share_rounded
+                  : Icons.screen_share_rounded,
+              color: Colors.white,
+              size: 24,
+            ),
+          ),
+        );
+      },
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final currentUser = FirebaseAuth.instance.currentUser!;
@@ -215,6 +292,13 @@ class _CallScreenState extends State<CallScreen> {
     final config = widget.isVideoCall
         ? ZegoUIKitPrebuiltCallConfig.oneOnOneVideoCall()
         : ZegoUIKitPrebuiltCallConfig.oneOnOneVoiceCall();
+
+    // Gallery layout is required by ZegoUIKit to display screen sharing properly
+    config.layout = ZegoLayout.gallery(
+      showScreenSharingFullscreenModeToggleButtonRules:
+          ZegoShowFullscreenModeToggleButtonRules.alwaysShow,
+      showNewScreenSharingViewInFullscreenMode: true,
+    );
 
     config.turnOnCameraWhenJoining = widget.isVideoCall;
     config.turnOnMicrophoneWhenJoining = true;
@@ -238,16 +322,16 @@ class _CallScreenState extends State<CallScreen> {
             ZegoCallMenuBarButtonName.switchCameraButton,
             ZegoCallMenuBarButtonName.hangUpButton,
             ZegoCallMenuBarButtonName.toggleMicrophoneButton,
-            ZegoCallMenuBarButtonName.toggleScreenSharingButton,
           ]
         : [
             ZegoCallMenuBarButtonName.toggleMicrophoneButton,
             ZegoCallMenuBarButtonName.switchAudioOutputButton,
             ZegoCallMenuBarButtonName.hangUpButton,
-            ZegoCallMenuBarButtonName.toggleScreenSharingButton,
           ];
+    config.bottomMenuBar.extendButtons = [_buildScreenShareButton()];
 
-    config.pip.enableWhenBackground = true;
+    // Let MainActivity manage PiP safely so it never interrupts screen sharing
+    config.pip.enableWhenBackground = false;
 
     return PopScope(
       canPop: _allowPop,
@@ -267,18 +351,21 @@ class _CallScreenState extends State<CallScreen> {
           events: ZegoUIKitPrebuiltCallEvents(
             onCallEnd: (event, defaultAction) {
               _isMinimizing = false;
+              _stopScreenSharingImmediately();
               _cleanupCallStatus();
               if (mounted) {
                 setState(() => _allowPop = true);
               }
               WidgetsBinding.instance.addPostFrameCallback((_) {
                 defaultAction.call();
+                _stopScreenSharingImmediately();
               });
             },
             user: ZegoCallUserEvents(
               onLeave: (user) {
                 if (user.id != currentUser.uid) {
                   _isMinimizing = false;
+                  _stopScreenSharingImmediately();
                   _cleanupCallStatus();
                   _endCallFromRemote();
                 }
