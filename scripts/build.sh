@@ -15,6 +15,16 @@ import pathlib, re
 
 file_picker_pat = re.compile(r'await\s+FilePicker\.pickFiles\(([^)]*)\)')
 double_gt_pat = re.compile(r'StreamBuilder<\s*(QuerySnapshot|DocumentSnapshot)\s*>>\s*\(')
+zego_express_imp_pat = re.compile(
+    r"^\s*import\s+'package:zego_express_engine/zego_express_engine\.dart';\s*\n?",
+    flags=re.MULTILINE,
+)
+audio_fn_pat = re.compile(
+    r'Future<void>\s+_applyClearAudioAndHardwareSettings\(\)\s+async\s*\{[\s\S]*?\}\s*catch\s*\(_\)\s*\{\}\s*\}'
+)
+screen_fn_pat = re.compile(
+    r'Future<void>\s+_optimizeScreenShareStream\(\)\s+async\s*\{[\s\S]*?\}\s*catch\s*\(_\)\s*\{\}\s*\}'
+)
 
 for p in pathlib.Path('lib').rglob('*.dart'):
     text = p.read_text(encoding='utf-8')
@@ -29,6 +39,23 @@ for p in pathlib.Path('lib').rglob('*.dart'):
         uikit_imp = "import 'package:zego_uikit/zego_uikit.dart';"
         if prebuilt_imp in new_text and uikit_imp not in new_text:
             new_text = new_text.replace(prebuilt_imp, f"{prebuilt_imp}\n{uikit_imp}", 1)
+        new_text = zego_express_imp_pat.sub('', new_text)
+        new_text = audio_fn_pat.sub(
+            "Future<void> _applyClearAudioAndHardwareSettings() async {\n"
+            "    try {\n"
+            "      await _nativeChannel.invokeMethod('setCallAudioMode', {'active': true});\n"
+            "    } catch (_) {}\n"
+            "  }",
+            new_text,
+        )
+        new_text = screen_fn_pat.sub(
+            "Future<void> _optimizeScreenShareStream() async {\n"
+            "    try {\n"
+            "      await _nativeChannel.invokeMethod('setCallAudioMode', {'active': true});\n"
+            "    } catch (_) {}\n"
+            "  }",
+            new_text,
+        )
         new_text = new_text.replace(
             'await ZegoUIKit().startSharingScreen();',
             'ZegoUIKit().startSharingScreen();',
