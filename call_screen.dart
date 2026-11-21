@@ -13,6 +13,7 @@ class CallCleanupCoordinator {
       MethodChannel('com.universal.messenger/icon');
   static bool _handlerRegistered = false;
   static Future<void> Function()? _activeCallKillHandler;
+  static Map<String, dynamic>? _activeCallMeta;
 
   static void ensureRegistered() {
     if (_handlerRegistered) return;
@@ -25,14 +26,25 @@ class CallCleanupCoordinator {
     });
   }
 
-  static void attachActiveCall(Future<void> Function() handler) {
+  static void attachActiveCall(
+    Future<void> Function() handler, {
+    Map<String, dynamic>? meta,
+  }) {
     ensureRegistered();
     _activeCallKillHandler = handler;
+    if (meta != null) {
+      _activeCallMeta = Map<String, dynamic>.from(meta);
+    }
+  }
+
+  static void updateActiveCallMeta(Map<String, dynamic> updates) {
+    _activeCallMeta = {...?_activeCallMeta, ...updates};
   }
 
   static void detachActiveCall(Future<void> Function() handler) {
     if (_activeCallKillHandler == handler) {
       _activeCallKillHandler = null;
+      _activeCallMeta = null;
     }
   }
 
@@ -109,12 +121,26 @@ class CallCleanupCoordinator {
     };
 
     if (callId.isNotEmpty) {
+      final meta = _activeCallMeta;
+      await CallLogHelper.finalizeCall(
+        callId: callId,
+        isVideo: meta?['isVideo'] == true,
+        wasConnected: meta?['wasConnected'] == true,
+        localConnectedAt: meta?['connectedAt'] as DateTime?,
+        fallbackChatId: meta?['chatId']?.toString(),
+        fallbackCallerId: meta?['callerId']?.toString(),
+        fallbackCallerName: meta?['callerName']?.toString(),
+        fallbackCallerEmail: meta?['callerEmail']?.toString(),
+        fallbackReceiverId: meta?['receiverId']?.toString() ?? callDocId,
+        fallbackReceiverName: meta?['receiverName']?.toString(),
+        fallbackReceiverEmail: meta?['receiverEmail']?.toString(),
+        fallbackCallDocId: callDocId,
+      ).catchError((_) {});
+
       await FirebaseFirestore.instance
           .collection('call_sessions')
           .doc(callId)
           .set(payload, SetOptions(merge: true))
-          .catchError((_) {});
-      await CallLogHelper.finalizeCall(callId: callId, isVideo: false)
           .catchError((_) {});
     }
 
@@ -140,6 +166,8 @@ class CallCleanupCoordinator {
 }
 
 class CallLogHelper {
+  static final Set<String> _finalizingOrLoggedKeys = {};
+
   static String formatDuration(int totalSeconds) {
     if (totalSeconds <= 0) return '00:00';
     final hours = totalSeconds ~/ 3600;
@@ -190,29 +218,31 @@ class CallLogHelper {
   static Future<void> markConnected(String callId) async {
     if (callId.isEmpty) return;
     try {
-      final ref =
-          FirebaseFirestore.instance.collection('call_sessions').doc(callId);
-      await FirebaseFirestore.instance.runTransaction((tx) async {
-        final snap = await tx.get(ref);
-        final data = snap.data();
-        final alreadyConnected = data != null && data['connectedAt'] != null;
-        tx.set(
-          ref,
-          {
-            'callId': callId,
-            'status': 'accepted',
-            if (!alreadyConnected) 'connectedAt': FieldValue.serverTimestamp(),
-          },
-          SetOptions(merge: true),
-        );
-      });
+      await FirebaseFirestore.instance
+          .collection('call_sessions')
+          .doc(callId)
+          .set({
+        'callId': callId,
+        'status': 'accepted',
+        'connectedAt': FieldValue.serverTimestamp(),
+      }, SetOptions(merge: true));
     } catch (_) {}
+  }
+
+  static String _inferChatIdFromCallId(String callId) {
+    final parts = callId.split('_');
+    if (parts.length >= 3) {
+      return '${parts[0]}_${parts[1]}';
+    }
+    return '';
   }
 
   static Future<void> finalizeCall({
     required String callId,
     required bool isVideo,
     bool forceMissed = false,
+    bool wasConnected = false,
+    bool sendMissedPush = false,
     DateTime? localConnectedAt,
     String? fallbackChatId,
     String? fallbackCallerId,
@@ -221,166 +251,236 @@ class CallLogHelper {
     String? fallbackReceiverId,
     String? fallbackReceiverName,
     String? fallbackReceiverEmail,
+    String? fallbackCallDocId,
   }) async {
     if (callId.isEmpty) return;
 
-    final sessionRef =
-        FirebaseFirestore.instance.collection('call_sessions').doc(callId);
+    final dedupeKey = '$callId:${wasConnected && !forceMissed ? 'done' : 'miss'}';
+    if (_finalizingOrLoggedKeys.contains(dedupeKey)) return;
+    _finalizingOrLoggedKeys.add(dedupeKey);
 
-    Map<String, dynamic>? finalPayload;
-
+    // 1. Best-effort read from call_sessions and calls/{docId} — NEVER abort on error/permission denied
+    Map<String, dynamic> remoteData = {};
     try {
-      await FirebaseFirestore.instance.runTransaction((tx) async {
-        final snap = await tx.get(sessionRef);
-        final data = snap.data() ?? <String, dynamic>{};
+      final sessionSnap = await FirebaseFirestore.instance
+          .collection('call_sessions')
+          .doc(callId)
+          .get()
+          .timeout(const Duration(seconds: 3));
+      if (sessionSnap.exists && sessionSnap.data() != null) {
+        remoteData = Map<String, dynamic>.from(sessionSnap.data()!);
+      }
+    } catch (_) {}
 
-        if (data['logged'] == true) {
-          return;
-        }
-
-        final chatId = (data['chatId'] ?? fallbackChatId ?? '').toString();
-        final callerId =
-            (data['callerId'] ?? fallbackCallerId ?? '').toString();
-        final callerName =
-            (data['callerName'] ?? fallbackCallerName ?? 'User').toString();
-        final callerEmail =
-            (data['callerEmail'] ?? fallbackCallerEmail ?? '').toString();
-        final receiverId =
-            (data['receiverId'] ?? fallbackReceiverId ?? '').toString();
-        final receiverName =
-            (data['receiverName'] ?? fallbackReceiverName ?? 'User').toString();
-        final receiverEmail =
-            (data['receiverEmail'] ?? fallbackReceiverEmail ?? '').toString();
-        final videoFlag =
-            data.containsKey('isVideo') ? (data['isVideo'] == true) : isVideo;
-
-        final connectedTs = data['connectedAt'] as Timestamp?;
-        final DateTime? connectedTime =
-            connectedTs?.toDate() ?? localConnectedAt;
-        final wasAccepted = !forceMissed &&
-            (connectedTime != null || data['status'] == 'accepted');
-
-        int durationSec = 0;
-        if (wasAccepted) {
-          if (connectedTime != null) {
-            final diff = DateTime.now().difference(connectedTime).inSeconds;
-            durationSec = diff < 1 ? 1 : diff;
-          } else {
-            durationSec = 1;
+    if (remoteData.isEmpty) {
+      final docIdsToCheck = <String>{
+        if (fallbackCallDocId != null && fallbackCallDocId.isNotEmpty)
+          fallbackCallDocId,
+        if (fallbackReceiverId != null && fallbackReceiverId.isNotEmpty)
+          fallbackReceiverId,
+        if (FirebaseAuth.instance.currentUser?.uid != null)
+          FirebaseAuth.instance.currentUser!.uid,
+      };
+      for (final dId in docIdsToCheck) {
+        try {
+          final snap = await FirebaseFirestore.instance
+              .collection('calls')
+              .doc(dId)
+              .get()
+              .timeout(const Duration(seconds: 2));
+          final d = snap.data();
+          if (snap.exists && d != null && (d['callId'] ?? '') == callId) {
+            remoteData = Map<String, dynamic>.from(d);
+            break;
           }
-        }
+        } catch (_) {}
+      }
+    }
 
-        final callStatus = wasAccepted ? 'completed' : 'missed';
-        final endedStatus =
-            wasAccepted ? 'ended' : (forceMissed ? 'declined' : 'ended');
+    String chatId = (fallbackChatId != null && fallbackChatId.isNotEmpty)
+        ? fallbackChatId
+        : (remoteData['chatId'] ?? '').toString();
+    String callerId = (fallbackCallerId != null && fallbackCallerId.isNotEmpty)
+        ? fallbackCallerId
+        : (remoteData['callerId'] ?? '').toString();
+    String callerName =
+        (fallbackCallerName != null && fallbackCallerName.isNotEmpty)
+            ? fallbackCallerName
+            : (remoteData['callerName'] ?? 'User').toString();
+    String callerEmail =
+        (fallbackCallerEmail != null && fallbackCallerEmail.isNotEmpty)
+            ? fallbackCallerEmail
+            : (remoteData['callerEmail'] ?? '').toString();
+    String receiverId =
+        (fallbackReceiverId != null && fallbackReceiverId.isNotEmpty)
+            ? fallbackReceiverId
+            : (remoteData['receiverId'] ?? '').toString();
+    String receiverName =
+        (fallbackReceiverName != null && fallbackReceiverName.isNotEmpty)
+            ? fallbackReceiverName
+            : (remoteData['receiverName'] ?? 'User').toString();
+    String receiverEmail =
+        (fallbackReceiverEmail != null && fallbackReceiverEmail.isNotEmpty)
+            ? fallbackReceiverEmail
+            : (remoteData['receiverEmail'] ?? '').toString();
 
-        tx.set(
-          sessionRef,
-          {
-            'callId': callId,
-            'status': endedStatus,
-            'callStatus': callStatus,
-            'durationSec': durationSec,
-            'logged': true,
-            'endedAt': FieldValue.serverTimestamp(),
-          },
-          SetOptions(merge: true),
-        );
+    if (chatId.isEmpty) {
+      if (callerId.isNotEmpty && receiverId.isNotEmpty) {
+        final ids = [callerId, receiverId]..sort();
+        chatId = '${ids[0]}_${ids[1]}';
+      } else {
+        chatId = _inferChatIdFromCallId(callId);
+      }
+    }
 
-        finalPayload = {
-          'chatId': chatId,
-          'callerId': callerId,
-          'callerName': callerName,
-          'callerEmail': callerEmail,
-          'receiverId': receiverId,
-          'receiverName': receiverName,
-          'receiverEmail': receiverEmail,
-          'isVideo': videoFlag,
-          'callStatus': callStatus,
-          'durationSec': durationSec,
-        };
-      });
-    } catch (_) {
+    if (chatId.isEmpty) {
+      _finalizingOrLoggedKeys.remove(dedupeKey);
       return;
     }
 
-    final payload = finalPayload;
-    if (payload == null) return;
-
-    final callerId = (payload['callerId'] ?? '').toString();
-    final receiverId = (payload['receiverId'] ?? '').toString();
-    var chatId = (payload['chatId'] ?? '').toString();
-
-    if (chatId.isEmpty && callerId.isNotEmpty && receiverId.isNotEmpty) {
-      final ids = [callerId, receiverId]..sort();
-      chatId = '${ids[0]}_${ids[1]}';
+    // Infer missing callerId / receiverId from chatId if needed
+    final chatParts = chatId.split('_');
+    if (chatParts.length == 2) {
+      if (callerId.isEmpty && receiverId.isNotEmpty) {
+        callerId = chatParts[0] == receiverId ? chatParts[1] : chatParts[0];
+      } else if (receiverId.isEmpty && callerId.isNotEmpty) {
+        receiverId = chatParts[0] == callerId ? chatParts[1] : chatParts[0];
+      }
     }
-    if (chatId.isEmpty || callerId.isEmpty || receiverId.isEmpty) return;
+    if (callerId.isEmpty || receiverId.isEmpty) {
+      _finalizingOrLoggedKeys.remove(dedupeKey);
+      return;
+    }
 
-    final videoFlag = payload['isVideo'] == true;
-    final isMissed = payload['callStatus'] == 'missed';
-    final durationSec = (payload['durationSec'] as int?) ?? 0;
+    final videoFlag = isVideo || (remoteData['isVideo'] == true);
+    final connectedTs = remoteData['connectedAt'] as Timestamp?;
+    final DateTime? connectedTime = localConnectedAt ?? connectedTs?.toDate();
+    final wasAccepted = !forceMissed &&
+        (wasConnected ||
+            connectedTime != null ||
+            remoteData['status'] == 'accepted');
 
+    int durationSec = 0;
+    if (wasAccepted) {
+      if (connectedTime != null) {
+        final diff = DateTime.now().difference(connectedTime).inSeconds;
+        durationSec = diff < 1 ? 1 : diff;
+      } else {
+        durationSec = 1;
+      }
+    }
+
+    final isMissed = !wasAccepted;
+    final callStatus = isMissed ? 'missed' : 'completed';
     final summaryText = isMissed
         ? (videoFlag ? 'Missed video call' : 'Missed voice call')
         : '${videoFlag ? 'Video call' : 'Voice call'} • ${formatDuration(durationSec)}';
 
-    try {
-      await FirebaseFirestore.instance
-          .collection('chats')
-          .doc(chatId)
-          .collection('messages')
-          .add({
-        'senderId': callerId,
-        'receiverId': receiverId,
-        'text': summaryText,
-        'type': 'call',
-        'callId': callId,
-        'isVideo': videoFlag,
-        'callStatus': isMissed ? 'missed' : 'completed',
-        'durationSec': durationSec,
-        'isSeen': !isMissed,
-        'isEdited': false,
-        'timestamp': FieldValue.serverTimestamp(),
-      });
+    final chatRef = FirebaseFirestore.instance.collection('chats').doc(chatId);
+    final msgRef = chatRef.collection('messages').doc('call_$callId');
 
-      final chatUpdate = <String, dynamic>{
-        'chatId': chatId,
-        'participants': [callerId, receiverId],
-        'lastMessage': summaryText,
-        'lastMessageType': 'call',
-        'lastCallStatus': isMissed ? 'missed' : 'completed',
-        'lastCallIsVideo': videoFlag,
-        'lastCallDurationSec': durationSec,
-        'lastCallCallerId': callerId,
-        'lastMessageTime': FieldValue.serverTimestamp(),
-        'lastSenderId': callerId,
-        'users': {
-          callerId: {
-            'name': payload['callerName'] ?? 'User',
-            'email': payload['callerEmail'] ?? '',
-          },
-          receiverId: {
-            'name': payload['receiverName'] ?? 'User',
-            'email': payload['receiverEmail'] ?? '',
-          },
+    final msgData = <String, dynamic>{
+      'senderId': callerId,
+      'receiverId': receiverId,
+      'text': summaryText,
+      'type': 'call',
+      'callId': callId,
+      'isVideo': videoFlag,
+      'callStatus': callStatus,
+      'durationSec': durationSec,
+      'isSeen': !isMissed,
+      'isEdited': false,
+      'timestamp': FieldValue.serverTimestamp(),
+    };
+
+    final baseChatUpdate = <String, dynamic>{
+      'chatId': chatId,
+      'participants': [callerId, receiverId],
+      'lastMessage': summaryText,
+      'lastMessageType': 'call',
+      'lastCallStatus': callStatus,
+      'lastCallIsVideo': videoFlag,
+      'lastCallDurationSec': durationSec,
+      'lastCallCallerId': callerId,
+      'lastMessageTime': FieldValue.serverTimestamp(),
+      'lastSenderId': callerId,
+      'users': {
+        callerId: {
+          'name': callerName,
+          'email': callerEmail,
         },
-      };
+        receiverId: {
+          'name': receiverName,
+          'email': receiverEmail,
+        },
+      },
+    };
 
-      if (isMissed) {
-        chatUpdate['unreadCount'] = {
+    final missedChatUpdate = <String, dynamic>{
+      ...baseChatUpdate,
+      if (isMissed)
+        'unreadCount': {
           receiverId: FieldValue.increment(1),
-        };
-        chatUpdate['missedCallCount'] = {
+        },
+      if (isMissed)
+        'missedCallCount': {
           receiverId: FieldValue.increment(1),
-        };
-      }
+        },
+    };
 
-      await FirebaseFirestore.instance
-          .collection('chats')
-          .doc(chatId)
-          .set(chatUpdate, SetOptions(merge: true));
-    } catch (_) {}
+    // 2. Atomically save inside chats/{chatId}/messages/call_$callId (never blocked by call_sessions rules)
+    bool createdFresh = false;
+    try {
+      await FirebaseFirestore.instance.runTransaction((tx) async {
+        final existing = await tx.get(msgRef);
+        if (existing.exists) {
+          final exData = existing.data() ?? <String, dynamic>{};
+          final exStatus = (exData['callStatus'] ?? '').toString();
+          final exDur = (exData['durationSec'] as num?)?.toInt() ?? 0;
+          // Upgrade from missed -> completed, or update longer duration if needed
+          if ((exStatus == 'missed' && !isMissed) ||
+              (!isMissed && durationSec > exDur)) {
+            tx.set(msgRef, msgData, SetOptions(merge: true));
+            tx.set(chatRef, baseChatUpdate, SetOptions(merge: true));
+          }
+          return;
+        }
+        tx.set(msgRef, msgData);
+        tx.set(chatRef, missedChatUpdate, SetOptions(merge: true));
+        createdFresh = true;
+      });
+    } catch (_) {
+      // Offline / slow-network fallback: direct write queued by Firestore SDK
+      try {
+        await msgRef.set(msgData, SetOptions(merge: true));
+        await chatRef.set(missedChatUpdate, SetOptions(merge: true));
+        createdFresh = true;
+      } catch (_) {}
+    }
+
+    // 3. Best-effort sync call_sessions metadata
+    FirebaseFirestore.instance
+        .collection('call_sessions')
+        .doc(callId)
+        .set({
+      'callId': callId,
+      'status': isMissed ? (forceMissed ? 'declined' : 'ended') : 'ended',
+      'callStatus': callStatus,
+      'durationSec': durationSec,
+      'logged': true,
+      'endedAt': FieldValue.serverTimestamp(),
+    }, SetOptions(merge: true)).catchError((_) {});
+
+    // 4. Send Missed Call notification alert to receiver if caller cancelled/timed out
+    if (isMissed && createdFresh && sendMissedPush) {
+      FcmPushService.sendPushToUser(
+        receiverId: receiverId,
+        title: videoFlag ? 'Missed video call' : 'Missed voice call',
+        body: '$callerName tried to call you',
+        isCall: false,
+        chatId: chatId,
+      ).catchError((_) {});
+    }
   }
 }
 
@@ -520,10 +620,12 @@ class _IncomingCallScreenState extends State<IncomingCallScreen>
       'status': 'declined',
     }, SetOptions(merge: true));
 
-    CallLogHelper.finalizeCall(
+    await CallLogHelper.finalizeCall(
       callId: widget.callID,
       isVideo: widget.isVideoCall,
       forceMissed: true,
+      wasConnected: false,
+      sendMissedPush: false,
       fallbackChatId: widget.chatId,
       fallbackCallerId: widget.callerId,
       fallbackCallerName: widget.callerName,
@@ -532,6 +634,7 @@ class _IncomingCallScreenState extends State<IncomingCallScreen>
       fallbackReceiverName:
           currentUser?.displayName ?? currentUser?.email ?? 'User',
       fallbackReceiverEmail: currentUser?.email ?? '',
+      fallbackCallDocId: widget.callDocId,
     );
 
     if (mounted && Navigator.of(context).canPop()) {
@@ -829,6 +932,7 @@ class _CallScreenState extends State<CallScreen> with WidgetsBindingObserver {
   StreamSubscription<DocumentSnapshot>? _sessionDocSub;
   Stream<DocumentSnapshot>? _otherUserStream;
   Timer? _durationTimer;
+  Timer? _ringTimeoutTimer;
 
   bool _allowPop = false;
   bool _cleanedUp = false;
@@ -863,6 +967,31 @@ class _CallScreenState extends State<CallScreen> with WidgetsBindingObserver {
         status == 'cancelled';
   }
 
+  Map<String, dynamic> _buildCallMeta() {
+    final myUid = _currentUser.uid;
+    final myName = _currentUser.displayName ?? _currentUser.email ?? 'User';
+    final myEmail = _currentUser.email ?? '';
+    return {
+      'callId': widget.callID,
+      'chatId': widget.chatId ?? '',
+      'isVideo': widget.isVideoCall || _isCameraOn || _isRemoteCameraOn,
+      'wasConnected': _isConnected,
+      'connectedAt': _connectedAt,
+      'callerId': widget.isCaller ? myUid : (widget.otherUserId ?? ''),
+      'callerName':
+          widget.isCaller ? myName : (widget.otherUserName ?? 'User'),
+      'callerEmail':
+          widget.isCaller ? myEmail : (widget.otherUserEmail ?? ''),
+      'receiverId': widget.isCaller
+          ? (widget.otherUserId ?? widget.receiverIdForCleanup ?? '')
+          : myUid,
+      'receiverName':
+          widget.isCaller ? (widget.otherUserName ?? 'User') : myName,
+      'receiverEmail':
+          widget.isCaller ? (widget.otherUserEmail ?? '') : myEmail,
+    };
+  }
+
   @override
   void initState() {
     super.initState();
@@ -881,7 +1010,10 @@ class _CallScreenState extends State<CallScreen> with WidgetsBindingObserver {
     _screenShareNotifier.addListener(_onScreenShareStateChanged);
 
     WidgetsBinding.instance.addObserver(this);
-    CallCleanupCoordinator.attachActiveCall(_handleAppKilledDuringCall);
+    CallCleanupCoordinator.attachActiveCall(
+      _handleAppKilledDuringCall,
+      meta: _buildCallMeta(),
+    );
 
     NotificationAndPresenceService.isInActiveCall = true;
     NotificationAndPresenceService.stopNativeCallRingtone();
@@ -894,6 +1026,13 @@ class _CallScreenState extends State<CallScreen> with WidgetsBindingObserver {
     if (!widget.isCaller) {
       _markLocallyConnected(notifyUi: false);
       CallLogHelper.markConnected(widget.callID);
+    } else {
+      // Auto-end & log Missed Call if receiver does not answer within 45 seconds
+      _ringTimeoutTimer = Timer(const Duration(seconds: 45), () {
+        if (mounted && !_isConnected && !_cleanedUp && !_remoteEnded) {
+          _hangUpNow();
+        }
+      });
     }
 
     _setNativeCallState(true);
@@ -910,8 +1049,14 @@ class _CallScreenState extends State<CallScreen> with WidgetsBindingObserver {
 
   void _markLocallyConnected({DateTime? serverTime, bool notifyUi = true}) {
     if (_isConnected) return;
+    _ringTimeoutTimer?.cancel();
+    _ringTimeoutTimer = null;
     _isConnected = true;
     _connectedAt ??= serverTime ?? DateTime.now();
+    CallCleanupCoordinator.updateActiveCallMeta({
+      'wasConnected': true,
+      'connectedAt': _connectedAt,
+    });
     _durationTimer?.cancel();
     _elapsedSecondsNotifier.value =
         DateTime.now().difference(_connectedAt!).inSeconds.clamp(0, 86400);
@@ -936,11 +1081,12 @@ class _CallScreenState extends State<CallScreen> with WidgetsBindingObserver {
   Future<void> _handleAppKilledDuringCall() async {
     _isMinimizing = false;
     await CallCleanupCoordinator.releaseAllHardwareAndRoom();
-    _cleanupCallStatus();
+    await _cleanupCallStatus();
   }
 
   @override
   void dispose() {
+    _ringTimeoutTimer?.cancel();
     _durationTimer?.cancel();
     _elapsedSecondsNotifier.dispose();
     WidgetsBinding.instance.removeObserver(this);
@@ -992,6 +1138,9 @@ class _CallScreenState extends State<CallScreen> with WidgetsBindingObserver {
       _stopScreenSharingImmediately();
     }
     setState(() => _isCameraOn = next);
+    if (next) {
+      CallCleanupCoordinator.updateActiveCallMeta({'isVideo': true});
+    }
     try {
       ZegoUIKit().turnCameraOn(next);
     } catch (_) {}
@@ -1143,7 +1292,7 @@ class _CallScreenState extends State<CallScreen> with WidgetsBindingObserver {
       }
 
       if (_isEndedStatus(status)) {
-        _endCallFromRemote();
+        _endCallFromRemote(wasDeclined: status == 'declined');
       }
     });
 
@@ -1179,13 +1328,13 @@ class _CallScreenState extends State<CallScreen> with WidgetsBindingObserver {
           _markLocallyConnected();
         }
         if (_isEndedStatus(status)) {
-          _endCallFromRemote();
+          _endCallFromRemote(wasDeclined: status == 'declined');
         }
       }
     });
   }
 
-  void _recordCallLog() {
+  Future<void> _recordCallLog({bool sendMissedPush = false}) async {
     final myUid = _currentUser.uid;
     final myName = _currentUser.displayName ?? _currentUser.email ?? 'User';
     final myEmail = _currentUser.email ?? '';
@@ -1204,9 +1353,11 @@ class _CallScreenState extends State<CallScreen> with WidgetsBindingObserver {
     final receiverEmail =
         widget.isCaller ? (widget.otherUserEmail ?? '') : myEmail;
 
-    CallLogHelper.finalizeCall(
+    await CallLogHelper.finalizeCall(
       callId: widget.callID,
       isVideo: widget.isVideoCall || _isCameraOn || _isRemoteCameraOn,
+      wasConnected: _isConnected,
+      sendMissedPush: sendMissedPush,
       localConnectedAt: _connectedAt,
       fallbackChatId: widget.chatId,
       fallbackCallerId: callerId,
@@ -1215,14 +1366,16 @@ class _CallScreenState extends State<CallScreen> with WidgetsBindingObserver {
       fallbackReceiverId: receiverId,
       fallbackReceiverName: receiverName,
       fallbackReceiverEmail: receiverEmail,
+      fallbackCallDocId: _effectiveCallDocId,
     );
   }
 
   Future<void> _hangUpNow() async {
     HapticFeedback.mediumImpact();
+    _ringTimeoutTimer?.cancel();
     _isMinimizing = false;
     await CallCleanupCoordinator.releaseAllHardwareAndRoom();
-    _cleanupCallStatus();
+    await _cleanupCallStatus(sendMissedPush: widget.isCaller && !_isConnected);
     if (mounted) setState(() => _allowPop = true);
     WidgetsBinding.instance.addPostFrameCallback((_) async {
       if (!mounted) return;
@@ -1236,16 +1389,17 @@ class _CallScreenState extends State<CallScreen> with WidgetsBindingObserver {
     });
   }
 
-  Future<void> _endCallFromRemote() async {
+  Future<void> _endCallFromRemote({bool wasDeclined = false}) async {
     if (_remoteEnded) return;
     _remoteEnded = true;
     _cleanedUp = true;
+    _ringTimeoutTimer?.cancel();
     NotificationAndPresenceService.isInActiveCall = false;
     NotificationAndPresenceService.clearCallNotifications();
     await CallCleanupCoordinator.releaseAllHardwareAndRoom();
     _setNativeCallState(false);
     _stopNativeRingtone();
-    _recordCallLog();
+    await _recordCallLog(sendMissedPush: false);
 
     if (!mounted) return;
     setState(() => _allowPop = true);
@@ -1262,15 +1416,15 @@ class _CallScreenState extends State<CallScreen> with WidgetsBindingObserver {
     });
   }
 
-  void _cleanupCallStatus() {
+  Future<void> _cleanupCallStatus({bool sendMissedPush = false}) async {
     if (_cleanedUp) return;
     _cleanedUp = true;
+    _ringTimeoutTimer?.cancel();
     NotificationAndPresenceService.isInActiveCall = false;
     NotificationAndPresenceService.clearCallNotifications();
     _stopScreenSharingImmediately();
     _setNativeCallState(false);
     _stopNativeRingtone();
-    _recordCallLog();
 
     final currentUid = _currentUser.uid;
     final payload = {
@@ -1304,6 +1458,10 @@ class _CallScreenState extends State<CallScreen> with WidgetsBindingObserver {
         }
       }).catchError((_) {});
     }
+
+    await _recordCallLog(
+      sendMissedPush: sendMissedPush || (widget.isCaller && !_isConnected),
+    );
   }
 
   void _minimizeCall() {
@@ -1767,10 +1925,12 @@ class _CallScreenState extends State<CallScreen> with WidgetsBindingObserver {
               callID: widget.callID,
               config: config,
               events: ZegoUIKitPrebuiltCallEvents(
-                onCallEnd: (event, defaultAction) {
+                onCallEnd: (event, defaultAction) async {
                   _isMinimizing = false;
-                  CallCleanupCoordinator.releaseAllHardwareAndRoom();
-                  _cleanupCallStatus();
+                  await CallCleanupCoordinator.releaseAllHardwareAndRoom();
+                  await _cleanupCallStatus(
+                    sendMissedPush: widget.isCaller && !_isConnected,
+                  );
                   if (mounted) {
                     setState(() => _allowPop = true);
                   }
@@ -1790,7 +1950,6 @@ class _CallScreenState extends State<CallScreen> with WidgetsBindingObserver {
                     if (user.id != _currentUser.uid) {
                       _isMinimizing = false;
                       CallCleanupCoordinator.releaseAllHardwareAndRoom();
-                      _cleanupCallStatus();
                       _endCallFromRemote();
                     }
                   },
@@ -1798,7 +1957,7 @@ class _CallScreenState extends State<CallScreen> with WidgetsBindingObserver {
               ),
             ),
 
-            // 2. WhatsApp voice-call background & avatar (only on voice call with no video/share)
+            // 2. WhatsApp voice-call background & avatar
             if (_showVoiceAvatarOverlay)
               IgnorePointer(
                 child: Container(
@@ -1818,19 +1977,19 @@ class _CallScreenState extends State<CallScreen> with WidgetsBindingObserver {
                 ),
               ),
 
-            // 3. Always-visible WhatsApp Top Bar (Minimize + Name + Ringing.../Timer)
+            // 3. Always-visible WhatsApp Top Bar
             Align(
               alignment: Alignment.topCenter,
               child: _buildWhatsAppTopBar(),
             ),
 
-            // 4. Always-visible WhatsApp Bottom Control Card (Speaker, Video, Mute, Flip, Share, End)
+            // 4. Always-visible WhatsApp Bottom Control Card
             Align(
               alignment: Alignment.bottomCenter,
               child: _buildWhatsAppControlCard(),
             ),
 
-            // 5. Local Screen Sharing Overlay (safe SizedBox.expand — no Positioned inside builder)
+            // 5. Local Screen Sharing Overlay
             ValueListenableBuilder<bool>(
               valueListenable: _screenShareNotifier,
               builder: (_, isSharing, __) {
