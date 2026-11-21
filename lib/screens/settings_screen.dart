@@ -131,13 +131,14 @@ Future<void> universalFcmBackgroundHandler(RemoteMessage message) async {
     final chatId = (data['chatId'] ?? 'msg').toString();
 
     await plugin.show(
-      chatId.hashCode,
+      0,
       title,
       body,
       NotificationDetails(
         android: AndroidNotificationDetails(
           'msg_ch_master_v1',
           'Chat Messages',
+          tag: chatId,
           importance: Importance.max,
           priority: Priority.max,
           category: AndroidNotificationCategory.message,
@@ -254,14 +255,11 @@ class FcmPushService {
       };
 
       if (isCall) {
-        // High-priority data-only push wakes universalFcmBackgroundHandler even when killed,
-        // triggering fullScreenIntent + Accept/Decline + ringtone with a single notification.
         messagePayload['android'] = {
           'priority': 'HIGH',
           'ttl': '45s',
         };
       } else {
-        // Clean notification + data payload so Google Play Services delivers messages even when killed.
         messagePayload['notification'] = {
           'title': title,
           'body': body,
@@ -993,6 +991,10 @@ class NotificationAndPresenceService {
         if (isAppInForeground && activeChatId == doc.id) continue;
         if ((data['lastSenderId'] ?? '') == uid) continue;
 
+        // Avoid duplicate notifications & double sounds when app is backgrounded/locked
+        // because FCM system tray already displays the notification.
+        if (!isAppInForeground && FcmPushService.isConfigured) continue;
+
         final unread = ((data['unreadCount'] as Map<String, dynamic>?)?[uid] as num?)?.toInt() ?? 0;
         if (unread <= 0) continue;
 
@@ -1005,14 +1007,16 @@ class NotificationAndPresenceService {
         await playNativeMessageSound();
         HapticFeedback.mediumImpact();
 
+        // Use id: 0 and tag: doc.id to match FCM notification slot and guarantee zero duplicates
         await _notifications.show(
-          doc.id.hashCode,
+          0,
           senderName,
           lastMsg,
           NotificationDetails(
             android: AndroidNotificationDetails(
               'msg_ch_master_v1',
               'Chat Messages',
+              tag: doc.id,
               importance: Importance.max,
               priority: Priority.max,
               category: AndroidNotificationCategory.message,
