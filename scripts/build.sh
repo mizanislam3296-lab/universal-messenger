@@ -1,12 +1,21 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-echo "==> Step 0: Syncing missing root *_screen.dart files & auto-patching Dart code..."
+echo "==> Step 0: Smart-syncing root *_screen.dart & lib/screens/ (always keeping newest commit)..."
 mkdir -p lib/screens
 for f in *_screen.dart; do
-  if [[ -f "$f" && ! -f "lib/screens/$f" ]]; then
-    echo "Copying missing screen file: $f -> lib/screens/$f"
-    cp "$f" "lib/screens/$f"
+  if [[ -f "$f" ]]; then
+    if [[ ! -f "lib/screens/$f" ]]; then
+      echo "Copying missing screen file: $f -> lib/screens/$f"
+      cp "$f" "lib/screens/$f"
+    else
+      root_ts="$(git log -1 --format=%ct -- "$f" 2>/dev/null || echo 0)"
+      lib_ts="$(git log -1 --format=%ct -- "lib/screens/$f" 2>/dev/null || echo 0)"
+      if [[ "${root_ts:-0}" -gt "${lib_ts:-0}" ]]; then
+        echo "Root $f is newer ($root_ts > $lib_ts); syncing -> lib/screens/$f"
+        cp "$f" "lib/screens/$f"
+      fi
+    fi
   fi
 done
 
@@ -98,10 +107,18 @@ flutter create . \
 echo "==> Step 3: Fetching Dart & Flutter packages..."
 flutter pub get
 
-echo "==> Step 4: Patching plugins and configuring native Android files..."
+echo "==> Step 4: Preparing permanent Release Keystore (if configured in GitHub Secrets)..."
+if [[ -n "${KEYSTORE_B64:-}" ]]; then
+  printf '%s' "$KEYSTORE_B64" | tr -d '\n\r ' | base64 -d > android/app/upload-keystore.jks
+  echo "Decoded android/app/upload-keystore.jks successfully."
+else
+  echo "Note: KEYSTORE_B64 secret not configured yet. Using debug signing."
+fi
+
+echo "==> Step 5: Patching plugins and configuring native Android files..."
 python3 scripts/configure_android.py
 
-echo "==> Step 5: Encoding FCM_SERVICE_ACCOUNT..."
+echo "==> Step 6: Encoding FCM_SERVICE_ACCOUNT..."
 if [[ -n "${FCM_SERVICE_ACCOUNT:-}" ]]; then
   FCM_B64="$(printf '%s' "$FCM_SERVICE_ACCOUNT" | base64 -w 0)"
 else
@@ -109,10 +126,13 @@ else
   FCM_B64=""
 fi
 
-echo "==> Step 6: Building release APK (split-per-abi)..."
-flutter build apk --release --split-per-abi --dart-define="FCM_SA_B64=${FCM_B64}"
+echo "==> Step 7: Building verified arm64-v8a release APK (v15.0.0)..."
+flutter build apk --release --split-per-abi \
+  --build-name=15.0.0 \
+  --build-number=15 \
+  --dart-define="FCM_SA_B64=${FCM_B64}"
 
-echo "==> Step 7: Preparing direct release APK (Universal-Messenger.apk)..."
+echo "==> Step 8: Preparing and verifying Universal-Messenger.apk..."
 SRC_APK="build/app/outputs/flutter-apk/app-arm64-v8a-release.apk"
 DST_APK="build/app/outputs/flutter-apk/Universal-Messenger.apk"
 
@@ -122,4 +142,15 @@ if [[ ! -f "$SRC_APK" ]]; then
 fi
 
 cp "$SRC_APK" "$DST_APK"
+
+SDK_DIR="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
+APKSIGNER="$(find "$SDK_DIR/build-tools" -name apksigner 2>/dev/null | sort -V | tail -n 1 || true)"
+if [[ -n "$APKSIGNER" ]]; then
+  echo "==> Verifying APK signature with $APKSIGNER..."
+  "$APKSIGNER" verify --verbose "$DST_APK"
+else
+  echo "Warning: apksigner not found in $SDK_DIR/build-tools; skipping verification."
+fi
+
+ls -lh "$DST_APK"
 echo "==> Build complete: $DST_APK"
