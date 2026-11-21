@@ -1,4 +1,4 @@
-name: Build & Release Universal Messenger APK
+name: Build and Release Universal Messenger APK
 
 on:
   push:
@@ -10,43 +10,42 @@ permissions:
   contents: write
 
 jobs:
-  build_android:
+  build:
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up Java 17 (Zulu)
+      - name: Set up Java 17
         uses: actions/setup-java@v4
         with:
-          distribution: 'zulu'
+          distribution: temurin
           java-version: '17'
 
-      - name: Set up Flutter (stable)
+      - name: Set up Flutter
         uses: subosito/flutter-action@v2
         with:
-          channel: 'stable'
+          channel: stable
           cache: true
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-
-      - name: Build Android APK
+      - name: Build and verify signed APK
         env:
           FCM_SERVICE_ACCOUNT: ${{ secrets.FCM_SERVICE_ACCOUNT }}
+          KEYSTORE_B64: ${{ secrets.KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
         run: |
           chmod +x scripts/build.sh
           bash scripts/build.sh
 
-      - name: Publish GitHub Release v14.0.0
+      - name: Publish GitHub Release v15.0.0
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v14.0.0
-          name: Universal Messenger v14.0.0
-          body: Direct Android APK release for Universal Messenger v14.0.0 (arm64-v8a).
+          tag_name: v15.0.0
+          name: Universal Messenger v15.0.0
+          body: Universal Messenger v15.0.0 (Bengali Ridmik fix, WhatsApp call UI, single notification & permanent v13 keystore signing).
           files: build/app/outputs/flutter-apk/Universal-Messenger.apk
           draft: false
           prerelease: false
