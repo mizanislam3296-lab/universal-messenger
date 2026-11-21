@@ -1,7 +1,10 @@
 import 'dart:async';
 import 'dart:io';
 import 'dart:math' as math;
+import 'package:flutter/foundation.dart';
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
@@ -11,6 +14,160 @@ import 'package:url_launcher/url_launcher.dart';
 import 'package:video_player/video_player.dart';
 import 'package:universal_messenger/screens/call_screen.dart';
 import 'package:universal_messenger/screens/settings_screen.dart';
+
+class _NativeChatInputController {
+  MethodChannel? _channel;
+  String _text = '';
+
+  String get text => _text;
+
+  void attach(MethodChannel channel) {
+    _channel = channel;
+  }
+
+  void detach(MethodChannel channel) {
+    if (_channel == channel) {
+      _channel = null;
+    }
+  }
+
+  void updateLocalText(String val) {
+    _text = val;
+  }
+
+  Future<String> fetchLatestText() async {
+    final ch = _channel;
+    if (ch != null) {
+      try {
+        final latest = await ch.invokeMethod<String>('getText');
+        if (latest != null) {
+          _text = latest;
+        }
+      } catch (_) {}
+    }
+    return _text;
+  }
+
+  Future<void> clear() async {
+    _text = '';
+    try {
+      await _channel?.invokeMethod('clear');
+    } catch (_) {}
+  }
+
+  Future<void> requestFocus() async {
+    try {
+      await _channel?.invokeMethod('requestFocus');
+    } catch (_) {}
+  }
+}
+
+class _NativeAndroidChatInput extends StatefulWidget {
+  final _NativeChatInputController controller;
+  final bool isDark;
+  final ValueChanged<String> onChanged;
+
+  const _NativeAndroidChatInput({
+    super.key,
+    required this.controller,
+    required this.isDark,
+    required this.onChanged,
+  });
+
+  @override
+  State<_NativeAndroidChatInput> createState() =>
+      _NativeAndroidChatInputState();
+}
+
+class _NativeAndroidChatInputState extends State<_NativeAndroidChatInput> {
+  static final Set<Factory<OneSequenceGestureRecognizer>> _gestureRecognizers =
+      <Factory<OneSequenceGestureRecognizer>>{
+    Factory<OneSequenceGestureRecognizer>(() => EagerGestureRecognizer()),
+  };
+
+  MethodChannel? _channel;
+  double _height = 44.0;
+
+  @override
+  void didUpdateWidget(covariant _NativeAndroidChatInput oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.isDark != widget.isDark) {
+      _channel?.invokeMethod('setTheme', widget.isDark).catchError((_) {});
+    }
+  }
+
+  @override
+  void dispose() {
+    if (_channel != null) {
+      _channel!.setMethodCallHandler(null);
+      widget.controller.detach(_channel!);
+    }
+    super.dispose();
+  }
+
+  void _onPlatformViewCreated(int id) {
+    final ch = MethodChannel('com.universal.messenger/native_chat_input_$id');
+    _channel = ch;
+    widget.controller.attach(ch);
+    ch.setMethodCallHandler((call) async {
+      if (call.method == 'onTextChanged') {
+        final text = (call.arguments as String?) ?? '';
+        widget.controller.updateLocalText(text);
+        widget.onChanged(text);
+      } else if (call.method == 'onHeightChanged') {
+        final h = (call.arguments as num?)?.toDouble();
+        if (h != null && mounted && (h - _height).abs() >= 1.5) {
+          setState(() => _height = h.clamp(44.0, 124.0));
+        }
+      }
+      return true;
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      decoration: BoxDecoration(
+        color: widget.isDark ? const Color(0xFF2A3942) : Colors.white,
+        borderRadius: BorderRadius.circular(24),
+      ),
+      clipBehavior: Clip.antiAlias,
+      child: SizedBox(
+        height: _height,
+        child: PlatformViewLink(
+          viewType: 'com.universal.messenger/native_chat_input',
+          surfaceFactory: (context, controller) {
+            return AndroidViewSurface(
+              controller: controller as AndroidViewController,
+              gestureRecognizers: _gestureRecognizers,
+              hitTestBehavior: PlatformViewHitTestBehavior.opaque,
+            );
+          },
+          onCreatePlatformView: (params) {
+            return PlatformViewsService.initExpensiveAndroidView(
+              id: params.id,
+              viewType: 'com.universal.messenger/native_chat_input',
+              layoutDirection: TextDirection.ltr,
+              creationParams: <String, dynamic>{
+                'hint': 'মেসেজ লিখুন...',
+                'isDark': widget.isDark,
+              },
+              creationParamsCodec: const StandardMessageCodec(),
+              onFocus: () {
+                params.onFocusChanged(true);
+              },
+            )
+              ..addOnPlatformViewCreatedListener((int id) {
+                params.onPlatformViewCreated(id);
+                _onPlatformViewCreated(id);
+              })
+              ..create();
+          },
+        ),
+      ),
+    );
+  }
+}
 
 class ChatScreen extends StatefulWidget {
   final String receiverId;
@@ -52,8 +209,7 @@ class _ChatScreenState extends State<ChatScreen> {
     '🔥',
   ];
 
-  final _messageController = TextEditingController();
-  final _messageFocusNode = FocusNode();
+  final _nativeInputController = _NativeChatInputController();
   final _scrollController = ScrollController();
   late final String _chatId;
   late final User _currentUser;
@@ -153,8 +309,6 @@ class _ChatScreenState extends State<ChatScreen> {
         'typing': {_currentUser.uid: false},
       }, SetOptions(merge: true));
     }
-    _messageController.dispose();
-    _messageFocusNode.dispose();
     _scrollController.dispose();
     super.dispose();
   }
@@ -348,17 +502,18 @@ class _ChatScreenState extends State<ChatScreen> {
         'senderName': isMe ? 'আপনি' : widget.receiverName,
       };
     });
+    _nativeInputController.requestFocus();
   }
 
   Future<void> _sendMessage() async {
-    final text = _messageController.text.trim();
+    final text = (await _nativeInputController.fetchLatestText()).trim();
     if (text.isEmpty) return;
 
     final replyPayload = _replyingTo;
-    _messageController.clear();
+    await _nativeInputController.clear();
     _typingTimer?.cancel();
     _isTyping = false;
-    if (_replyingTo != null) {
+    if (_replyingTo != null && mounted) {
       setState(() => _replyingTo = null);
     }
 
@@ -415,7 +570,7 @@ class _ChatScreenState extends State<ChatScreen> {
         'createdAt': FieldValue.serverTimestamp(),
       });
 
-      _messageController.clear();
+      await _nativeInputController.clear();
       _typingTimer?.cancel();
       if (_isTyping) _setTypingStatus(false);
       if (_replyingTo != null && mounted) {
@@ -440,7 +595,8 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   Future<void> _openScheduleMessageSheet(Color barColor) async {
-    final text = _messageController.text.trim();
+    final text = (await _nativeInputController.fetchLatestText()).trim();
+    if (!mounted) return;
     if (text.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
@@ -2040,6 +2196,7 @@ class _ChatScreenState extends State<ChatScreen> {
                                 ),
                               ),
                             Row(
+                              crossAxisAlignment: CrossAxisAlignment.end,
                               children: [
                                 IconButton(
                                     icon: Icon(Icons.attach_file,
@@ -2047,45 +2204,11 @@ class _ChatScreenState extends State<ChatScreen> {
                                     onPressed:
                                         _isUploading ? null : _pickAndSendFile),
                                 Expanded(
-                                  child: TextField(
-                                    controller: _messageController,
-                                    focusNode: _messageFocusNode,
+                                  child: _NativeAndroidChatInput(
+                                    key: const ValueKey('native_chat_input'),
+                                    controller: _nativeInputController,
+                                    isDark: isDark,
                                     onChanged: _onTextChanged,
-                                    keyboardType: TextInputType.multiline,
-                                    textInputAction: TextInputAction.newline,
-                                    textCapitalization: TextCapitalization.none,
-                                    autocorrect: false,
-                                    enableSuggestions: false,
-                                    enableIMEPersonalizedLearning: false,
-                                    smartDashesType: SmartDashesType.disabled,
-                                    smartQuotesType: SmartQuotesType.disabled,
-                                    spellCheckConfiguration:
-                                        const SpellCheckConfiguration
-                                            .disabled(),
-                                    minLines: 1,
-                                    maxLines: 4,
-                                    style: TextStyle(
-                                        color: isDark
-                                            ? Colors.white
-                                            : Colors.black87),
-                                    decoration: InputDecoration(
-                                      hintText: 'মেসেজ লিখুন...',
-                                      hintStyle: TextStyle(
-                                          color: isDark
-                                              ? Colors.white54
-                                              : Colors.grey.shade600),
-                                      filled: true,
-                                      fillColor: isDark
-                                          ? const Color(0xFF2A3942)
-                                          : Colors.white,
-                                      contentPadding:
-                                          const EdgeInsets.symmetric(
-                                              horizontal: 16, vertical: 10),
-                                      border: OutlineInputBorder(
-                                          borderRadius:
-                                              BorderRadius.circular(24),
-                                          borderSide: BorderSide.none),
-                                    ),
                                   ),
                                 ),
                                 const SizedBox(width: 6),
