@@ -80,7 +80,6 @@ class _ChatScreenState extends State<ChatScreen> {
   @override
   void initState() {
     super.initState();
-    // Cap RAM image cache so long app sessions never lag or crash
     final imageCache = PaintingBinding.instance.imageCache;
     if (imageCache.maximumSize > 80) {
       imageCache.maximumSize = 80;
@@ -250,11 +249,15 @@ class _ChatScreenState extends State<ChatScreen> {
 
     FcmPushService.sendPushToUser(
       receiverId: widget.receiverId,
-      title: isVideo ? 'ইনকামিং ভিডিও কল' : 'ইনকামিং অডিও কল',
-      body: '$callerName আপনাকে কল দিচ্ছেন...',
+      title: isVideo ? 'Incoming Video Call' : 'Incoming Voice Call',
+      body: '$callerName is calling...',
       isCall: true,
       isVideo: isVideo,
+      chatId: _chatId,
       callId: callId,
+      callerId: _currentUser.uid,
+      callerName: callerName,
+      callerEmail: callerEmail,
     );
 
     if (!mounted) return;
@@ -674,10 +677,8 @@ class _ChatScreenState extends State<ChatScreen> {
                                 color: barColor, size: 20),
                             onPressed: () async {
                               Navigator.pop(ctx);
-                              if (doc is DocumentSnapshot>) {
-                                await ScheduledMessageService.sendScheduledDoc(
-                                    doc);
-                              }
+                              await ScheduledMessageService.sendScheduledDoc(
+                                  doc);
                             },
                           ),
                           IconButton(
@@ -1113,8 +1114,10 @@ class _ChatScreenState extends State<ChatScreen> {
           controller: editController,
           autofocus: true,
           keyboardType: TextInputType.multiline,
+          textInputAction: TextInputAction.newline,
           autocorrect: false,
-          enableSuggestions: true,
+          enableSuggestions: false,
+          enableIMEPersonalizedLearning: false,
           textCapitalization: TextCapitalization.none,
           smartDashesType: SmartDashesType.disabled,
           smartQuotesType: SmartQuotesType.disabled,
@@ -2049,9 +2052,11 @@ class _ChatScreenState extends State<ChatScreen> {
                                     focusNode: _messageFocusNode,
                                     onChanged: _onTextChanged,
                                     keyboardType: TextInputType.multiline,
+                                    textInputAction: TextInputAction.newline,
                                     textCapitalization: TextCapitalization.none,
                                     autocorrect: false,
-                                    enableSuggestions: true,
+                                    enableSuggestions: false,
+                                    enableIMEPersonalizedLearning: false,
                                     smartDashesType: SmartDashesType.disabled,
                                     smartQuotesType: SmartQuotesType.disabled,
                                     spellCheckConfiguration:
