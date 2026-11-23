@@ -919,6 +919,7 @@ class _CallScreenState extends State<CallScreen> with WidgetsBindingObserver {
 
   late final User _currentUser;
   late final ValueNotifier<bool> _screenShareNotifier;
+  late final ValueNotifier<List<ZegoUIKitUser>> _remoteScreenShareListNotifier;
   final ValueNotifier<int> _elapsedSecondsNotifier = ValueNotifier<int>(0);
 
   StreamSubscription<DocumentSnapshot>? _callDocSub;
@@ -943,15 +944,19 @@ class _CallScreenState extends State<CallScreen> with WidgetsBindingObserver {
   bool _isFrontCamera = true;
   bool _isRemoteCameraOn = false;
   bool _isRemoteScreenSharing = false;
+  bool _zegoRemoteScreenSharing = false;
 
   String? get _effectiveCallDocId =>
       widget.callDocId ?? widget.receiverIdForCleanup;
+
+  bool get _hasRemoteScreenShare =>
+      _isRemoteScreenSharing || _zegoRemoteScreenSharing;
 
   bool get _showVoiceAvatarOverlay =>
       !widget.isVideoCall &&
       !_isCameraOn &&
       !_isRemoteCameraOn &&
-      !_isRemoteScreenSharing;
+      !_hasRemoteScreenShare;
 
   bool _isEndedStatus(String status) {
     return status == 'ended' ||
@@ -1001,6 +1006,12 @@ class _CallScreenState extends State<CallScreen> with WidgetsBindingObserver {
 
     _screenShareNotifier = ZegoUIKit().getScreenSharingStateNotifier();
     _screenShareNotifier.addListener(_onScreenShareStateChanged);
+
+    _remoteScreenShareListNotifier =
+        ZegoUIKit().getScreenSharingListNotifier();
+    _remoteScreenShareListNotifier
+        .addListener(_onRemoteScreenShareListChanged);
+    _onRemoteScreenShareListChanged();
 
     WidgetsBinding.instance.addObserver(this);
     CallCleanupCoordinator.attachActiveCall(
@@ -1084,6 +1095,8 @@ class _CallScreenState extends State<CallScreen> with WidgetsBindingObserver {
     WidgetsBinding.instance.removeObserver(this);
     CallCleanupCoordinator.detachActiveCall(_handleAppKilledDuringCall);
     _screenShareNotifier.removeListener(_onScreenShareStateChanged);
+    _remoteScreenShareListNotifier
+        .removeListener(_onRemoteScreenShareListChanged);
     _callDocSub?.cancel();
     _sessionDocSub?.cancel();
     if (!_isMinimizing) {
@@ -1156,6 +1169,16 @@ class _CallScreenState extends State<CallScreen> with WidgetsBindingObserver {
     try {
       ZegoUIKit().useFrontFacingCamera(nextFront);
     } catch (_) {}
+  }
+
+  void _onRemoteScreenShareListChanged() {
+    final users = _remoteScreenShareListNotifier.value;
+    final remoteSharing = users.any((u) => u.id != _currentUser.uid);
+    if (remoteSharing != _zegoRemoteScreenSharing && mounted) {
+      setState(() {
+        _zegoRemoteScreenSharing = remoteSharing;
+      });
+    }
   }
 
   void _onScreenShareStateChanged() {
@@ -1853,7 +1876,7 @@ class _CallScreenState extends State<CallScreen> with WidgetsBindingObserver {
         ? ZegoUIKitPrebuiltCallConfig.oneOnOneVideoCall()
         : ZegoUIKitPrebuiltCallConfig.oneOnOneVoiceCall();
 
-    config.layout = _isRemoteScreenSharing
+    config.layout = _hasRemoteScreenShare
         ? ZegoLayout.gallery(
             showScreenSharingFullscreenModeToggleButtonRules:
                 ZegoShowFullscreenModeToggleButtonRules.alwaysShow,
