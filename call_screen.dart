@@ -259,7 +259,6 @@ class CallLogHelper {
     if (_finalizingOrLoggedKeys.contains(dedupeKey)) return;
     _finalizingOrLoggedKeys.add(dedupeKey);
 
-    // 1. Best-effort read from call_sessions and calls/{docId} — NEVER abort on error/permission denied
     Map<String, dynamic> remoteData = {};
     try {
       final sessionSnap = await FirebaseFirestore.instance
@@ -338,7 +337,6 @@ class CallLogHelper {
       return;
     }
 
-    // Infer missing callerId / receiverId from chatId if needed
     final chatParts = chatId.split('_');
     if (chatParts.length == 2) {
       if (callerId.isEmpty && receiverId.isNotEmpty) {
@@ -428,7 +426,6 @@ class CallLogHelper {
         },
     };
 
-    // 2. Atomically save inside chats/{chatId}/messages/call_$callId (never blocked by call_sessions rules)
     bool createdFresh = false;
     try {
       await FirebaseFirestore.instance.runTransaction((tx) async {
@@ -437,7 +434,6 @@ class CallLogHelper {
           final exData = existing.data() ?? <String, dynamic>{};
           final exStatus = (exData['callStatus'] ?? '').toString();
           final exDur = (exData['durationSec'] as num?)?.toInt() ?? 0;
-          // Upgrade from missed -> completed, or update longer duration if needed
           if ((exStatus == 'missed' && !isMissed) ||
               (!isMissed && durationSec > exDur)) {
             tx.set(msgRef, msgData, SetOptions(merge: true));
@@ -450,7 +446,6 @@ class CallLogHelper {
         createdFresh = true;
       });
     } catch (_) {
-      // Offline / slow-network fallback: direct write queued by Firestore SDK
       try {
         await msgRef.set(msgData, SetOptions(merge: true));
         await chatRef.set(missedChatUpdate, SetOptions(merge: true));
@@ -458,7 +453,6 @@ class CallLogHelper {
       } catch (_) {}
     }
 
-    // 3. Best-effort sync call_sessions metadata
     FirebaseFirestore.instance
         .collection('call_sessions')
         .doc(callId)
@@ -471,7 +465,6 @@ class CallLogHelper {
       'endedAt': FieldValue.serverTimestamp(),
     }, SetOptions(merge: true)).catchError((_) {});
 
-    // 4. Send Missed Call notification alert to receiver if caller cancelled/timed out
     if (isMissed && createdFresh && sendMissedPush) {
       FcmPushService.sendPushToUser(
         receiverId: receiverId,
@@ -1027,7 +1020,6 @@ class _CallScreenState extends State<CallScreen> with WidgetsBindingObserver {
       _markLocallyConnected(notifyUi: false);
       CallLogHelper.markConnected(widget.callID);
     } else {
-      // Auto-end & log Missed Call if receiver does not answer within 45 seconds
       _ringTimeoutTimer = Timer(const Duration(seconds: 45), () {
         if (mounted && !_isConnected && !_cleanedUp && !_remoteEnded) {
           _hangUpNow();
@@ -1548,9 +1540,8 @@ class _CallScreenState extends State<CallScreen> with WidgetsBindingObserver {
     );
   }
 
-  Widget _buildWhatsAppButton({
+  Widget _buildWhatsAppPillButton({
     required IconData icon,
-    required String label,
     required VoidCallback onTap,
     bool isActive = false,
     bool isDestructive = false,
@@ -1565,37 +1556,22 @@ class _CallScreenState extends State<CallScreen> with WidgetsBindingObserver {
       bgColor = Colors.white;
       iconColor = const Color(0xFF111B21);
     } else {
-      bgColor = const Color(0xFF2B353B);
+      bgColor = const Color(0xFF323A3F);
       iconColor = Colors.white;
     }
 
-    return Column(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        Material(
-          color: bgColor,
-          shape: const CircleBorder(),
-          child: InkWell(
-            onTap: onTap,
-            customBorder: const CircleBorder(),
-            child: SizedBox(
-              width: 58,
-              height: 58,
-              child: Icon(icon, color: iconColor, size: 26),
-            ),
-          ),
+    return Material(
+      color: bgColor,
+      shape: const CircleBorder(),
+      child: InkWell(
+        onTap: onTap,
+        customBorder: const CircleBorder(),
+        child: SizedBox(
+          width: 52,
+          height: 52,
+          child: Icon(icon, color: iconColor, size: 24),
         ),
-        const SizedBox(height: 8),
-        Text(
-          label,
-          style: const TextStyle(
-            color: Colors.white,
-            fontSize: 12.5,
-            fontWeight: FontWeight.w500,
-            decoration: TextDecoration.none,
-          ),
-        ),
-      ],
+      ),
     );
   }
 
@@ -1678,7 +1654,26 @@ class _CallScreenState extends State<CallScreen> with WidgetsBindingObserver {
                   ],
                 ),
               ),
-              const SizedBox(width: 44, height: 44),
+              if (_isCameraOn)
+                Material(
+                  color: const Color(0xFF222C32).withOpacity(0.88),
+                  shape: const CircleBorder(),
+                  child: InkWell(
+                    onTap: _flipCamera,
+                    customBorder: const CircleBorder(),
+                    child: const SizedBox(
+                      width: 44,
+                      height: 44,
+                      child: Icon(
+                        Icons.cameraswitch_rounded,
+                        color: Colors.white,
+                        size: 21,
+                      ),
+                    ),
+                  ),
+                )
+              else
+                const SizedBox(width: 44, height: 44),
             ],
           ),
         ),
@@ -1695,11 +1690,11 @@ class _CallScreenState extends State<CallScreen> with WidgetsBindingObserver {
           valueListenable: _screenShareNotifier,
           builder: (_, isSharing, __) {
             return Container(
-              margin: const EdgeInsets.fromLTRB(14, 0, 14, 16),
-              padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 20),
+              margin: const EdgeInsets.fromLTRB(16, 0, 16, 18),
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
               decoration: BoxDecoration(
-                color: const Color(0xFF1A2227).withOpacity(0.94),
-                borderRadius: BorderRadius.circular(28),
+                color: const Color(0xFF1C2327).withOpacity(0.92),
+                borderRadius: BorderRadius.circular(42),
                 boxShadow: const [
                   BoxShadow(
                     color: Colors.black45,
@@ -1708,75 +1703,41 @@ class _CallScreenState extends State<CallScreen> with WidgetsBindingObserver {
                   ),
                 ],
               ),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
                 children: [
-                  Row(
-                    children: [
-                      Expanded(
-                        child: _buildWhatsAppButton(
-                          icon: _isSpeakerOn
-                              ? Icons.volume_up_rounded
-                              : Icons.volume_down_rounded,
-                          label: 'Speaker',
-                          isActive: _isSpeakerOn,
-                          onTap: _toggleSpeaker,
-                        ),
-                      ),
-                      Expanded(
-                        child: _buildWhatsAppButton(
-                          icon: _isCameraOn
-                              ? Icons.videocam_rounded
-                              : Icons.videocam_off_rounded,
-                          label: 'Video',
-                          isActive: _isCameraOn,
-                          onTap: _toggleCamera,
-                        ),
-                      ),
-                      Expanded(
-                        child: _buildWhatsAppButton(
-                          icon: _isMuted
-                              ? Icons.mic_off_rounded
-                              : Icons.mic_rounded,
-                          label: 'Mute',
-                          isActive: _isMuted,
-                          onTap: _toggleMute,
-                        ),
-                      ),
-                    ],
+                  _buildWhatsAppPillButton(
+                    icon: _isSpeakerOn
+                        ? Icons.volume_up_rounded
+                        : Icons.volume_down_rounded,
+                    isActive: _isSpeakerOn,
+                    onTap: _toggleSpeaker,
                   ),
-                  const SizedBox(height: 20),
-                  Row(
-                    children: [
-                      Expanded(
-                        child: _isCameraOn
-                            ? _buildWhatsAppButton(
-                                icon: Icons.cameraswitch_rounded,
-                                label: 'Flip',
-                                isActive: false,
-                                onTap: _flipCamera,
-                              )
-                            : const SizedBox(height: 82),
-                      ),
-                      Expanded(
-                        child: _buildWhatsAppButton(
-                          icon: isSharing
-                              ? Icons.stop_screen_share_rounded
-                              : Icons.present_to_all_rounded,
-                          label: 'Share',
-                          isActive: isSharing,
-                          onTap: _toggleScreenSharing,
-                        ),
-                      ),
-                      Expanded(
-                        child: _buildWhatsAppButton(
-                          icon: Icons.call_end_rounded,
-                          label: 'End',
-                          isDestructive: true,
-                          onTap: _hangUpNow,
-                        ),
-                      ),
-                    ],
+                  _buildWhatsAppPillButton(
+                    icon: _isCameraOn
+                        ? Icons.videocam_rounded
+                        : Icons.videocam_off_rounded,
+                    isActive: _isCameraOn,
+                    onTap: _toggleCamera,
+                  ),
+                  _buildWhatsAppPillButton(
+                    icon: _isMuted
+                        ? Icons.mic_off_rounded
+                        : Icons.mic_rounded,
+                    isActive: _isMuted,
+                    onTap: _toggleMute,
+                  ),
+                  _buildWhatsAppPillButton(
+                    icon: isSharing
+                        ? Icons.stop_screen_share_rounded
+                        : Icons.screen_share_rounded,
+                    isActive: isSharing,
+                    onTap: _toggleScreenSharing,
+                  ),
+                  _buildWhatsAppPillButton(
+                    icon: Icons.call_end_rounded,
+                    isDestructive: true,
+                    onTap: _hangUpNow,
                   ),
                 ],
               ),
@@ -1892,11 +1853,18 @@ class _CallScreenState extends State<CallScreen> with WidgetsBindingObserver {
         ? ZegoUIKitPrebuiltCallConfig.oneOnOneVideoCall()
         : ZegoUIKitPrebuiltCallConfig.oneOnOneVoiceCall();
 
-    config.layout = ZegoLayout.gallery(
-      showScreenSharingFullscreenModeToggleButtonRules:
-          ZegoShowFullscreenModeToggleButtonRules.alwaysShow,
-      showNewScreenSharingViewInFullscreenMode: true,
-    );
+    config.layout = _isRemoteScreenSharing
+        ? ZegoLayout.gallery(
+            showScreenSharingFullscreenModeToggleButtonRules:
+                ZegoShowFullscreenModeToggleButtonRules.alwaysShow,
+            showNewScreenSharingViewInFullscreenMode: true,
+          )
+        : ZegoLayout.pictureInPicture(
+            isSmallViewDraggable: true,
+            switchLargeOrSmallViewByClick: true,
+          );
+    config.audioVideoView.useVideoViewAspectFill = true;
+    config.duration.isVisible = false;
     config.turnOnCameraWhenJoining = widget.isVideoCall;
     config.turnOnMicrophoneWhenJoining = true;
     config.useSpeakerWhenJoining = widget.isVideoCall;
@@ -1968,7 +1936,7 @@ class _CallScreenState extends State<CallScreen> with WidgetsBindingObserver {
                       const CustomPaint(painter: _WhatsAppDoodlePainter()),
                       Center(
                         child: Padding(
-                          padding: const EdgeInsets.only(bottom: 130),
+                          padding: const EdgeInsets.only(bottom: 110),
                           child: _buildCenterAvatar(),
                         ),
                       ),
@@ -1983,7 +1951,7 @@ class _CallScreenState extends State<CallScreen> with WidgetsBindingObserver {
               child: _buildWhatsAppTopBar(),
             ),
 
-            // 4. Always-visible WhatsApp Bottom Control Card
+            // 4. Always-visible 5-button WhatsApp Pill Bar
             Align(
               alignment: Alignment.bottomCenter,
               child: _buildWhatsAppControlCard(),
