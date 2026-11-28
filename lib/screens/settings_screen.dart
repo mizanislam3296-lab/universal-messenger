@@ -45,6 +45,16 @@ Future<void> universalFcmBackgroundHandler(RemoteMessage message) async {
       enableLights: true,
       showBadge: true,
     ));
+    await androidPlugin.createNotificationChannel(
+      const AndroidNotificationChannel(
+        'ongoing_call_ch_v1',
+        'Ongoing Calls',
+        importance: Importance.low,
+        playSound: false,
+        enableVibration: false,
+        showBadge: false,
+      ),
+    );
     await androidPlugin.createNotificationChannel(AndroidNotificationChannel(
       'msg_ch_master_v1',
       'Chat Messages',
@@ -63,8 +73,8 @@ Future<void> universalFcmBackgroundHandler(RemoteMessage message) async {
     final callId = (data['callId'] ?? '').toString();
     final callerName = (data['callerName'] ?? data['title'] ?? 'Incoming Call').toString();
     final isVideo = data['isVideo'] == 'true' || data['isVideo'] == true;
-    final title = (data['title'] ?? (isVideo ? 'Incoming Video Call' : 'Incoming Voice Call')).toString();
-    final body = (data['body'] ?? '$callerName is calling...').toString();
+    final title = callerName;
+    final body = isVideo ? 'Incoming video call...' : 'Incoming voice call...';
 
     final payload = <String, dynamic>{
       'type': 'call',
@@ -96,7 +106,7 @@ Future<void> universalFcmBackgroundHandler(RemoteMessage message) async {
           category: AndroidNotificationCategory.call,
           fullScreenIntent: true,
           ongoing: true,
-          autoCancel: false,
+          autoCancel: true,
           onlyAlertOnce: false,
           playSound: true,
           sound: const UriAndroidNotificationSound('content://settings/system/ringtone'),
@@ -109,14 +119,14 @@ Future<void> universalFcmBackgroundHandler(RemoteMessage message) async {
             AndroidNotificationAction(
               'decline',
               'Decline',
-              titleColor: Color(0xFFFF5252),
+              titleColor: Color(0xFFE51C44),
               showsUserInterface: true,
               cancelNotification: true,
             ),
             AndroidNotificationAction(
               'accept',
-              'Accept',
-              titleColor: Color(0xFF4CAF50),
+              'Answer',
+              titleColor: Color(0xFF25D366),
               showsUserInterface: true,
               cancelNotification: true,
             ),
@@ -547,6 +557,7 @@ class NotificationAndPresenceService {
   static const MethodChannel _nativeChannel = MethodChannel('com.universal.messenger/icon');
   static final FlutterLocalNotificationsPlugin _notifications = FlutterLocalNotificationsPlugin();
   static const int incomingCallNotificationId = 99001;
+  static const int ongoingCallNotificationId = 99002;
   static const String incomingCallNotificationTag = 'universal_incoming_call';
 
   static bool _initialized = false;
@@ -583,6 +594,7 @@ class NotificationAndPresenceService {
     try {
       await _notifications.cancel(incomingCallNotificationId, tag: incomingCallNotificationTag);
       await _notifications.cancel(incomingCallNotificationId);
+      await _notifications.cancel(ongoingCallNotificationId);
     } catch (_) {}
     try {
       await _nativeChannel.invokeMethod('clearCallNotifications');
@@ -595,6 +607,7 @@ class NotificationAndPresenceService {
     bool isScreenSharing = false,
   }) async {
     isInActiveCall = true;
+    await stopNativeCallRingtone();
     await clearCallNotifications();
     if (!AppSettingsController.notificationsEnabled.value) return;
     try {
@@ -602,17 +615,17 @@ class NotificationAndPresenceService {
           ? 'Screen sharing active'
           : (isVideo ? 'Video call in progress' : 'Voice call in progress');
       final body = '$otherName • Tap to return to call';
+      // Uses silent ongoing_call_ch_v1 channel so ringtone NEVER plays during call
       await _notifications.show(
-        incomingCallNotificationId,
+        ongoingCallNotificationId,
         title,
         body,
-        NotificationDetails(
+        const NotificationDetails(
           android: AndroidNotificationDetails(
-            'call_ch_master_v1',
-            'Incoming Calls',
-            tag: incomingCallNotificationTag,
-            importance: Importance.high,
-            priority: Priority.high,
+            'ongoing_call_ch_v1',
+            'Ongoing Calls',
+            importance: Importance.low,
+            priority: Priority.low,
             category: AndroidNotificationCategory.call,
             ongoing: true,
             autoCancel: false,
@@ -638,10 +651,12 @@ class NotificationAndPresenceService {
       }
       if (type != 'call') return;
 
+      // Immediately stop ringtone and dismiss incoming call banner on ANY tap/action
+      stopNativeCallRingtone();
+      clearCallNotifications();
+
       final actionId = (response.actionId ?? '').toString();
       if (actionId == 'decline') {
-        stopNativeCallRingtone();
-        clearCallNotifications();
         if (onIncomingCallDeclinedFromNotification != null) {
           onIncomingCallDeclinedFromNotification!(map);
         } else {
@@ -692,6 +707,14 @@ class NotificationAndPresenceService {
         enableVibration: true,
         showBadge: true,
       ),
+      AndroidNotificationChannel(
+        'ongoing_call_ch_v1',
+        'Ongoing Calls',
+        importance: Importance.low,
+        playSound: false,
+        enableVibration: false,
+        showBadge: false,
+      ),
     ];
     for (final ch in channels) {
       await android.createNotificationChannel(ch);
@@ -725,6 +748,7 @@ class NotificationAndPresenceService {
   }
 
   static Future<void> playNativeCallRingtone() async {
+    if (isInActiveCall) return;
     try {
       await _nativeChannel.invokeMethod('playRingtone', {'path': null});
     } catch (_) {}
@@ -846,6 +870,10 @@ class NotificationAndPresenceService {
     _lastNotifiedCallId = null;
     if (!isInActiveCall) {
       clearCallNotifications();
+    } else {
+      // Only cancel the incoming ringing notification, keep ongoing call banner
+      _notifications.cancel(incomingCallNotificationId, tag: incomingCallNotificationTag).catchError((_) {});
+      _notifications.cancel(incomingCallNotificationId).catchError((_) {});
     }
   }
 
@@ -886,6 +914,8 @@ class NotificationAndPresenceService {
         _stopCallRing();
         return;
       }
+      if (isInActiveCall) return;
+
       final callId = (data['callId'] ?? '').toString();
       if (callId.isEmpty || callId == _lastNotifiedCallId) return;
 
@@ -905,52 +935,57 @@ class NotificationAndPresenceService {
       await clearCallNotifications();
 
       if (AppSettingsController.notificationsEnabled.value) {
-        await playNativeCallRingtone();
         HapticFeedback.heavyImpact();
 
-        await _notifications.show(
-          incomingCallNotificationId,
-          isVideo ? 'Incoming Video Call' : 'Incoming Voice Call',
-          '$callerName is calling...',
-          NotificationDetails(
-            android: AndroidNotificationDetails(
-              'call_ch_master_v1',
-              'Incoming Calls',
-              tag: incomingCallNotificationTag,
-              importance: Importance.max,
-              priority: Priority.max,
-              category: AndroidNotificationCategory.call,
-              fullScreenIntent: true,
-              ongoing: true,
-              autoCancel: false,
-              onlyAlertOnce: true,
-              playSound: true,
-              sound: const UriAndroidNotificationSound('content://settings/system/ringtone'),
-              audioAttributesUsage: AudioAttributesUsage.notificationRingtone,
-              enableVibration: true,
-              vibrationPattern: Int64List.fromList([0, 800, 400, 800]),
-              additionalFlags: Int32List.fromList([4]),
-              visibility: NotificationVisibility.public,
-              actions: const [
-                AndroidNotificationAction(
-                  'decline',
-                  'Decline',
-                  titleColor: Color(0xFFFF5252),
-                  showsUserInterface: true,
-                  cancelNotification: true,
-                ),
-                AndroidNotificationAction(
-                  'accept',
-                  'Accept',
-                  titleColor: Color(0xFF4CAF50),
-                  showsUserInterface: true,
-                  cancelNotification: true,
-                ),
-              ],
+        if (isAppInForeground) {
+          // App is open: play native ringtone only (prevents double ringtone)
+          await playNativeCallRingtone();
+        } else {
+          // App is in background: show Messenger-style heads-up banner with Decline / Answer
+          await _notifications.show(
+            incomingCallNotificationId,
+            callerName,
+            isVideo ? 'Incoming video call...' : 'Incoming voice call...',
+            NotificationDetails(
+              android: AndroidNotificationDetails(
+                'call_ch_master_v1',
+                'Incoming Calls',
+                tag: incomingCallNotificationTag,
+                importance: Importance.max,
+                priority: Priority.max,
+                category: AndroidNotificationCategory.call,
+                fullScreenIntent: true,
+                ongoing: true,
+                autoCancel: true,
+                onlyAlertOnce: true,
+                playSound: true,
+                sound: const UriAndroidNotificationSound('content://settings/system/ringtone'),
+                audioAttributesUsage: AudioAttributesUsage.notificationRingtone,
+                enableVibration: true,
+                vibrationPattern: Int64List.fromList([0, 800, 400, 800]),
+                additionalFlags: Int32List.fromList([4]),
+                visibility: NotificationVisibility.public,
+                actions: const [
+                  AndroidNotificationAction(
+                    'decline',
+                    'Decline',
+                    titleColor: Color(0xFFE51C44),
+                    showsUserInterface: true,
+                    cancelNotification: true,
+                  ),
+                  AndroidNotificationAction(
+                    'accept',
+                    'Answer',
+                    titleColor: Color(0xFF25D366),
+                    showsUserInterface: true,
+                    cancelNotification: true,
+                  ),
+                ],
+              ),
             ),
-          ),
-          payload: jsonEncode(callPayload),
-        );
+            payload: jsonEncode(callPayload),
+          );
+        }
       }
 
       if (onIncomingCallTrigger != null) {
@@ -991,8 +1026,6 @@ class NotificationAndPresenceService {
         if (isAppInForeground && activeChatId == doc.id) continue;
         if ((data['lastSenderId'] ?? '') == uid) continue;
 
-        // Avoid duplicate notifications & double sounds when app is backgrounded/locked
-        // because FCM system tray already displays the notification.
         if (!isAppInForeground && FcmPushService.isConfigured) continue;
 
         final unread = ((data['unreadCount'] as Map<String, dynamic>?)?[uid] as num?)?.toInt() ?? 0;
@@ -1007,7 +1040,6 @@ class NotificationAndPresenceService {
         await playNativeMessageSound();
         HapticFeedback.mediumImpact();
 
-        // Use id: 0 and tag: doc.id to match FCM notification slot and guarantee zero duplicates
         await _notifications.show(
           0,
           senderName,
