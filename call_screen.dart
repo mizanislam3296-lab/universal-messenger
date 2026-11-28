@@ -928,6 +928,7 @@ class _CallScreenState extends State<CallScreen> with WidgetsBindingObserver {
 
   StreamSubscription<DocumentSnapshot>? _callDocSub;
   StreamSubscription<DocumentSnapshot>? _sessionDocSub;
+  StreamSubscription<List<ZegoUIKitUser>>? _remoteScreenShareSub;
   Stream<DocumentSnapshot>? _otherUserStream;
   Timer? _durationTimer;
   Timer? _ringTimeoutTimer;
@@ -951,11 +952,13 @@ class _CallScreenState extends State<CallScreen> with WidgetsBindingObserver {
   bool _isFrontCamera = true;
   bool _isRemoteCameraOn = false;
   bool _isRemoteScreenSharing = false;
+  ZegoUIKitUser? _remoteScreenShareUser;
 
   String? get _effectiveCallDocId =>
       widget.callDocId ?? widget.receiverIdForCleanup;
 
-  bool get _hasRemoteScreenShare => _isRemoteScreenSharing;
+  bool get _hasRemoteScreenShare =>
+      _remoteScreenShareUser != null || _isRemoteScreenSharing;
 
   bool get _showVoiceAvatarOverlay =>
       !widget.isVideoCall &&
@@ -1009,25 +1012,12 @@ class _CallScreenState extends State<CallScreen> with WidgetsBindingObserver {
     };
   }
 
-  ZegoLayout _buildLayoutForCurrentMode() {
-    if (_hasRemoteScreenShare) {
-      return ZegoLayout.gallery(
-        showScreenSharingFullscreenModeToggleButtonRules:
-            ZegoShowFullscreenModeToggleButtonRules.alwaysShow,
-        showNewScreenSharingViewInFullscreenMode: true,
-      );
-    }
-    return ZegoLayout.pictureInPicture(
-      isSmallViewDraggable: true,
-      switchLargeOrSmallViewByClick: true,
-    );
-  }
-
   Widget _buildPersistentForegroundOverlay() {
     return ValueListenableBuilder<int>(
       valueListenable: _uiTick,
       builder: (context, _, __) {
         final showControls = _controlsShown;
+        final remoteSharer = _remoteScreenShareUser;
 
         return Stack(
           fit: StackFit.expand,
@@ -1052,7 +1042,19 @@ class _CallScreenState extends State<CallScreen> with WidgetsBindingObserver {
                 ),
               ),
 
-            // 2. Full-screen tap listener to smoothly hide/show controls
+            // 2. Direct Fullscreen Remote Screen Sharing View (100% reliable in 1-on-1 calls)
+            if (remoteSharer != null)
+              Positioned.fill(
+                child: Container(
+                  color: Colors.black,
+                  child: ZegoScreenSharingView(
+                    key: ValueKey('remote_screen_${remoteSharer.id}'),
+                    user: remoteSharer,
+                  ),
+                ),
+              ),
+
+            // 3. Full-screen tap listener to smoothly hide/show controls
             if (!_showVoiceAvatarOverlay)
               Positioned.fill(
                 child: GestureDetector(
@@ -1062,7 +1064,7 @@ class _CallScreenState extends State<CallScreen> with WidgetsBindingObserver {
                 ),
               ),
 
-            // 3. Smoothly animated WhatsApp Top Bar
+            // 4. Smoothly animated WhatsApp Top Bar
             Align(
               alignment: Alignment.topCenter,
               child: AnimatedSlide(
@@ -1080,7 +1082,7 @@ class _CallScreenState extends State<CallScreen> with WidgetsBindingObserver {
               ),
             ),
 
-            // 4. Smoothly animated 5-button WhatsApp Pill Bar
+            // 5. Smoothly animated 5-button WhatsApp Pill Bar
             Align(
               alignment: Alignment.bottomCenter,
               child: AnimatedSlide(
@@ -1098,7 +1100,7 @@ class _CallScreenState extends State<CallScreen> with WidgetsBindingObserver {
               ),
             ),
 
-            // 5. Local Screen Sharing Overlay
+            // 6. Local Screen Sharing Overlay
             ValueListenableBuilder<bool>(
               valueListenable: _screenShareNotifier,
               builder: (_, isSharing, __) {
@@ -1134,12 +1136,35 @@ class _CallScreenState extends State<CallScreen> with WidgetsBindingObserver {
     _screenShareNotifier = ZegoUIKit().getScreenSharingStateNotifier();
     _screenShareNotifier.addListener(_onScreenShareStateChanged);
 
+    // Listen directly to Zego's screen sharing stream to render remote shared screen reliably
+    _remoteScreenShareSub =
+        ZegoUIKit().getScreenSharingListStream().listen((users) {
+      ZegoUIKitUser? remote;
+      for (final u in users) {
+        if (u.id != _currentUser.uid) {
+          remote = u;
+          break;
+        }
+      }
+      if (remote?.id != _remoteScreenShareUser?.id) {
+        _remoteScreenShareUser = remote;
+        _isRemoteScreenSharing = remote != null;
+        if (remote == null && _showVoiceAvatarOverlay) {
+          _areControlsVisible = true;
+        }
+        _refreshOverlayUi();
+      }
+    });
+
     // Build Zego config ONCE so video/audio never resets on UI button taps
     _callConfig = widget.isVideoCall
         ? ZegoUIKitPrebuiltCallConfig.oneOnOneVideoCall()
         : ZegoUIKitPrebuiltCallConfig.oneOnOneVoiceCall();
 
-    _callConfig.layout = _buildLayoutForCurrentMode();
+    _callConfig.layout = ZegoLayout.pictureInPicture(
+      isSmallViewDraggable: true,
+      switchLargeOrSmallViewByClick: true,
+    );
     _callConfig.audioVideoView.useVideoViewAspectFill = true;
     _callConfig.duration.isVisible = false;
     _callConfig.turnOnCameraWhenJoining = widget.isVideoCall;
@@ -1266,6 +1291,7 @@ class _CallScreenState extends State<CallScreen> with WidgetsBindingObserver {
     WidgetsBinding.instance.removeObserver(this);
     CallCleanupCoordinator.detachActiveCall(_handleAppKilledDuringCall);
     _screenShareNotifier.removeListener(_onScreenShareStateChanged);
+    _remoteScreenShareSub?.cancel();
     _callDocSub?.cancel();
     _sessionDocSub?.cancel();
     if (!_isMinimizing) {
@@ -1474,23 +1500,14 @@ class _CallScreenState extends State<CallScreen> with WidgetsBindingObserver {
         });
       }
 
-      final remoteShareChanged = remoteShare != _isRemoteScreenSharing;
-      final remoteCamChanged = remoteCam != _isRemoteCameraOn;
-
-      if (remoteCamChanged || remoteShareChanged) {
+      if (remoteCam != _isRemoteCameraOn ||
+          remoteShare != _isRemoteScreenSharing) {
         _isRemoteCameraOn = remoteCam;
         _isRemoteScreenSharing = remoteShare;
         if (_showVoiceAvatarOverlay) {
           _areControlsVisible = true;
         }
         _refreshOverlayUi();
-
-        if (remoteShareChanged && mounted) {
-          _callConfig.layout = _buildLayoutForCurrentMode();
-          _callConfig.audioVideoView.useVideoViewAspectFill =
-              !_hasRemoteScreenShare;
-          setState(() {});
-        }
       }
 
       if (_isEndedStatus(status)) {
