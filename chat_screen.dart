@@ -191,7 +191,8 @@ class _ChatScreenState extends State<ChatScreen> {
   static const String _cloudName = 'tcdkckrl';
   static const String _uploadPreset = 'ml_default';
   static const int _pageSize = 40;
-  static const int _chunkSizeBytes = 6 * 1024 * 1024; // 6 MB chunks for stability
+  static const int _chunkSizeBytes = 6 * 1024 * 1024; // 6 MB chunks
+  static const int _maxFileSizeBytes = 100 * 1024 * 1024; // 100 MB max per file
   static const MethodChannel _nativeChannel =
       MethodChannel('com.universal.messenger/icon');
   static final Dio _sharedDio = Dio(
@@ -232,6 +233,8 @@ class _ChatScreenState extends State<ChatScreen> {
   double _uploadProgress = 0.0;
   String _uploadingFileName = '';
   String _uploadingFileSize = '';
+  int _uploadingCurrentIndex = 0;
+  int _uploadingTotalCount = 0;
   CancelToken? _uploadCancelToken;
 
   bool _isTyping = false;
@@ -1092,7 +1095,6 @@ class _ChatScreenState extends State<ChatScreen> {
       throw Exception('খালি ফাইল আপলোড করা যাবে না।');
     }
 
-    // ছবি, ভিডিও ও অডিও বাদে বাকি সব ফরম্যাট (PDF, ZIP, APK, DOCX ইত্যাদি) 'raw' এন্ডপয়েন্টে যাবে
     final resourceType =
         (fileType == 'image' || fileType == 'video' || fileType == 'audio')
             ? 'auto'
@@ -1100,7 +1102,6 @@ class _ChatScreenState extends State<ChatScreen> {
     final uploadUrl =
         'https://api.cloudinary.com/v1_1/$_cloudName/$resourceType/upload';
 
-    // ৬ MB বা তার ছোট ফাইল একবারে আপলোড (অটো-রিট্রাই সহ)
     if (totalBytes <= _chunkSizeBytes) {
       return _uploadWithRetry(
         cancelToken: cancelToken,
@@ -1129,7 +1130,6 @@ class _ChatScreenState extends State<ChatScreen> {
       );
     }
 
-    // ৬ MB-এর বড় ফাইল হলে ৬ MB করে চাঙ্কড আপলোড (errno 103 প্রতিরোধ ও দ্রুত আপলোড)
     final uniqueUploadId =
         'um_${DateTime.now().millisecondsSinceEpoch}_${math.Random().nextInt(999999)}';
     final raf = await file.open(mode: FileMode.read);
@@ -1206,66 +1206,114 @@ class _ChatScreenState extends State<ChatScreen> {
   Future<void> _pickAndSendFile() async {
     if (_isUploading) return;
     try {
-      final res = await FilePicker.platform.pickFiles(type: FileType.any);
-      final files = res?.files ?? <PlatformFile>[];
-      if (files.isEmpty || files.first.path == null) return;
+      final res = await FilePicker.platform.pickFiles(
+        type: FileType.any,
+        allowMultiple: true,
+      );
+      final pickedList = (res?.files ?? <PlatformFile>[])
+          .where((f) => f.path != null && f.path!.isNotEmpty)
+          .toList();
+      if (pickedList.isEmpty) return;
 
-      final pickedFile = files.first;
-      final file = File(pickedFile.path!);
-      final fileName = pickedFile.name;
-      final fileSize = _formatFileSize(await file.length());
-      final fileType = _detectFileType(fileName);
-      final replyPayload = _replyingTo;
+      final validFiles = <PlatformFile>[];
+      final oversizedNames = <String>[];
+
+      for (final pf in pickedList) {
+        final f = File(pf.path!);
+        final len = await f.length();
+        if (len > _maxFileSizeBytes) {
+          oversizedNames.add(pf.name);
+        } else if (len > 0) {
+          validFiles.add(pf);
+        }
+      }
+
+      if (oversizedNames.isNotEmpty && mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              '১০০ MB-এর বড় ফাইল পাঠানো যাবে না (${oversizedNames.length}টি বাদ দেওয়া হয়েছে)',
+            ),
+            backgroundColor: Colors.orange.shade800,
+            duration: const Duration(seconds: 3),
+          ),
+        );
+      }
+
+      if (validFiles.isEmpty) return;
+
+      Map<String, dynamic>? replyPayload = _replyingTo;
       final cancelToken = CancelToken();
 
       setState(() {
         _isUploading = true;
         _uploadProgress = 0.0;
-        _uploadingFileName = fileName;
-        _uploadingFileSize = fileSize;
+        _uploadingCurrentIndex = 0;
+        _uploadingTotalCount = validFiles.length;
         _uploadCancelToken = cancelToken;
         _replyingTo = null;
       });
 
-      final downloadUrl = await _uploadFileToCloudinary(
-        file: file,
-        fileName: fileName,
-        fileType: fileType,
-        cancelToken: cancelToken,
-      );
+      for (int i = 0; i < validFiles.length; i++) {
+        if (cancelToken.isCancelled) throw _UploadCancelledException();
 
-      if (cancelToken.isCancelled) throw _UploadCancelledException();
+        final pickedFile = validFiles[i];
+        final file = File(pickedFile.path!);
+        final fileName = pickedFile.name;
+        final fileSize = _formatFileSize(await file.length());
+        final fileType = _detectFileType(fileName);
 
-      await FirebaseFirestore.instance
-          .collection('chats')
-          .doc(_chatId)
-          .collection('messages')
-          .add({
-        'senderId': _currentUser.uid,
-        'receiverId': widget.receiverId,
-        'text': fileName,
-        'type': fileType,
-        'fileUrl': downloadUrl,
-        'fileName': fileName,
-        'fileSize': fileSize,
-        'isSeen': false,
-        'isEdited': false,
-        if (replyPayload != null) 'replyTo': replyPayload,
-        'timestamp': FieldValue.serverTimestamp(),
-      });
-      await _updateChatSummary(
-        fileType == 'audio' ? '🎵 $fileName' : '📎 $fileName',
-        messageType: fileType,
-      );
+        if (mounted) {
+          setState(() {
+            _uploadingCurrentIndex = i + 1;
+            _uploadProgress = 0.0;
+            _uploadingFileName = fileName;
+            _uploadingFileSize = fileSize;
+          });
+        }
 
-      FcmPushService.sendPushToUser(
-        receiverId: widget.receiverId,
-        title: _currentUser.displayName ?? _currentUser.email ?? 'নতুন মেসেজ',
-        body: fileType == 'image'
-            ? '📷 একটি ছবি পাঠিয়েছেন'
-            : (fileType == 'audio' ? '🎵 $fileName' : '📎 $fileName'),
-        chatId: _chatId,
-      );
+        final downloadUrl = await _uploadFileToCloudinary(
+          file: file,
+          fileName: fileName,
+          fileType: fileType,
+          cancelToken: cancelToken,
+        );
+
+        if (cancelToken.isCancelled) throw _UploadCancelledException();
+
+        await FirebaseFirestore.instance
+            .collection('chats')
+            .doc(_chatId)
+            .collection('messages')
+            .add({
+          'senderId': _currentUser.uid,
+          'receiverId': widget.receiverId,
+          'text': fileName,
+          'type': fileType,
+          'fileUrl': downloadUrl,
+          'fileName': fileName,
+          'fileSize': fileSize,
+          'isSeen': false,
+          'isEdited': false,
+          if (replyPayload != null) 'replyTo': replyPayload,
+          'timestamp': FieldValue.serverTimestamp(),
+        });
+        replyPayload = null;
+
+        await _updateChatSummary(
+          fileType == 'audio' ? '🎵 $fileName' : '📎 $fileName',
+          messageType: fileType,
+        );
+
+        FcmPushService.sendPushToUser(
+          receiverId: widget.receiverId,
+          title: _currentUser.displayName ?? _currentUser.email ?? 'নতুন মেসেজ',
+          body: fileType == 'image'
+              ? '📷 একটি ছবি পাঠিয়েছেন'
+              : (fileType == 'audio' ? '🎵 $fileName' : '📎 $fileName'),
+          chatId: _chatId,
+        );
+      }
     } on _UploadCancelledException {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
@@ -1299,6 +1347,8 @@ class _ChatScreenState extends State<ChatScreen> {
           _uploadProgress = 0.0;
           _uploadingFileName = '';
           _uploadingFileSize = '';
+          _uploadingCurrentIndex = 0;
+          _uploadingTotalCount = 0;
           _uploadCancelToken = null;
         });
       }
@@ -1997,7 +2047,7 @@ class _ChatScreenState extends State<ChatScreen> {
                               children: [
                                 Expanded(
                                   child: Text(
-                                    'আপলোড হচ্ছে: $_uploadingFileName${_uploadingFileSize.isNotEmpty ? ' ($_uploadingFileSize)' : ''}',
+                                    'আপলোড হচ্ছে${_uploadingTotalCount > 1 ? ' ($_uploadingCurrentIndex/$_uploadingTotalCount)' : ''}: $_uploadingFileName${_uploadingFileSize.isNotEmpty ? ' ($_uploadingFileSize)' : ''}',
                                     maxLines: 1,
                                     overflow: TextOverflow.ellipsis,
                                     style: TextStyle(
