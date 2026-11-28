@@ -918,8 +918,13 @@ class _CallScreenState extends State<CallScreen> with WidgetsBindingObserver {
       MethodChannel('com.universal.messenger/icon');
 
   late final User _currentUser;
+  late final String _userName;
   late final ValueNotifier<bool> _screenShareNotifier;
   final ValueNotifier<int> _elapsedSecondsNotifier = ValueNotifier<int>(0);
+  final ValueNotifier<int> _uiTick = ValueNotifier<int>(0);
+
+  late final ZegoUIKitPrebuiltCallConfig _callConfig;
+  late final ZegoUIKitPrebuiltCallEvents _callEvents;
 
   StreamSubscription<DocumentSnapshot>? _callDocSub;
   StreamSubscription<DocumentSnapshot>? _sessionDocSub;
@@ -955,6 +960,12 @@ class _CallScreenState extends State<CallScreen> with WidgetsBindingObserver {
       !_isRemoteCameraOn &&
       !_hasRemoteScreenShare;
 
+  void _refreshOverlayUi() {
+    if (mounted) {
+      _uiTick.value++;
+    }
+  }
+
   bool _isEndedStatus(String status) {
     return status == 'ended' ||
         status == 'declined' ||
@@ -987,10 +998,82 @@ class _CallScreenState extends State<CallScreen> with WidgetsBindingObserver {
     };
   }
 
+  ZegoLayout _buildLayoutForCurrentMode() {
+    if (_hasRemoteScreenShare) {
+      return ZegoLayout.gallery(
+        showScreenSharingFullscreenModeToggleButtonRules:
+            ZegoShowFullscreenModeToggleButtonRules.alwaysShow,
+        showNewScreenSharingViewInFullscreenMode: true,
+      );
+    }
+    return ZegoLayout.pictureInPicture(
+      isSmallViewDraggable: true,
+      switchLargeOrSmallViewByClick: true,
+    );
+  }
+
+  Widget _buildPersistentForegroundOverlay() {
+    return ValueListenableBuilder<int>(
+      valueListenable: _uiTick,
+      builder: (context, _, __) {
+        return Stack(
+          fit: StackFit.expand,
+          children: [
+            // 1. WhatsApp voice-call background & avatar
+            if (_showVoiceAvatarOverlay)
+              IgnorePointer(
+                child: Container(
+                  color: const Color(0xFF0B141A),
+                  child: Stack(
+                    fit: StackFit.expand,
+                    children: [
+                      const CustomPaint(painter: _WhatsAppDoodlePainter()),
+                      Center(
+                        child: Padding(
+                          padding: const EdgeInsets.only(bottom: 110),
+                          child: _buildCenterAvatar(),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+
+            // 2. Always-visible WhatsApp Top Bar
+            Align(
+              alignment: Alignment.topCenter,
+              child: _buildWhatsAppTopBar(),
+            ),
+
+            // 3. Always-visible 5-button WhatsApp Pill Bar
+            Align(
+              alignment: Alignment.bottomCenter,
+              child: _buildWhatsAppControlCard(),
+            ),
+
+            // 4. Local Screen Sharing Overlay
+            ValueListenableBuilder<bool>(
+              valueListenable: _screenShareNotifier,
+              builder: (_, isSharing, __) {
+                if (!isSharing) return const SizedBox.shrink();
+                return SizedBox.expand(
+                  child: _buildMessengerScreenSharingOverlay(),
+                );
+              },
+            ),
+          ],
+        );
+      },
+    );
+  }
+
   @override
   void initState() {
     super.initState();
     _currentUser = FirebaseAuth.instance.currentUser!;
+    _userName = _currentUser.displayName ??
+        _currentUser.email?.split('@').first ??
+        'User';
     _isSpeakerOn = widget.isVideoCall;
     _isCameraOn = widget.isVideoCall;
 
@@ -1003,6 +1086,55 @@ class _CallScreenState extends State<CallScreen> with WidgetsBindingObserver {
 
     _screenShareNotifier = ZegoUIKit().getScreenSharingStateNotifier();
     _screenShareNotifier.addListener(_onScreenShareStateChanged);
+
+    // Build Zego config ONCE so video/audio never resets on UI button taps
+    _callConfig = widget.isVideoCall
+        ? ZegoUIKitPrebuiltCallConfig.oneOnOneVideoCall()
+        : ZegoUIKitPrebuiltCallConfig.oneOnOneVoiceCall();
+
+    _callConfig.layout = _buildLayoutForCurrentMode();
+    _callConfig.audioVideoView.useVideoViewAspectFill = true;
+    _callConfig.duration.isVisible = false;
+    _callConfig.turnOnCameraWhenJoining = widget.isVideoCall;
+    _callConfig.turnOnMicrophoneWhenJoining = true;
+    _callConfig.useSpeakerWhenJoining = widget.isVideoCall;
+    _callConfig.topMenuBar.isVisible = false;
+    _callConfig.bottomMenuBar.isVisible = false;
+    _callConfig.pip.enableWhenBackground = false;
+    // Attach custom UI inside Zego foreground so controls NEVER disappear after minimize/restore
+    _callConfig.foreground = _buildPersistentForegroundOverlay();
+
+    _callEvents = ZegoUIKitPrebuiltCallEvents(
+      onCallEnd: (event, defaultAction) async {
+        _isMinimizing = false;
+        await CallCleanupCoordinator.releaseAllHardwareAndRoom();
+        await _cleanupCallStatus(
+          sendMissedPush: widget.isCaller && !_isConnected,
+        );
+        if (mounted) {
+          setState(() => _allowPop = true);
+        }
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          defaultAction.call();
+          _stopScreenSharingImmediately();
+        });
+      },
+      user: ZegoCallUserEvents(
+        onEnter: (user) {
+          if (user.id != _currentUser.uid) {
+            _markLocallyConnected();
+            CallLogHelper.markConnected(widget.callID);
+          }
+        },
+        onLeave: (user) {
+          if (user.id != _currentUser.uid) {
+            _isMinimizing = false;
+            CallCleanupCoordinator.releaseAllHardwareAndRoom();
+            _endCallFromRemote();
+          }
+        },
+      ),
+    );
 
     WidgetsBinding.instance.addObserver(this);
     CallCleanupCoordinator.attachActiveCall(
@@ -1060,8 +1192,8 @@ class _CallScreenState extends State<CallScreen> with WidgetsBindingObserver {
       _elapsedSecondsNotifier.value =
           DateTime.now().difference(start).inSeconds.clamp(0, 86400);
     });
-    if (notifyUi && mounted) {
-      setState(() {});
+    if (notifyUi) {
+      _refreshOverlayUi();
     }
   }
 
@@ -1083,6 +1215,7 @@ class _CallScreenState extends State<CallScreen> with WidgetsBindingObserver {
     _ringTimeoutTimer?.cancel();
     _durationTimer?.cancel();
     _elapsedSecondsNotifier.dispose();
+    _uiTick.dispose();
     WidgetsBinding.instance.removeObserver(this);
     CallCleanupCoordinator.detachActiveCall(_handleAppKilledDuringCall);
     _screenShareNotifier.removeListener(_onScreenShareStateChanged);
@@ -1121,7 +1254,8 @@ class _CallScreenState extends State<CallScreen> with WidgetsBindingObserver {
   Future<void> _toggleSpeaker() async {
     HapticFeedback.selectionClick();
     final next = !_isSpeakerOn;
-    setState(() => _isSpeakerOn = next);
+    _isSpeakerOn = next;
+    _refreshOverlayUi();
     await _applySpeakerRouting(next);
   }
 
@@ -1131,7 +1265,8 @@ class _CallScreenState extends State<CallScreen> with WidgetsBindingObserver {
     if (next && _screenShareNotifier.value) {
       _stopScreenSharingImmediately();
     }
-    setState(() => _isCameraOn = next);
+    _isCameraOn = next;
+    _refreshOverlayUi();
     if (next) {
       CallCleanupCoordinator.updateActiveCallMeta({'isVideo': true});
     }
@@ -1144,7 +1279,8 @@ class _CallScreenState extends State<CallScreen> with WidgetsBindingObserver {
   void _toggleMute() {
     HapticFeedback.selectionClick();
     final nextMuted = !_isMuted;
-    setState(() => _isMuted = nextMuted);
+    _isMuted = nextMuted;
+    _refreshOverlayUi();
     try {
       ZegoUIKit().turnMicrophoneOn(!nextMuted);
     } catch (_) {}
@@ -1154,7 +1290,8 @@ class _CallScreenState extends State<CallScreen> with WidgetsBindingObserver {
     if (!_isCameraOn) return;
     HapticFeedback.selectionClick();
     final nextFront = !_isFrontCamera;
-    setState(() => _isFrontCamera = nextFront);
+    _isFrontCamera = nextFront;
+    _refreshOverlayUi();
     try {
       ZegoUIKit().useFrontFacingCamera(nextFront);
     } catch (_) {}
@@ -1180,7 +1317,7 @@ class _CallScreenState extends State<CallScreen> with WidgetsBindingObserver {
       );
     }
 
-    if (mounted) setState(() {});
+    _refreshOverlayUi();
   }
 
   Future<void> _setNativeCallState(bool active) async {
@@ -1226,6 +1363,16 @@ class _CallScreenState extends State<CallScreen> with WidgetsBindingObserver {
     if (_screenShareNotifier.value) {
       _stopScreenSharingImmediately();
       return;
+    }
+
+    // Turn off camera before starting screen share to avoid encoder conflict on Android 8-16
+    if (_isCameraOn) {
+      _isCameraOn = false;
+      _refreshOverlayUi();
+      try {
+        ZegoUIKit().turnCameraOn(false);
+      } catch (_) {}
+      _syncLocalMediaFlags();
     }
 
     try {
@@ -1276,13 +1423,20 @@ class _CallScreenState extends State<CallScreen> with WidgetsBindingObserver {
         });
       }
 
-      if ((remoteCam != _isRemoteCameraOn ||
-              remoteShare != _isRemoteScreenSharing) &&
-          mounted) {
-        setState(() {
-          _isRemoteCameraOn = remoteCam;
-          _isRemoteScreenSharing = remoteShare;
-        });
+      final remoteShareChanged = remoteShare != _isRemoteScreenSharing;
+      final remoteCamChanged = remoteCam != _isRemoteCameraOn;
+
+      if (remoteCamChanged || remoteShareChanged) {
+        _isRemoteCameraOn = remoteCam;
+        _isRemoteScreenSharing = remoteShare;
+        _refreshOverlayUi();
+
+        if (remoteShareChanged && mounted) {
+          _callConfig.layout = _buildLayoutForCurrentMode();
+          _callConfig.audioVideoView.useVideoViewAspectFill =
+              !_hasRemoteScreenShare;
+          setState(() {});
+        }
       }
 
       if (_isEndedStatus(status)) {
@@ -1847,33 +2001,6 @@ class _CallScreenState extends State<CallScreen> with WidgetsBindingObserver {
 
   @override
   Widget build(BuildContext context) {
-    final userName = _currentUser.displayName ??
-        _currentUser.email?.split('@').first ??
-        'User';
-
-    final config = widget.isVideoCall
-        ? ZegoUIKitPrebuiltCallConfig.oneOnOneVideoCall()
-        : ZegoUIKitPrebuiltCallConfig.oneOnOneVoiceCall();
-
-    config.layout = _hasRemoteScreenShare
-        ? ZegoLayout.gallery(
-            showScreenSharingFullscreenModeToggleButtonRules:
-                ZegoShowFullscreenModeToggleButtonRules.alwaysShow,
-            showNewScreenSharingViewInFullscreenMode: true,
-          )
-        : ZegoLayout.pictureInPicture(
-            isSmallViewDraggable: true,
-            switchLargeOrSmallViewByClick: true,
-          );
-    config.audioVideoView.useVideoViewAspectFill = true;
-    config.duration.isVisible = false;
-    config.turnOnCameraWhenJoining = widget.isVideoCall;
-    config.turnOnMicrophoneWhenJoining = true;
-    config.useSpeakerWhenJoining = widget.isVideoCall;
-    config.topMenuBar.isVisible = false;
-    config.bottomMenuBar.isVisible = false;
-    config.pip.enableWhenBackground = false;
-
     return PopScope(
       canPop: _allowPop,
       onPopInvokedWithResult: (didPop, _) {
@@ -1883,93 +2010,14 @@ class _CallScreenState extends State<CallScreen> with WidgetsBindingObserver {
       },
       child: Scaffold(
         backgroundColor: const Color(0xFF0B141A),
-        body: Stack(
-          fit: StackFit.expand,
-          children: [
-            // 1. Live Zego video/audio/screen-share canvas
-            ZegoUIKitPrebuiltCall(
-              appID: CallScreen.zegoAppID,
-              appSign: CallScreen.zegoAppSign,
-              userID: _currentUser.uid,
-              userName: userName,
-              callID: widget.callID,
-              config: config,
-              events: ZegoUIKitPrebuiltCallEvents(
-                onCallEnd: (event, defaultAction) async {
-                  _isMinimizing = false;
-                  await CallCleanupCoordinator.releaseAllHardwareAndRoom();
-                  await _cleanupCallStatus(
-                    sendMissedPush: widget.isCaller && !_isConnected,
-                  );
-                  if (mounted) {
-                    setState(() => _allowPop = true);
-                  }
-                  WidgetsBinding.instance.addPostFrameCallback((_) {
-                    defaultAction.call();
-                    _stopScreenSharingImmediately();
-                  });
-                },
-                user: ZegoCallUserEvents(
-                  onEnter: (user) {
-                    if (user.id != _currentUser.uid) {
-                      _markLocallyConnected();
-                      CallLogHelper.markConnected(widget.callID);
-                    }
-                  },
-                  onLeave: (user) {
-                    if (user.id != _currentUser.uid) {
-                      _isMinimizing = false;
-                      CallCleanupCoordinator.releaseAllHardwareAndRoom();
-                      _endCallFromRemote();
-                    }
-                  },
-                ),
-              ),
-            ),
-
-            // 2. WhatsApp voice-call background & avatar
-            if (_showVoiceAvatarOverlay)
-              IgnorePointer(
-                child: Container(
-                  color: const Color(0xFF0B141A),
-                  child: Stack(
-                    fit: StackFit.expand,
-                    children: [
-                      const CustomPaint(painter: _WhatsAppDoodlePainter()),
-                      Center(
-                        child: Padding(
-                          padding: const EdgeInsets.only(bottom: 110),
-                          child: _buildCenterAvatar(),
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-
-            // 3. Always-visible WhatsApp Top Bar
-            Align(
-              alignment: Alignment.topCenter,
-              child: _buildWhatsAppTopBar(),
-            ),
-
-            // 4. Always-visible 5-button WhatsApp Pill Bar
-            Align(
-              alignment: Alignment.bottomCenter,
-              child: _buildWhatsAppControlCard(),
-            ),
-
-            // 5. Local Screen Sharing Overlay
-            ValueListenableBuilder<bool>(
-              valueListenable: _screenShareNotifier,
-              builder: (_, isSharing, __) {
-                if (!isSharing) return const SizedBox.shrink();
-                return SizedBox.expand(
-                  child: _buildMessengerScreenSharingOverlay(),
-                );
-              },
-            ),
-          ],
+        body: ZegoUIKitPrebuiltCall(
+          appID: CallScreen.zegoAppID,
+          appSign: CallScreen.zegoAppSign,
+          userID: _currentUser.uid,
+          userName: _userName,
+          callID: widget.callID,
+          config: _callConfig,
+          events: _callEvents,
         ),
       ),
     );
