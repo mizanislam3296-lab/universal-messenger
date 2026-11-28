@@ -941,6 +941,9 @@ class _CallScreenState extends State<CallScreen> with WidgetsBindingObserver {
   bool _isConnected = false;
   DateTime? _connectedAt;
 
+  // Tap-to-hide/show call controls
+  bool _areControlsVisible = true;
+
   // WhatsApp Call Control States
   late bool _isSpeakerOn;
   late bool _isCameraOn;
@@ -960,10 +963,18 @@ class _CallScreenState extends State<CallScreen> with WidgetsBindingObserver {
       !_isRemoteCameraOn &&
       !_hasRemoteScreenShare;
 
+  bool get _controlsShown => _showVoiceAvatarOverlay || _areControlsVisible;
+
   void _refreshOverlayUi() {
     if (mounted) {
       _uiTick.value++;
     }
+  }
+
+  void _toggleControlsVisibility() {
+    if (_showVoiceAvatarOverlay || _screenShareNotifier.value) return;
+    _areControlsVisible = !_areControlsVisible;
+    _refreshOverlayUi();
   }
 
   bool _isEndedStatus(String status) {
@@ -1016,6 +1027,8 @@ class _CallScreenState extends State<CallScreen> with WidgetsBindingObserver {
     return ValueListenableBuilder<int>(
       valueListenable: _uiTick,
       builder: (context, _, __) {
+        final showControls = _controlsShown;
+
         return Stack(
           fit: StackFit.expand,
           children: [
@@ -1039,19 +1052,53 @@ class _CallScreenState extends State<CallScreen> with WidgetsBindingObserver {
                 ),
               ),
 
-            // 2. Always-visible WhatsApp Top Bar
+            // 2. Full-screen tap listener to smoothly hide/show controls
+            if (!_showVoiceAvatarOverlay)
+              Positioned.fill(
+                child: GestureDetector(
+                  behavior: HitTestBehavior.translucent,
+                  onTap: _toggleControlsVisibility,
+                  child: const SizedBox.expand(),
+                ),
+              ),
+
+            // 3. Smoothly animated WhatsApp Top Bar
             Align(
               alignment: Alignment.topCenter,
-              child: _buildWhatsAppTopBar(),
+              child: AnimatedSlide(
+                offset: showControls ? Offset.zero : const Offset(0, -1.2),
+                duration: const Duration(milliseconds: 240),
+                curve: Curves.easeInOut,
+                child: AnimatedOpacity(
+                  opacity: showControls ? 1.0 : 0.0,
+                  duration: const Duration(milliseconds: 200),
+                  child: IgnorePointer(
+                    ignoring: !showControls,
+                    child: _buildWhatsAppTopBar(),
+                  ),
+                ),
+              ),
             ),
 
-            // 3. Always-visible 5-button WhatsApp Pill Bar
+            // 4. Smoothly animated 5-button WhatsApp Pill Bar
             Align(
               alignment: Alignment.bottomCenter,
-              child: _buildWhatsAppControlCard(),
+              child: AnimatedSlide(
+                offset: showControls ? Offset.zero : const Offset(0, 1.3),
+                duration: const Duration(milliseconds: 240),
+                curve: Curves.easeInOut,
+                child: AnimatedOpacity(
+                  opacity: showControls ? 1.0 : 0.0,
+                  duration: const Duration(milliseconds: 200),
+                  child: IgnorePointer(
+                    ignoring: !showControls,
+                    child: _buildWhatsAppControlCard(),
+                  ),
+                ),
+              ),
             ),
 
-            // 4. Local Screen Sharing Overlay
+            // 5. Local Screen Sharing Overlay
             ValueListenableBuilder<bool>(
               valueListenable: _screenShareNotifier,
               builder: (_, isSharing, __) {
@@ -1266,6 +1313,9 @@ class _CallScreenState extends State<CallScreen> with WidgetsBindingObserver {
       _stopScreenSharingImmediately();
     }
     _isCameraOn = next;
+    if (!next && _showVoiceAvatarOverlay) {
+      _areControlsVisible = true;
+    }
     _refreshOverlayUi();
     if (next) {
       CallCleanupCoordinator.updateActiveCallMeta({'isVideo': true});
@@ -1301,6 +1351,7 @@ class _CallScreenState extends State<CallScreen> with WidgetsBindingObserver {
     final sharing = _screenShareNotifier.value;
     if (sharing) {
       _wasScreenSharing = true;
+      _areControlsVisible = true;
       _setNativeScreenSharing(true);
     } else if (_wasScreenSharing) {
       _wasScreenSharing = false;
@@ -1429,6 +1480,9 @@ class _CallScreenState extends State<CallScreen> with WidgetsBindingObserver {
       if (remoteCamChanged || remoteShareChanged) {
         _isRemoteCameraOn = remoteCam;
         _isRemoteScreenSharing = remoteShare;
+        if (_showVoiceAvatarOverlay) {
+          _areControlsVisible = true;
+        }
         _refreshOverlayUi();
 
         if (remoteShareChanged && mounted) {
