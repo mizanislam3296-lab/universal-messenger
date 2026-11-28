@@ -191,8 +191,8 @@ class _ChatScreenState extends State<ChatScreen> {
   static const String _cloudName = 'tcdkckrl';
   static const String _uploadPreset = 'ml_default';
   static const int _pageSize = 40;
-  static const int _chunkSizeBytes = 6 * 1024 * 1024; // 6 MB chunks
-  static const int _maxFileSizeBytes = 100 * 1024 * 1024; // 100 MB max per file
+  static const int _chunkSizeBytes = 6 * 1024 * 1024;
+  static const int _maxFileSizeBytes = 100 * 1024 * 1024;
   static const MethodChannel _nativeChannel =
       MethodChannel('com.universal.messenger/icon');
   static final Dio _sharedDio = Dio(
@@ -513,7 +513,7 @@ class _ChatScreenState extends State<ChatScreen> {
     if (type == 'image') {
       previewText = '📷 ছবি';
     } else if (type == 'video') {
-      previewText = '🎥 ভিডিও: $previewText';
+      previewText = '🎥 ভিডিও';
     } else if (type == 'audio') {
       previewText = '🎵 অডিও: $previewText';
     } else if (type == 'pdf' || type == 'file') {
@@ -904,78 +904,177 @@ class _ChatScreenState extends State<ChatScreen> {
     }
   }
 
-  void _showReactionPicker(
-      DocumentSnapshot doc, Map<String, dynamic> data, Color barColor) {
+  Widget _buildMessengerActionBtn({
+    required IconData icon,
+    required String label,
+    required Color color,
+    required VoidCallback onTap,
+  }) {
+    return Expanded(
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(12),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 4),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(icon, color: color, size: 24),
+              const SizedBox(height: 5),
+              Text(
+                label,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  fontSize: 12,
+                  fontWeight: FontWeight.w500,
+                  color: color,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// Messenger-style combined floating Reaction Bar + Bottom Action Bar
+  void _showMessengerMessageMenu(
+      DocumentSnapshot doc, Map<String, dynamic> data, bool isMe, Color barColor) {
     HapticFeedback.mediumImpact();
+    final type = (data['type'] ?? 'text').toString();
+    final text = (data['text'] ?? '').toString();
     final rawReactions = (data['reactions'] as Map<String, dynamic>?) ?? {};
     final myEmoji = rawReactions[_currentUser.uid]?.toString();
 
     showModalBottomSheet(
       context: context,
       backgroundColor: Colors.transparent,
+      isScrollControlled: true,
       builder: (ctx) {
         final isDark = Theme.of(ctx).brightness == Brightness.dark;
+        final surfaceColor = isDark ? const Color(0xFF1F2C34) : Colors.white;
+        final primaryText = isDark ? Colors.white : Colors.black87;
+
         return SafeArea(
-          child: Padding(
-            padding: const EdgeInsets.fromLTRB(14, 0, 14, 18),
-            child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 14),
-              decoration: BoxDecoration(
-                color: isDark ? const Color(0xFF1F2C34) : Colors.white,
-                borderRadius: BorderRadius.circular(24),
-                boxShadow: const [
-                  BoxShadow(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              // Floating Emoji Reaction Pill
+              Container(
+                margin: const EdgeInsets.fromLTRB(14, 0, 14, 12),
+                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                decoration: BoxDecoration(
+                  color: surfaceColor,
+                  borderRadius: BorderRadius.circular(32),
+                  boxShadow: const [
+                    BoxShadow(
                       color: Colors.black26,
-                      blurRadius: 12,
-                      offset: Offset(0, 4))
-                ],
-              ),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  SingleChildScrollView(
-                    scrollDirection: Axis.horizontal,
-                    child: Row(
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      children: _reactionEmojis.map((emoji) {
-                        final selected = myEmoji == emoji;
-                        return GestureDetector(
-                          onTap: () async {
-                            Navigator.pop(ctx);
-                            await _toggleReaction(doc, data, emoji);
-                          },
-                          child: Container(
-                            margin: const EdgeInsets.symmetric(horizontal: 4),
-                            padding: const EdgeInsets.all(8),
-                            decoration: BoxDecoration(
-                              color: selected
-                                  ? barColor.withOpacity(0.22)
-                                  : Colors.transparent,
-                              shape: BoxShape.circle,
-                              border: selected
-                                  ? Border.all(color: barColor, width: 1.5)
-                                  : null,
-                            ),
-                            child: Text(emoji,
-                                style: const TextStyle(fontSize: 26)),
-                          ),
-                        );
-                      }).toList(),
-                    ),
-                  ),
-                  if (myEmoji != null) ...[
-                    const SizedBox(height: 6),
-                    Text(
-                      'সিলেক্ট করা ইমোজি ($myEmoji)-তে আবার ট্যাপ করলে মুছে যাবে',
-                      style: TextStyle(
-                          fontSize: 11,
-                          color:
-                              isDark ? Colors.white60 : Colors.grey.shade600),
+                      blurRadius: 14,
+                      offset: Offset(0, 4),
                     ),
                   ],
-                ],
+                ),
+                child: SingleChildScrollView(
+                  scrollDirection: Axis.horizontal,
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: _reactionEmojis.map((emoji) {
+                      final selected = myEmoji == emoji;
+                      return GestureDetector(
+                        onTap: () async {
+                          Navigator.pop(ctx);
+                          await _toggleReaction(doc, data, emoji);
+                        },
+                        child: Container(
+                          margin: const EdgeInsets.symmetric(horizontal: 3),
+                          padding: const EdgeInsets.all(7),
+                          decoration: BoxDecoration(
+                            color: selected
+                                ? barColor.withOpacity(0.22)
+                                : Colors.transparent,
+                            shape: BoxShape.circle,
+                            border: selected
+                                ? Border.all(color: barColor, width: 1.5)
+                                : null,
+                          ),
+                          child: Text(emoji, style: const TextStyle(fontSize: 25)),
+                        ),
+                      );
+                    }).toList(),
+                  ),
+                ),
               ),
-            ),
+
+              // Messenger-style Bottom Action Bar (Reply, Copy, Edit, Delete)
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.fromLTRB(8, 8, 8, 10),
+                decoration: BoxDecoration(
+                  color: surfaceColor,
+                  borderRadius: const BorderRadius.vertical(
+                    top: Radius.circular(20),
+                  ),
+                  boxShadow: const [
+                    BoxShadow(
+                      color: Colors.black26,
+                      blurRadius: 12,
+                      offset: Offset(0, -2),
+                    ),
+                  ],
+                ),
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                  children: [
+                    _buildMessengerActionBtn(
+                      icon: Icons.reply_rounded,
+                      label: 'Reply',
+                      color: primaryText,
+                      onTap: () {
+                        Navigator.pop(ctx);
+                        _selectReplyMessage(doc.id, data, isMe);
+                      },
+                    ),
+                    if (type == 'text' && text.isNotEmpty)
+                      _buildMessengerActionBtn(
+                        icon: Icons.copy_rounded,
+                        label: 'Copy',
+                        color: primaryText,
+                        onTap: () {
+                          Clipboard.setData(ClipboardData(text: text));
+                          Navigator.pop(ctx);
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            const SnackBar(
+                              content: Text('মেসেজ কপি হয়েছে'),
+                              duration: Duration(seconds: 1),
+                            ),
+                          );
+                        },
+                      ),
+                    if (isMe && type == 'text')
+                      _buildMessengerActionBtn(
+                        icon: Icons.edit_rounded,
+                        label: 'Edit',
+                        color: primaryText,
+                        onTap: () {
+                          Navigator.pop(ctx);
+                          _showEditMessageDialog(doc, text, barColor);
+                        },
+                      ),
+                    if (isMe)
+                      _buildMessengerActionBtn(
+                        icon: Icons.delete_outline_rounded,
+                        label: 'Delete',
+                        color: Colors.redAccent,
+                        onTap: () async {
+                          Navigator.pop(ctx);
+                          await _deleteMessage(doc);
+                        },
+                      ),
+                  ],
+                ),
+              ),
+            ],
           ),
         );
       },
@@ -1007,7 +1106,7 @@ class _ChatScreenState extends State<ChatScreen> {
         bottom: 4,
       ),
       child: GestureDetector(
-        onTap: () => _showReactionPicker(doc, data, barColor),
+        onTap: () => _showMessengerMessageMenu(doc, data, isMe, barColor),
         child: Wrap(
           spacing: 4,
           runSpacing: 4,
@@ -1301,7 +1400,9 @@ class _ChatScreenState extends State<ChatScreen> {
         replyPayload = null;
 
         await _updateChatSummary(
-          fileType == 'audio' ? '🎵 $fileName' : '📎 $fileName',
+          fileType == 'video'
+              ? '🎥 ভিডিও'
+              : (fileType == 'audio' ? '🎵 $fileName' : '📎 $fileName'),
           messageType: fileType,
         );
 
@@ -1310,7 +1411,9 @@ class _ChatScreenState extends State<ChatScreen> {
           title: _currentUser.displayName ?? _currentUser.email ?? 'নতুন মেসেজ',
           body: fileType == 'image'
               ? '📷 একটি ছবি পাঠিয়েছেন'
-              : (fileType == 'audio' ? '🎵 $fileName' : '📎 $fileName'),
+              : (fileType == 'video'
+                  ? '🎥 একটি ভিডিও পাঠিয়েছেন'
+                  : (fileType == 'audio' ? '🎵 $fileName' : '📎 $fileName')),
           chatId: _chatId,
         );
       }
@@ -1438,73 +1541,6 @@ class _ChatScreenState extends State<ChatScreen> {
     );
   }
 
-  void _showMessageOptions(DocumentSnapshot doc, Map<String, dynamic> data,
-      bool isMe, Color barColor) {
-    final type = (data['type'] ?? 'text').toString();
-    final text = (data['text'] ?? '').toString();
-
-    showModalBottomSheet(
-      context: context,
-      shape: const RoundedRectangleBorder(
-          borderRadius: BorderRadius.vertical(top: Radius.circular(18))),
-      builder: (ctx) => SafeArea(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            const SizedBox(height: 8),
-            Container(
-                width: 40,
-                height: 4,
-                decoration: BoxDecoration(
-                    color: Colors.grey.shade400,
-                    borderRadius: BorderRadius.circular(4))),
-            const SizedBox(height: 6),
-            ListTile(
-              leading: Icon(Icons.reply, color: barColor),
-              title: const Text('Reply'),
-              onTap: () {
-                Navigator.pop(ctx);
-                _selectReplyMessage(doc.id, data, isMe);
-              },
-            ),
-            if (type == 'text' && text.isNotEmpty)
-              ListTile(
-                leading: const Icon(Icons.copy, color: Colors.blueGrey),
-                title: const Text('Copy'),
-                onTap: () {
-                  Clipboard.setData(ClipboardData(text: text));
-                  Navigator.pop(ctx);
-                  ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-                      content: Text('মেসেজ কপি হয়েছে'),
-                      duration: Duration(seconds: 1)));
-                },
-              ),
-            if (isMe && type == 'text')
-              ListTile(
-                leading: const Icon(Icons.edit, color: Colors.orange),
-                title: const Text('Edit'),
-                onTap: () {
-                  Navigator.pop(ctx);
-                  _showEditMessageDialog(doc, text, barColor);
-                },
-              ),
-            if (isMe)
-              ListTile(
-                leading: const Icon(Icons.delete, color: Colors.red),
-                title:
-                    const Text('Delete', style: TextStyle(color: Colors.red)),
-                onTap: () async {
-                  Navigator.pop(ctx);
-                  await _deleteMessage(doc);
-                },
-              ),
-            const SizedBox(height: 8),
-          ],
-        ),
-      ),
-    );
-  }
-
   void _showEditMessageDialog(
       DocumentSnapshot doc, String oldText, Color barColor) {
     final editController = TextEditingController(text: oldText);
@@ -1584,7 +1620,7 @@ class _ChatScreenState extends State<ChatScreen> {
         newType = t;
         newLastMsg = (t == 'text' || t == 'call')
             ? (d['text'] ?? '').toString()
-            : '📎 ${d['fileName'] ?? 'File'}';
+            : (t == 'video' ? '🎥 ভিডিও' : '📎 ${d['fileName'] ?? 'File'}');
       }
 
       await FirebaseFirestore.instance.collection('chats').doc(_chatId).set({
@@ -1768,6 +1804,7 @@ class _ChatScreenState extends State<ChatScreen> {
       );
     }
 
+    // Clean Video Card (No file name shown)
     if (type == 'video') {
       return GestureDetector(
         onTap: () => _openInAppMediaViewer(
@@ -1778,75 +1815,60 @@ class _ChatScreenState extends State<ChatScreen> {
         ),
         child: Container(
           width: 225,
+          height: 155,
           decoration: BoxDecoration(
             color: const Color(0xFF141A21),
             borderRadius: BorderRadius.circular(12),
           ),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
+          child: Stack(
+            alignment: Alignment.center,
             children: [
-              SizedBox(
-                height: 130,
-                width: double.infinity,
-                child: Stack(
-                  alignment: Alignment.center,
-                  children: [
-                    const Icon(Icons.movie_rounded,
-                        size: 56, color: Colors.white24),
-                    Container(
-                      padding: const EdgeInsets.all(10),
-                      decoration: BoxDecoration(
-                        color: accentColor.withOpacity(0.9),
-                        shape: BoxShape.circle,
-                      ),
-                      child: const Icon(Icons.play_arrow_rounded,
-                          color: Colors.white, size: 32),
-                    ),
-                    Positioned(
-                      right: 8,
-                      bottom: 8,
-                      child: GestureDetector(
-                        onTap: () => _downloadMediaToPhone(
-                          url: fileUrl,
-                          fileName:
-                              fileName.isNotEmpty ? fileName : 'video.mp4',
-                          mediaType: 'video',
-                        ),
-                        child: Container(
-                          padding: const EdgeInsets.all(6),
-                          decoration: const BoxDecoration(
-                            color: Colors.black54,
-                            shape: BoxShape.circle,
-                          ),
-                          child: const Icon(Icons.download_rounded,
-                              color: Colors.white, size: 18),
-                        ),
-                      ),
-                    ),
-                  ],
+              const Icon(Icons.movie_rounded, size: 58, color: Colors.white12),
+              Container(
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: accentColor.withOpacity(0.92),
+                  shape: BoxShape.circle,
                 ),
+                child: const Icon(Icons.play_arrow_rounded,
+                    color: Colors.white, size: 34),
               ),
-              Padding(
-                padding: const EdgeInsets.fromLTRB(10, 6, 10, 8),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      fileName,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(
-                        color: Colors.white,
-                        fontWeight: FontWeight.w600,
-                        fontSize: 13,
-                      ),
+              if (fileSize.isNotEmpty)
+                Positioned(
+                  left: 8,
+                  bottom: 8,
+                  child: Container(
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
+                    decoration: BoxDecoration(
+                      color: Colors.black54,
+                      borderRadius: BorderRadius.circular(8),
                     ),
-                    Text(
-                      '${fileSize.isNotEmpty ? '$fileSize • ' : ''}ট্যাপ করে প্লে করুন',
+                    child: Text(
+                      fileSize,
                       style:
-                          const TextStyle(color: Colors.white70, fontSize: 11),
+                          const TextStyle(color: Colors.white, fontSize: 11),
                     ),
-                  ],
+                  ),
+                ),
+              Positioned(
+                right: 8,
+                bottom: 8,
+                child: GestureDetector(
+                  onTap: () => _downloadMediaToPhone(
+                    url: fileUrl,
+                    fileName: fileName.isNotEmpty ? fileName : 'video.mp4',
+                    mediaType: 'video',
+                  ),
+                  child: Container(
+                    padding: const EdgeInsets.all(6),
+                    decoration: const BoxDecoration(
+                      color: Colors.black54,
+                      shape: BoxShape.circle,
+                    ),
+                    child: const Icon(Icons.download_rounded,
+                        color: Colors.white, size: 18),
+                  ),
                 ),
               ),
             ],
@@ -2214,10 +2236,9 @@ class _ChatScreenState extends State<ChatScreen> {
                                         : CrossAxisAlignment.start,
                                     children: [
                                       GestureDetector(
-                                        onTap: () => _showMessageOptions(
-                                            doc, data, isMe, barColor),
-                                        onLongPress: () => _showReactionPicker(
-                                            doc, data, barColor),
+                                        onLongPress: () =>
+                                            _showMessengerMessageMenu(
+                                                doc, data, isMe, barColor),
                                         child: Container(
                                           margin: const EdgeInsets.symmetric(
                                               vertical: 4),
@@ -2701,7 +2722,7 @@ class _InAppMediaViewerScreenState extends State<_InAppMediaViewerScreen> {
         backgroundColor: Colors.black87,
         foregroundColor: Colors.white,
         title: Text(
-          widget.fileName,
+          widget.isVideo ? 'ভিডিও' : widget.fileName,
           maxLines: 1,
           overflow: TextOverflow.ellipsis,
           style: const TextStyle(fontSize: 15),
