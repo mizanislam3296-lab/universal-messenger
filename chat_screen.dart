@@ -15,6 +15,8 @@ import 'package:video_player/video_player.dart';
 import 'package:universal_messenger/screens/call_screen.dart';
 import 'package:universal_messenger/screens/settings_screen.dart';
 
+class _UploadCancelledException implements Exception {}
+
 class _NativeChatInputController {
   MethodChannel? _channel;
   String _text = '';
@@ -189,13 +191,14 @@ class _ChatScreenState extends State<ChatScreen> {
   static const String _cloudName = 'tcdkckrl';
   static const String _uploadPreset = 'ml_default';
   static const int _pageSize = 40;
+  static const int _chunkSizeBytes = 6 * 1024 * 1024; // 6 MB chunks for stability
   static const MethodChannel _nativeChannel =
       MethodChannel('com.universal.messenger/icon');
   static final Dio _sharedDio = Dio(
     BaseOptions(
-      connectTimeout: const Duration(seconds: 25),
-      receiveTimeout: const Duration(minutes: 5),
-      sendTimeout: const Duration(minutes: 5),
+      connectTimeout: const Duration(seconds: 30),
+      receiveTimeout: const Duration(minutes: 10),
+      sendTimeout: const Duration(minutes: 10),
     ),
   );
   static const List<String> _reactionEmojis = [
@@ -228,6 +231,9 @@ class _ChatScreenState extends State<ChatScreen> {
   bool _isUploading = false;
   double _uploadProgress = 0.0;
   String _uploadingFileName = '';
+  String _uploadingFileSize = '';
+  CancelToken? _uploadCancelToken;
+
   bool _isTyping = false;
   Timer? _typingTimer;
 
@@ -301,6 +307,9 @@ class _ChatScreenState extends State<ChatScreen> {
   void dispose() {
     if (NotificationAndPresenceService.activeChatId == _chatId) {
       NotificationAndPresenceService.activeChatId = null;
+    }
+    if (_uploadCancelToken != null && !_uploadCancelToken!.isCancelled) {
+      _uploadCancelToken!.cancel('Chat screen closed');
     }
     _typingTimer?.cancel();
     _scrollController.removeListener(_onScroll);
@@ -448,11 +457,22 @@ class _ChatScreenState extends State<ChatScreen> {
         lower.endsWith('.jpeg') ||
         lower.endsWith('.png') ||
         lower.endsWith('.gif') ||
-        lower.endsWith('.webp')) return 'image';
+        lower.endsWith('.webp') ||
+        lower.endsWith('.bmp') ||
+        lower.endsWith('.heic')) return 'image';
     if (lower.endsWith('.mp4') ||
         lower.endsWith('.mkv') ||
         lower.endsWith('.mov') ||
-        lower.endsWith('.avi')) return 'video';
+        lower.endsWith('.avi') ||
+        lower.endsWith('.webm') ||
+        lower.endsWith('.3gp')) return 'video';
+    if (lower.endsWith('.mp3') ||
+        lower.endsWith('.wav') ||
+        lower.endsWith('.aac') ||
+        lower.endsWith('.m4a') ||
+        lower.endsWith('.ogg') ||
+        lower.endsWith('.opus') ||
+        lower.endsWith('.flac')) return 'audio';
     if (lower.endsWith('.pdf')) return 'pdf';
     return 'file';
   }
@@ -491,6 +511,8 @@ class _ChatScreenState extends State<ChatScreen> {
       previewText = '📷 ছবি';
     } else if (type == 'video') {
       previewText = '🎥 ভিডিও: $previewText';
+    } else if (type == 'audio') {
+      previewText = '🎵 অডিও: $previewText';
     } else if (type == 'pdf' || type == 'file') {
       previewText = '📎 $previewText';
     }
@@ -1026,6 +1048,161 @@ class _ChatScreenState extends State<ChatScreen> {
     );
   }
 
+  void _cancelUpload() {
+    if (_uploadCancelToken != null && !_uploadCancelToken!.isCancelled) {
+      _uploadCancelToken!.cancel('User cancelled upload');
+    }
+  }
+
+  Future<T> _uploadWithRetry<T>({
+    required Future<T> Function() action,
+    required CancelToken cancelToken,
+    int maxAttempts = 3,
+  }) async {
+    int attempt = 0;
+    while (true) {
+      if (cancelToken.isCancelled) throw _UploadCancelledException();
+      attempt++;
+      try {
+        return await action();
+      } on DioException catch (e) {
+        if (CancelToken.isCancel(e) || cancelToken.isCancelled) {
+          throw _UploadCancelledException();
+        }
+        if (attempt >= maxAttempts) rethrow;
+        await Future.delayed(Duration(seconds: attempt * 2));
+      } catch (e) {
+        if (e is _UploadCancelledException || cancelToken.isCancelled) {
+          throw _UploadCancelledException();
+        }
+        if (attempt >= maxAttempts) rethrow;
+        await Future.delayed(Duration(seconds: attempt * 2));
+      }
+    }
+  }
+
+  Future<String> _uploadFileToCloudinary({
+    required File file,
+    required String fileName,
+    required String fileType,
+    required CancelToken cancelToken,
+  }) async {
+    final totalBytes = await file.length();
+    if (totalBytes <= 0) {
+      throw Exception('খালি ফাইল আপলোড করা যাবে না।');
+    }
+
+    // ছবি, ভিডিও ও অডিও বাদে বাকি সব ফরম্যাট (PDF, ZIP, APK, DOCX ইত্যাদি) 'raw' এন্ডপয়েন্টে যাবে
+    final resourceType =
+        (fileType == 'image' || fileType == 'video' || fileType == 'audio')
+            ? 'auto'
+            : 'raw';
+    final uploadUrl =
+        'https://api.cloudinary.com/v1_1/$_cloudName/$resourceType/upload';
+
+    // ৬ MB বা তার ছোট ফাইল একবারে আপলোড (অটো-রিট্রাই সহ)
+    if (totalBytes <= _chunkSizeBytes) {
+      return _uploadWithRetry(
+        cancelToken: cancelToken,
+        action: () async {
+          final formData = FormData.fromMap({
+            'file': await MultipartFile.fromFile(file.path, filename: fileName),
+            'upload_preset': _uploadPreset,
+            'folder': 'universal_messenger/$_chatId',
+          });
+          final response = await _sharedDio.post(
+            uploadUrl,
+            data: formData,
+            cancelToken: cancelToken,
+            onSendProgress: (sent, total) {
+              if (total > 0 && mounted) {
+                setState(() {
+                  _uploadProgress = (sent / total).clamp(0.0, 1.0);
+                });
+              }
+            },
+          );
+          final url = response.data['secure_url']?.toString() ?? '';
+          if (url.isEmpty) throw Exception('ফাইল লিংক পাওয়া যায়নি।');
+          return url;
+        },
+      );
+    }
+
+    // ৬ MB-এর বড় ফাইল হলে ৬ MB করে চাঙ্কড আপলোড (errno 103 প্রতিরোধ ও দ্রুত আপলোড)
+    final uniqueUploadId =
+        'um_${DateTime.now().millisecondsSinceEpoch}_${math.Random().nextInt(999999)}';
+    final raf = await file.open(mode: FileMode.read);
+    try {
+      int offset = 0;
+      String finalUrl = '';
+
+      while (offset < totalBytes) {
+        if (cancelToken.isCancelled) throw _UploadCancelledException();
+
+        final int currentChunkSize =
+            math.min(_chunkSizeBytes, totalBytes - offset);
+        await raf.setPosition(offset);
+        final Uint8List chunkBytes = await raf.read(currentChunkSize);
+        final int start = offset;
+        final int end = offset + chunkBytes.length - 1;
+
+        final chunkResponse = await _uploadWithRetry(
+          cancelToken: cancelToken,
+          action: () async {
+            final formData = FormData.fromMap({
+              'file': MultipartFile.fromBytes(chunkBytes, filename: fileName),
+              'upload_preset': _uploadPreset,
+              'folder': 'universal_messenger/$_chatId',
+            });
+
+            return await _sharedDio.post(
+              uploadUrl,
+              data: formData,
+              cancelToken: cancelToken,
+              options: Options(
+                headers: {
+                  'X-Unique-Upload-Id': uniqueUploadId,
+                  'Content-Range': 'bytes $start-$end/$totalBytes',
+                },
+              ),
+              onSendProgress: (sent, total) {
+                if (total > 0 && mounted) {
+                  final chunkFraction = (sent / total).clamp(0.0, 1.0);
+                  final uploadedSoFar =
+                      start + (chunkFraction * chunkBytes.length);
+                  setState(() {
+                    _uploadProgress =
+                        (uploadedSoFar / totalBytes).clamp(0.0, 1.0);
+                  });
+                }
+              },
+            );
+          },
+        );
+
+        if (chunkResponse.data is Map &&
+            chunkResponse.data['secure_url'] != null) {
+          finalUrl = chunkResponse.data['secure_url'].toString();
+        }
+
+        offset += chunkBytes.length;
+        if (mounted) {
+          setState(() {
+            _uploadProgress = (offset / totalBytes).clamp(0.0, 1.0);
+          });
+        }
+      }
+
+      if (finalUrl.isEmpty) {
+        throw Exception('ফাইল লিংক পাওয়া যায়নি।');
+      }
+      return finalUrl;
+    } finally {
+      await raf.close();
+    }
+  }
+
   Future<void> _pickAndSendFile() async {
     if (_isUploading) return;
     try {
@@ -1039,32 +1216,25 @@ class _ChatScreenState extends State<ChatScreen> {
       final fileSize = _formatFileSize(await file.length());
       final fileType = _detectFileType(fileName);
       final replyPayload = _replyingTo;
+      final cancelToken = CancelToken();
 
       setState(() {
         _isUploading = true;
         _uploadProgress = 0.0;
         _uploadingFileName = fileName;
+        _uploadingFileSize = fileSize;
+        _uploadCancelToken = cancelToken;
         _replyingTo = null;
       });
 
-      final formData = FormData.fromMap({
-        'file': await MultipartFile.fromFile(file.path, filename: fileName),
-        'upload_preset': _uploadPreset,
-        'folder': 'universal_messenger/$_chatId',
-      });
-
-      final response = await _sharedDio.post(
-        'https://api.cloudinary.com/v1_1/$_cloudName/auto/upload',
-        data: formData,
-        onSendProgress: (sent, total) {
-          if (total > 0 && mounted) {
-            setState(() => _uploadProgress = sent / total);
-          }
-        },
+      final downloadUrl = await _uploadFileToCloudinary(
+        file: file,
+        fileName: fileName,
+        fileType: fileType,
+        cancelToken: cancelToken,
       );
 
-      final downloadUrl = response.data['secure_url']?.toString() ?? '';
-      if (downloadUrl.isEmpty) throw Exception('ফাইল লিংক পাওয়া যায়নি।');
+      if (cancelToken.isCancelled) throw _UploadCancelledException();
 
       await FirebaseFirestore.instance
           .collection('chats')
@@ -1083,27 +1253,53 @@ class _ChatScreenState extends State<ChatScreen> {
         if (replyPayload != null) 'replyTo': replyPayload,
         'timestamp': FieldValue.serverTimestamp(),
       });
-      await _updateChatSummary('📎 $fileName', messageType: fileType);
+      await _updateChatSummary(
+        fileType == 'audio' ? '🎵 $fileName' : '📎 $fileName',
+        messageType: fileType,
+      );
 
       FcmPushService.sendPushToUser(
         receiverId: widget.receiverId,
         title: _currentUser.displayName ?? _currentUser.email ?? 'নতুন মেসেজ',
-        body: fileType == 'image' ? '📷 একটি ছবি পাঠিয়েছেন' : '📎 $fileName',
+        body: fileType == 'image'
+            ? '📷 একটি ছবি পাঠিয়েছেন'
+            : (fileType == 'audio' ? '🎵 $fileName' : '📎 $fileName'),
         chatId: _chatId,
       );
-    } catch (e) {
+    } on _UploadCancelledException {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-            content: Text('ফাইল পাঠাতে সমস্যা হয়েছে: $e'),
-            backgroundColor: Colors.red.shade700),
+        const SnackBar(
+          content: Text('ফাইল আপলোড বাতিল করা হয়েছে'),
+          duration: Duration(seconds: 2),
+        ),
       );
+    } catch (e) {
+      if (e is DioException && CancelToken.isCancel(e)) {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('ফাইল আপলোড বাতিল করা হয়েছে'),
+            duration: Duration(seconds: 2),
+          ),
+        );
+      } else {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('ফাইল পাঠাতে সমস্যা হয়েছে: $e'),
+            backgroundColor: Colors.red.shade700,
+          ),
+        );
+      }
     } finally {
       if (mounted) {
         setState(() {
           _isUploading = false;
           _uploadProgress = 0.0;
           _uploadingFileName = '';
+          _uploadingFileSize = '';
+          _uploadCancelToken = null;
         });
       }
     }
@@ -1611,9 +1807,26 @@ class _ChatScreenState extends State<ChatScreen> {
 
     IconData iconData = Icons.insert_drive_file;
     Color iconColor = accentColor;
+    final lowerName = fileName.toLowerCase();
     if (type == 'pdf') {
       iconData = Icons.picture_as_pdf;
       iconColor = Colors.red.shade700;
+    } else if (type == 'audio') {
+      iconData = Icons.audiotrack_rounded;
+      iconColor = Colors.deepPurple;
+    } else if (lowerName.endsWith('.zip') ||
+        lowerName.endsWith('.rar') ||
+        lowerName.endsWith('.7z')) {
+      iconData = Icons.folder_zip_rounded;
+      iconColor = Colors.amber.shade800;
+    } else if (lowerName.endsWith('.apk')) {
+      iconData = Icons.android_rounded;
+      iconColor = Colors.green.shade700;
+    } else if (lowerName.endsWith('.doc') ||
+        lowerName.endsWith('.docx') ||
+        lowerName.endsWith('.txt')) {
+      iconData = Icons.description_rounded;
+      iconColor = Colors.blue.shade700;
     }
 
     return InkWell(
@@ -1674,8 +1887,8 @@ class _ChatScreenState extends State<ChatScreen> {
         return ValueListenableBuilder<String?>(
           valueListenable: AppSettingsController.chatThemeImage,
           builder: (context, chatImagePath, _) {
-            final isDefaultBg =
-                chatColor.value == AppSettingsController.defaultChatBgColor.value;
+            final isDefaultBg = chatColor.value ==
+                AppSettingsController.defaultChatBgColor.value;
             final barColor = isDefaultBg
                 ? AppSettingsController.appThemeColor.value
                 : chatColor;
@@ -1773,36 +1986,78 @@ class _ChatScreenState extends State<ChatScreen> {
                   children: [
                     if (_isUploading)
                       Container(
-                        color: Colors.teal.shade50,
+                        color: isDark
+                            ? const Color(0xFF1F2C34)
+                            : Colors.teal.shade50,
                         padding: const EdgeInsets.symmetric(
-                            horizontal: 16, vertical: 8),
+                            horizontal: 14, vertical: 8),
                         child: Column(
                           children: [
                             Row(
-                              mainAxisAlignment: MainAxisAlignment.spaceBetween,
                               children: [
                                 Expanded(
-                                    child: Text(
-                                        'আপলোড হচ্ছে: $_uploadingFileName',
-                                        maxLines: 1,
-                                        overflow: TextOverflow.ellipsis,
-                                        style: const TextStyle(
-                                            fontSize: 12,
-                                            fontWeight: FontWeight.w600,
-                                            color: Colors.black87))),
-                                Text(
-                                    '${(_uploadProgress * 100).toStringAsFixed(0)}%',
+                                  child: Text(
+                                    'আপলোড হচ্ছে: $_uploadingFileName${_uploadingFileSize.isNotEmpty ? ' ($_uploadingFileSize)' : ''}',
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
                                     style: TextStyle(
-                                        fontSize: 12,
-                                        fontWeight: FontWeight.bold,
-                                        color: barColor)),
+                                      fontSize: 12,
+                                      fontWeight: FontWeight.w600,
+                                      color: isDark
+                                          ? Colors.white
+                                          : Colors.black87,
+                                    ),
+                                  ),
+                                ),
+                                const SizedBox(width: 8),
+                                Text(
+                                  '${(_uploadProgress * 100).toStringAsFixed(0)}%',
+                                  style: TextStyle(
+                                    fontSize: 12,
+                                    fontWeight: FontWeight.bold,
+                                    color: isDark
+                                        ? Colors.lightGreenAccent
+                                        : barColor,
+                                  ),
+                                ),
+                                const SizedBox(width: 8),
+                                InkWell(
+                                  onTap: _cancelUpload,
+                                  borderRadius: BorderRadius.circular(14),
+                                  child: Container(
+                                    padding: const EdgeInsets.symmetric(
+                                        horizontal: 8, vertical: 4),
+                                    decoration: BoxDecoration(
+                                      color: Colors.red.shade600,
+                                      borderRadius: BorderRadius.circular(14),
+                                    ),
+                                    child: const Row(
+                                      mainAxisSize: MainAxisSize.min,
+                                      children: [
+                                        Icon(Icons.close,
+                                            size: 14, color: Colors.white),
+                                        SizedBox(width: 2),
+                                        Text(
+                                          'বাতিল',
+                                          style: TextStyle(
+                                            fontSize: 11,
+                                            fontWeight: FontWeight.bold,
+                                            color: Colors.white,
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                ),
                               ],
                             ),
                             const SizedBox(height: 6),
                             LinearProgressIndicator(
-                                value:
-                                    _uploadProgress > 0 ? _uploadProgress : null,
-                                color: barColor),
+                              value:
+                                  _uploadProgress > 0 ? _uploadProgress : null,
+                              color: barColor,
+                              minHeight: 4,
+                            ),
                           ],
                         ),
                       ),
